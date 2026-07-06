@@ -101,6 +101,23 @@ core/
   `core/claude_learned_schemas.py`; put custom tools (like the browser) in their
   own module and register them in `core/chat.py`.
 
+## Optional: MCP Inspector (Node)
+
+The app itself is **pure Python — Node.js is not required to run it.** The only
+Node dependency in `package.json` is
+[`@modelcontextprotocol/inspector`](https://github.com/modelcontextprotocol/inspector),
+an optional browser-based tool for inspecting MCP servers (e.g. hand-calling the
+tools your n8n endpoint exposes). `node_modules/` is gitignored and fully
+regenerable from the committed `package.json` / `package-lock.json`:
+
+```bash
+npm install                              # rebuilds node_modules/ from the lockfile
+npx @modelcontextprotocol/inspector      # launch the inspector
+```
+
+If you don't use the Inspector you can ignore — or delete — `package.json`,
+`package-lock.json`, and `node_modules/`; the chat app never touches them.
+
 ## Notes
 
 - **No approval gating** — Claude runs whatever bash commands, file edits,
