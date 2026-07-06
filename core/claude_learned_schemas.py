@@ -1,0 +1,138 @@
+import asyncio
+import subprocess
+from pathlib import Path
+
+# Anthropic-defined ("learned") tool schemas. Claude already knows how to use
+# these, so they carry no description.
+#   bash + text_editor      -> client-executed (we run them below)
+#   web_search + web_fetch  -> server-executed by Anthropic (no executor here)
+
+BASH_TOOL = {"type": "bash_20250124", "name": "bash"}
+TEXT_EDITOR_TOOL = {
+    "type": "text_editor_20250728",
+    "name": "str_replace_based_edit_tool",
+}
+WEB_SEARCH_TOOL = {"type": "web_search_20260209", "name": "web_search"}
+WEB_FETCH_TOOL = {"type": "web_fetch_20260209", "name": "web_fetch"}
+
+TOOLS = [BASH_TOOL, TEXT_EDITOR_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL]
+
+# Tool names we execute locally. web_search / web_fetch run on Anthropic's side
+# and never come back to us as tool_use blocks.
+_LOCAL = {"bash", "str_replace_based_edit_tool"}
+
+_MAX_OUTPUT = 12000
+
+
+def handles(name: str) -> bool:
+    return name in _LOCAL
+
+
+async def execute(name: str, tool_input: dict) -> str:
+    # Run blocking work off the event loop.
+    if name == "bash":
+        return await asyncio.to_thread(_run_bash, tool_input)
+    if name == "str_replace_based_edit_tool":
+        return await asyncio.to_thread(_run_text_editor, tool_input)
+    return f"Error: {name} is not locally executable"
+
+
+def _clip(text: str) -> str:
+    if len(text) > _MAX_OUTPUT:
+        return text[:_MAX_OUTPUT] + f"\n…[truncated, {len(text) - _MAX_OUTPUT} more chars]"
+    return text
+
+
+# --- bash ---------------------------------------------------------------
+# Note: each call is a fresh subprocess, so shell state (cwd, env, variables)
+# does NOT persist between calls. Chain with `&&` / `cd x && ...` when needed.
+def _run_bash(tool_input: dict) -> str:
+    if tool_input.get("restart"):
+        return "bash tool restarted"
+    command = tool_input.get("command", "")
+    if not command:
+        return "Error: no command provided"
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        return "Error: command timed out after 120s"
+    except Exception as e:
+        return f"Error running command: {e}"
+
+    out = result.stdout or ""
+    if result.stderr:
+        out += ("\n" if out else "") + result.stderr
+    if not out:
+        out = f"(no output; exit code {result.returncode})"
+    return _clip(out)
+
+
+# --- text editor --------------------------------------------------------
+def _run_text_editor(tool_input: dict) -> str:
+    command = tool_input.get("command")
+    path = tool_input.get("path", "")
+    try:
+        if command == "view":
+            return _view(path, tool_input.get("view_range"))
+        if command == "create":
+            Path(path).write_text(tool_input.get("file_text", ""))
+            return f"File created: {path}"
+        if command == "str_replace":
+            return _str_replace(
+                path, tool_input.get("old_str", ""), tool_input.get("new_str", "")
+            )
+        if command == "insert":
+            return _insert(
+                path,
+                int(tool_input.get("insert_line", 0)),
+                tool_input.get("insert_text", ""),
+            )
+        return f"Error: unknown text_editor command {command!r}"
+    except FileNotFoundError:
+        return f"Error: no such file: {path}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def _view(path: str, view_range) -> str:
+    p = Path(path)
+    if p.is_dir():
+        return "\n".join(sorted(x.name for x in p.iterdir())) or "(empty directory)"
+    lines = p.read_text().splitlines()
+    start, end = 1, len(lines)
+    if view_range:
+        start, end = view_range[0], view_range[1]
+        if end == -1:
+            end = len(lines)
+    start = max(start, 1)
+    end = min(end, len(lines))
+    numbered = [f"{i}\t{lines[i - 1]}" for i in range(start, end + 1)]
+    return _clip("\n".join(numbered)) or "(empty file)"
+
+
+def _str_replace(path: str, old: str, new: str) -> str:
+    p = Path(path)
+    content = p.read_text()
+    count = content.count(old)
+    if count == 0:
+        return "Error: old_str not found; no changes made"
+    if count > 1:
+        return f"Error: old_str matched {count} times; it must match exactly once"
+    p.write_text(content.replace(old, new, 1))
+    return f"Edited {path}"
+
+
+def _insert(path: str, line: int, text: str) -> str:
+    p = Path(path)
+    lines = p.read_text().splitlines()
+    if line < 0 or line > len(lines):
+        return f"Error: insert_line {line} out of range (0..{len(lines)})"
+    lines.insert(line, text)
+    p.write_text("\n".join(lines) + "\n")
+    return f"Inserted text after line {line} in {path}"
