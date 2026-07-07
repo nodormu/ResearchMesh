@@ -57,7 +57,8 @@ def _run_bash(tool_input: dict) -> str:
             command,
             shell=True,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=120,
         )
     except subprocess.TimeoutExpired:
@@ -81,7 +82,7 @@ def _run_text_editor(tool_input: dict) -> str:
         if command == "view":
             return _view(path, tool_input.get("view_range"))
         if command == "create":
-            Path(path).write_text(tool_input.get("file_text", ""))
+            Path(path).write_text(tool_input.get("file_text", ""), encoding="utf-8")
             return f"File created: {path}"
         if command == "str_replace":
             return _str_replace(
@@ -104,7 +105,7 @@ def _view(path: str, view_range) -> str:
     p = Path(path)
     if p.is_dir():
         return "\n".join(sorted(x.name for x in p.iterdir())) or "(empty directory)"
-    lines = p.read_text().splitlines()
+    lines = p.read_text(encoding="utf-8").splitlines()
     start, end = 1, len(lines)
     if view_range:
         start, end = view_range[0], view_range[1]
@@ -118,21 +119,21 @@ def _view(path: str, view_range) -> str:
 
 def _str_replace(path: str, old: str, new: str) -> str:
     p = Path(path)
-    content = p.read_text()
+    content = p.read_text(encoding="utf-8")
     count = content.count(old)
     if count == 0:
         return "Error: old_str not found; no changes made"
     if count > 1:
         return f"Error: old_str matched {count} times; it must match exactly once"
-    p.write_text(content.replace(old, new, 1))
+    p.write_text(content.replace(old, new, 1), encoding="utf-8")
     return f"Edited {path}"
 
 
 def _insert(path: str, line: int, text: str) -> str:
     p = Path(path)
-    lines = p.read_text().splitlines()
+    lines = p.read_text(encoding="utf-8").splitlines()
     if line < 0 or line > len(lines):
         return f"Error: insert_line {line} out of range (0..{len(lines)})"
     lines.insert(line, text)
-    p.write_text("\n".join(lines) + "\n")
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return f"Inserted text after line {line} in {path}"
