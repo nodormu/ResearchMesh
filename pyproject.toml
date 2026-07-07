@@ -1,5 +1,5 @@
 [project]
-name = "claude-cli-research-assistant"
+name = "linux-cli-research-client-for-claude"
 version = "0.1.0"
 description = "Claude Research Assistant for Linux CLI with extended tools and functions."
 readme = "README.md"

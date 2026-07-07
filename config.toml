@@ -1,4 +1,4 @@
-# MCP Chat configuration.
+# Linux CLI Research Client for Claude — configuration.
 #
 # Non-secret settings only. The n8n Bearer token is NOT stored here — it stays
 # in the N8N_MCP_TOKEN environment variable (see SETUP.md).

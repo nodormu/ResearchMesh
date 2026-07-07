@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-MCP Chat is a command-line chat client for the Anthropic API, built on the Model Context Protocol (MCP). The CLI talks to Claude and to one or more MCP servers, and additionally gives Claude a set of **local tools** (Anthropic's built-in "learned" tool schemas plus a custom Playwright browser tool). It began as a learning/tutorial project (a Skilljar submodule) but has since been rewired to connect to an external **n8n** MCP server over HTTP instead of the original bundled stdio document server.
+Linux CLI Research Client for Claude is a command-line chat client for the Anthropic API, built on the Model Context Protocol (MCP). The CLI talks to Claude and to one or more MCP servers, and additionally gives Claude a set of **local tools** (Anthropic's built-in "learned" tool schemas plus a custom Playwright browser tool). It began as a learning/tutorial project (a Skilljar submodule) but has since been rewired to connect to an external **n8n** MCP server over HTTP instead of the original bundled stdio document server.
 
 ## Commands
 

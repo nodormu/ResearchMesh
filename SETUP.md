@@ -1,6 +1,6 @@
 # Setup
 
-Environment setup for MCP Chat. Run all commands from the **project root** (the
+Environment setup for Linux CLI Research Client for Claude. Run all commands from the **project root** (the
 folder containing `main.py`), not from `core/`.
 
 ## Prerequisites

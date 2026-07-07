@@ -1,4 +1,6 @@
-# MCP Chat
+# Linux CLI Research Client for Claude
+
+> *Unofficial, community-built client — not affiliated with or endorsed by Anthropic. "Claude" is a trademark of Anthropic.*
 
 A command-line chat client for the Anthropic API, built on the Model Context
 Protocol (MCP). It runs an interactive terminal REPL against Claude and gives

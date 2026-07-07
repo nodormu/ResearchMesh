@@ -1,4 +1,4 @@
-# Runtime dependencies for MCP Chat.
+# Runtime dependencies for Linux CLI Research Client for Claude.
 #   pip install -r requirements.txt
 #   playwright install chromium    # one-time: downloads the headless browser (pip does NOT)
 
