@@ -80,6 +80,48 @@ Connect additional stdio MCP servers by passing their scripts as arguments:
 Exit the REPL with **Ctrl-C** — this closes the headless browser and the n8n
 connection cleanly.
 
+## HTTPS and TLS certificates
+
+The n8n URL may be `http://` or `https://` — set the scheme in `config.toml`
+(or the `N8N_MCP_URL` env var). TLS is handled by the underlying `httpx` client
+inside `mcp_client.py`, which **verifies the server's certificate**. Validation
+is done **client-side and offline** against a local CA bundle — the CA is not
+contacted at connect time.
+
+- **Valid, publicly-signed certificate** (Let's Encrypt, DigiCert, …) — works
+  with **no configuration**. `httpx` trusts it via its bundled `certifi` roots.
+  Just use an `https://` URL.
+
+- **Self-signed or internal / private-CA certificate** — the private CA isn't in
+  `certifi`, so verification fails by default. Point `httpx` at a CA bundle
+  containing your CA via an environment variable (honored by httpx 0.28):
+
+  ```bash
+  export SSL_CERT_FILE=/path/to/your-ca-chain.pem   # single PEM file
+  # or, for an OpenSSL-style hashed directory of CAs:
+  export SSL_CERT_DIR=/etc/my-cas
+  ```
+
+  Important details:
+
+  - `SSL_CERT_FILE` **replaces** the default trust store for the process — it
+    does *not* add to `certifi`. Put your CA's **root** in that file (plus the
+    intermediate if your server doesn't send it). If the same process also needs
+    to reach public HTTPS hosts, concatenate the public roots into the bundle:
+    ```bash
+    cat "$(python -m certifi)" your-ca.pem > combined-ca.pem
+    export SSL_CERT_FILE=$PWD/combined-ca.pem
+    ```
+  - Export it for the **user account that runs the app**, per the `.bashrc` /
+    login-shell rules in §3.
+  - The OS trust store (`update-ca-certificates`, `/etc/ssl/certs`) does **not**
+    affect this app — `httpx` reads `certifi` / `SSL_CERT_FILE`, not the OS store.
+
+- **Server-side reminder:** the n8n server (or its reverse proxy) must present
+  its **full chain** (leaf + intermediates). A missing intermediate is the most
+  common "the cert is valid but it still won't connect" cause, and the fix is on
+  the server, not here — the client only needs the **root** in its bundle.
+
 ## Notes
 
 - The Claude model is hardcoded in `main.py` (`claude_model = "claude-sonnet-5"`).
