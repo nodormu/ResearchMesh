@@ -74,3 +74,25 @@ connection cleanly.
 - There are no tests, linters, or type checks. Sanity-check edits with
   `python -m py_compile` and an import smoke test
   (`PYTHONPATH=.. python -c "import core.chat"`).
+
+## Built and tested on
+
+Reference environment this project was developed and run on:
+
+| Component  | Version |
+|------------|---------|
+| OS         | Ubuntu 26.04 LTS (kernel 7.0.0-27-generic) |
+| Python     | 3.14.4 |
+| Node.js    | v24.16.0 — **compiled from source** (installed under `~/nodejs`, not via apt) |
+| npm        | 11.17.0 |
+| Playwright | 1.61.0 (Chromium) |
+
+Notes:
+
+- `pyproject.toml` only requires Python 3.10+; 3.14 is simply what it was run on.
+- Node.js was built from source rather than installed via `apt`, so `node`/`npm`
+  live under `~/nodejs/bin` (on `PATH`) instead of `/usr/bin`. Node is needed
+  **only** for the optional MCP Inspector — see the README.
+- The `sudo playwright install-deps` step above assumes a Debian/Ubuntu `apt`
+  system.
+
