@@ -7,6 +7,3 @@ mcp[cli]>=1.8.0          # MCP client + Streamable HTTP transport
 prompt-toolkit>=3.0.51   # interactive CLI REPL
 pydantic>=2.0            # imported directly in mcp_client.py (AnyUrl); also required by mcp/anthropic
 playwright>=1.40.0       # headless browser tool (core/browser.py)
-
-# Declared in pyproject.toml but not currently imported anywhere in the code:
-# python-dotenv>=1.1.0
