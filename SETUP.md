@@ -82,19 +82,23 @@ connection cleanly.
 
 ## Configuration file (`config.toml`)
 
-Non-secret settings live in `config.toml` at the project root. Right now it holds
-the n8n endpoint URL:
+Non-secret settings live in `config.toml` at the project root. It holds the n8n
+endpoint URL and an enable/disable toggle:
 
 ```toml
 [n8n]
+enabled = true
 url = "http://192.168.2.12:5678/mcp-server/http"
 ```
 
-- The `N8N_MCP_URL` environment variable **overrides** this value when set.
+- Set `enabled = false` to **skip the n8n connection entirely** (e.g. when the
+  server is off). The app still runs with its local tools (`bash`, editor,
+  `web_search`, `web_fetch`, browser). Defaults to `true` if omitted.
+- The `N8N_MCP_URL` environment variable **overrides** the URL when set.
 - The n8n **token is never stored here** — it stays in the `N8N_MCP_TOKEN`
   environment variable (see §3).
-- If neither `config.toml` nor `N8N_MCP_URL` provides a URL, the app exits with a
-  clear message telling you to set one.
+- If n8n is enabled but neither `config.toml` nor `N8N_MCP_URL` provides a URL,
+  the app exits with a clear message telling you to set one.
 
 ## HTTPS and TLS certificates
 

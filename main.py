@@ -30,7 +30,9 @@ def _load_config() -> dict:
 
 
 _config = _load_config()
-N8N_MCP_URL = os.getenv("N8N_MCP_URL") or _config.get("n8n", {}).get("url")
+_n8n_config = _config.get("n8n", {})
+N8N_ENABLED = _n8n_config.get("enabled", True)  # default on
+N8N_MCP_URL = os.getenv("N8N_MCP_URL") or _n8n_config.get("url")
 N8N_MCP_TOKEN = os.getenv("N8N_MCP_TOKEN")  # your n8n Bearer token (env only)
 
 
@@ -53,8 +55,11 @@ async def main():
     clients = {}
 
     async with AsyncExitStack() as stack:
-        n8n_client = await stack.enter_async_context(build_primary_client())
-        clients["n8n"] = n8n_client
+        if N8N_ENABLED:
+            n8n_client = await stack.enter_async_context(build_primary_client())
+            clients["n8n"] = n8n_client
+        else:
+            print("[n8n MCP disabled in config.toml — running with local tools only]")
 
         for i, server_script in enumerate(server_scripts):
             client_id = f"client_{i}_{server_script}"
