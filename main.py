@@ -48,6 +48,34 @@ def build_primary_client() -> MCPClient:
     return MCPClient(transport="http", url=N8N_MCP_URL, headers=headers)
 
 
+async def _connect_n8n(stack: AsyncExitStack, clients: dict) -> bool:
+    """Connect the n8n client and register it. On failure, print an actionable
+    message (no traceback) and return False so the caller can exit cleanly."""
+    n8n_client = build_primary_client()
+    try:
+        await n8n_client.connect()
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        # A failed connect raises CancelledError from connect() and surfaces the
+        # real cause (e.g. ConnectError) from cleanup(); swallow both quietly.
+        try:
+            await n8n_client.cleanup()
+        except BaseException:
+            pass
+        print(
+            f"\nCould not connect to the n8n MCP server at {N8N_MCP_URL}.\n"
+            "  - Start (or restore network access to) your n8n server, then retry, or\n"
+            "  - Set  enabled = false  under [n8n] in config.toml to run without it\n"
+            "    (the app still works with its local tools: bash, editor, web, browser).",
+            file=sys.stderr,
+        )
+        return False
+    stack.push_async_callback(n8n_client.cleanup)
+    clients["n8n"] = n8n_client
+    return True
+
+
 async def main():
     claude_service = Claude(model=claude_model)
 
@@ -56,8 +84,8 @@ async def main():
 
     async with AsyncExitStack() as stack:
         if N8N_ENABLED:
-            n8n_client = await stack.enter_async_context(build_primary_client())
-            clients["n8n"] = n8n_client
+            if not await _connect_n8n(stack, clients):
+                return
         else:
             print("[n8n MCP disabled in config.toml — running with local tools only]")
 
