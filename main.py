@@ -13,11 +13,7 @@ from core import browser
 # Anthropic Config
 api_key = os.getenv("ANTHROPIC_API_KEY") # api key is in .bashrc file, which is why this is here
 client = Anthropic(api_key=api_key)
-claude_model = "claude-sonnet-5"
-
-# n8n MCP server (Streamable HTTP). The endpoint URL comes from config.toml so
-# it isn't hardcoded; the N8N_MCP_URL environment variable overrides it when set.
-# The Bearer token stays in the environment (N8N_MCP_TOKEN) — never in config.
+# Configuration file (config.toml) — non-secret settings.
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.toml")
 
 
@@ -30,6 +26,15 @@ def _load_config() -> dict:
 
 
 _config = _load_config()
+
+# Claude model: config.toml [claude] model, overridable by the CLAUDE_MODEL env var.
+claude_model = os.getenv("CLAUDE_MODEL") or _config.get("claude", {}).get(
+    "model", "claude-sonnet-5"
+)
+
+# n8n MCP server (Streamable HTTP). The endpoint URL comes from config.toml so
+# it isn't hardcoded; the N8N_MCP_URL environment variable overrides it when set.
+# The Bearer token stays in the environment (N8N_MCP_TOKEN) — never in config.
 _n8n_config = _config.get("n8n", {})
 N8N_ENABLED = _n8n_config.get("enabled", True)  # default on
 N8N_MCP_URL = os.getenv("N8N_MCP_URL") or _n8n_config.get("url")

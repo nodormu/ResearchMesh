@@ -46,7 +46,7 @@ There are **no tests, linters, or type checks** configured. Sanity-check edits w
 - `ANTHROPIC_API_KEY` — read from the environment. `main.py` keeps an explicit `os.getenv("ANTHROPIC_API_KEY")` reference on purpose (the user runs a global key from `~/.bashrc`); **do not remove it** even though `core/claude.py` also constructs its own `Anthropic()` that reads the same env var.
 - `N8N_MCP_TOKEN` — Bearer token for the n8n MCP server. Sent as `Authorization: Bearer <token>`.
 - `N8N_MCP_URL` — optional override of the n8n endpoint (default `http://192.168.2.12:5678/mcp-server/http`, Streamable HTTP).
-- **Gotcha:** `main.py` hardcodes `claude_model = "claude-sonnet-5"`. The `CLAUDE_MODEL` / `USE_UV` variables in `.env` are *not* wired up — change the model in `main.py` directly.
+- The Claude model comes from `config.toml` (`[claude] model`), overridable by the `CLAUDE_MODEL` env var (default `claude-sonnet-5`). **`.env` is not loaded by the app** — the old `.env` `CLAUDE_MODEL` / `USE_UV` variables were never wired up and have been removed.
 - The 2026 web-tool schemas (`web_search_20260209` / `web_fetch_20260209`) need a current `anthropic` SDK to parse the server-tool result blocks (`pip install -U anthropic`).
 - Python 3.10+ (`pyproject.toml`).
 

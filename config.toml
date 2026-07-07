@@ -3,6 +3,10 @@
 # Non-secret settings only. The n8n Bearer token is NOT stored here — it stays
 # in the N8N_MCP_TOKEN environment variable (see SETUP.md).
 
+[claude]
+# Anthropic model to use. The CLAUDE_MODEL environment variable overrides this.
+model = "claude-sonnet-5"
+
 [n8n]
 # Set enabled = false to skip connecting to the n8n MCP server entirely (e.g.
 # when it's turned off). The app still runs with its local tools.

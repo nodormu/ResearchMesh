@@ -82,15 +82,20 @@ connection cleanly.
 
 ## Configuration file (`config.toml`)
 
-Non-secret settings live in `config.toml` at the project root. It holds the n8n
-endpoint URL and an enable/disable toggle:
+Non-secret settings live in `config.toml` at the project root — the Claude model
+and the n8n endpoint/toggle:
 
 ```toml
+[claude]
+model = "claude-sonnet-5"
+
 [n8n]
 enabled = true
 url = "http://192.168.2.12:5678/mcp-server/http"
 ```
 
+- `[claude] model` selects the Anthropic model; the `CLAUDE_MODEL` environment
+  variable **overrides** it (defaults to `claude-sonnet-5` if omitted).
 - Set `enabled = false` to **skip the n8n connection entirely** (e.g. when the
   server is off). The app still runs with its local tools (`bash`, editor,
   `web_search`, `web_fetch`, browser). Defaults to `true` if omitted.
@@ -144,7 +149,8 @@ contacted at connect time.
 
 ## Notes
 
-- The Claude model is hardcoded in `main.py` (`claude_model = "claude-sonnet-5"`).
+- The Claude model is set in `config.toml` (`[claude] model`); the `CLAUDE_MODEL`
+  environment variable overrides it.
 - There are no tests, linters, or type checks. Sanity-check edits with
   `python -m py_compile` and an import smoke test
   (`PYTHONPATH=.. python -c "import core.chat"`).

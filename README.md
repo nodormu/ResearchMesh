@@ -66,12 +66,15 @@ python mcp_client.py     # connects, lists tools, exits
 
 ## Configuration
 
-The n8n endpoint URL and an enable/disable toggle live in **`config.toml`** at
-the project root; the `N8N_MCP_URL` environment variable overrides the URL.
-Secrets are never stored in the file — the token stays in the environment.
+Non-secret settings live in **`config.toml`** at the project root — the Claude
+model and the n8n endpoint/toggle. The matching environment variable overrides
+each value. Secrets are never stored in the file.
 
 ```toml
 # config.toml
+[claude]
+model = "claude-sonnet-5"   # CLAUDE_MODEL env var overrides this
+
 [n8n]
 enabled = true   # false = skip n8n, run with local tools only
 url = "http://192.168.2.12:5678/mcp-server/http"
@@ -82,8 +85,7 @@ url = "http://192.168.2.12:5678/mcp-server/http"
 | `ANTHROPIC_API_KEY` | Anthropic API key (required) |
 | `N8N_MCP_TOKEN` | n8n Bearer token (required, unless n8n is disabled) |
 | `N8N_MCP_URL` | Override the `config.toml` n8n endpoint (optional) |
-
-The Claude model is hardcoded in `main.py` (`claude_model = "claude-sonnet-5"`).
+| `CLAUDE_MODEL` | Override the `config.toml` Claude model (optional) |
 
 ## Project layout
 
