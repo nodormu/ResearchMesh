@@ -1,6 +1,7 @@
 import asyncio
 import sys
 import os
+import tomllib
 from anthropic import Anthropic
 from contextlib import AsyncExitStack
 from mcp_client import MCPClient
@@ -14,13 +15,31 @@ api_key = os.getenv("ANTHROPIC_API_KEY") # api key is in .bashrc file, which is 
 client = Anthropic(api_key=api_key)
 claude_model = "claude-sonnet-5"
 
-# n8n MCP server (Streamable HTTP). Token is read from the environment so it
-# never lives in source. Override the URL via env too if it differs.
-N8N_MCP_URL = os.getenv("N8N_MCP_URL", "http://192.168.2.12:5678/mcp-server/http")
-N8N_MCP_TOKEN = os.getenv("N8N_MCP_TOKEN")  # your n8n Bearer token
+# n8n MCP server (Streamable HTTP). The endpoint URL comes from config.toml so
+# it isn't hardcoded; the N8N_MCP_URL environment variable overrides it when set.
+# The Bearer token stays in the environment (N8N_MCP_TOKEN) — never in config.
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.toml")
+
+
+def _load_config() -> dict:
+    try:
+        with open(CONFIG_PATH, "rb") as f:
+            return tomllib.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+_config = _load_config()
+N8N_MCP_URL = os.getenv("N8N_MCP_URL") or _config.get("n8n", {}).get("url")
+N8N_MCP_TOKEN = os.getenv("N8N_MCP_TOKEN")  # your n8n Bearer token (env only)
 
 
 def build_primary_client() -> MCPClient:
+    if not N8N_MCP_URL:
+        raise SystemExit(
+            "No n8n URL configured. Set [n8n] url in config.toml, "
+            "or the N8N_MCP_URL environment variable."
+        )
     headers = (
         {"Authorization": f"Bearer {N8N_MCP_TOKEN}"} if N8N_MCP_TOKEN else None
     )

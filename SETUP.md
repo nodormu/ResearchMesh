@@ -80,6 +80,22 @@ Connect additional stdio MCP servers by passing their scripts as arguments:
 Exit the REPL with **Ctrl-C** — this closes the headless browser and the n8n
 connection cleanly.
 
+## Configuration file (`config.toml`)
+
+Non-secret settings live in `config.toml` at the project root. Right now it holds
+the n8n endpoint URL:
+
+```toml
+[n8n]
+url = "http://192.168.2.12:5678/mcp-server/http"
+```
+
+- The `N8N_MCP_URL` environment variable **overrides** this value when set.
+- The n8n **token is never stored here** — it stays in the `N8N_MCP_TOKEN`
+  environment variable (see §3).
+- If neither `config.toml` nor `N8N_MCP_URL` provides a URL, the app exits with a
+  clear message telling you to set one.
+
 ## HTTPS and TLS certificates
 
 The n8n URL may be `http://` or `https://` — set the scheme in `config.toml`

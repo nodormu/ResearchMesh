@@ -1,0 +1,9 @@
+# MCP Chat configuration.
+#
+# Non-secret settings only. The n8n Bearer token is NOT stored here — it stays
+# in the N8N_MCP_TOKEN environment variable (see SETUP.md).
+
+[n8n]
+# n8n MCP Server Trigger endpoint (Streamable HTTP transport).
+# The N8N_MCP_URL environment variable, if set, overrides this value.
+url = "http://192.168.2.12:5678/mcp-server/http"
