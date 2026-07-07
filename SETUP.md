@@ -51,8 +51,20 @@ export N8N_MCP_TOKEN=...         # n8n Bearer token
 export N8N_MCP_URL=...           # optional: override the n8n endpoint
 ```
 
-If you add these to `~/.bashrc`, open a fresh shell (or `source ~/.bashrc`)
-before launching so they're exported first.
+These must be exported in the environment of the **user account you launch the
+app as** — `main.py` calls `os.getenv(...)` directly and does not read a `.env`
+file. To persist them across sessions, add the `export` lines above to that
+user's shell startup file:
+
+- `~/.bashrc` — interactive non-login shells (the usual case for a local terminal)
+- `~/.bash_profile` or `~/.profile` — login shells (e.g. SSH sessions)
+
+After editing, open a fresh shell (or run `source ~/.bashrc`) so the variables
+are exported *before* you launch. Verify without revealing the values:
+
+```bash
+echo "key: ${ANTHROPIC_API_KEY:+set}  token: ${N8N_MCP_TOKEN:+set}"
+```
 
 ## 4. Run
 
