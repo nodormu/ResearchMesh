@@ -46,6 +46,8 @@ so a Claude subscription won't work.
 servers pointing at a private LAN address — replace those URLs with your own, or set
 `enabled = false` to run on the 16 local tools alone.
 
+mcp_client.py is just a script to connect to your MCP server and pull a list of tools, be sure you change the IP address in the code.
+
 ```bash
 sudo apt install python3 python3-venv python3-dev build-essential libreoffice pandoc
 
@@ -56,7 +58,7 @@ pip install -r requirements.txt
 playwright install chromium           # pip installs the package, not the browser
 sudo playwright install-deps chromium
 
-export ANTHROPIC_API_KEY=sk-ant-...   # add to ~/.bashrc to keep it
+export ANTHROPIC_API_KEY=sk-ant-...   # add to ~/.bashrc to keep it, and put your N8N API key in .bashrc as well, or you will have to rewrite code to make it elsewhere if not exporting it before runnning main.py
 
 python main.py
 ```

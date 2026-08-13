@@ -9,7 +9,7 @@ model = "claude-sonnet-5"
 
 [mcp]
 # Set enabled = false to skip every MCP server and run with local tools only.
-enabled = true
+enabled = false
 
 # MCP servers to connect to, over Streamable HTTP. Every reachable one connects
 # and its tools are merged into the single list Claude sees; an unreachable one
