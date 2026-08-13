@@ -43,7 +43,7 @@ TOOLS = [
                 "key_path": {
                     "type": "string",
                     "description": (
-                        "Dotted path to the key, e.g. 'n8n.enabled' or "
+                        "Dotted path to the key, e.g. 'claude.model' or "
                         "'tools[2].name'. Omit to read the whole document."
                     ),
                 },

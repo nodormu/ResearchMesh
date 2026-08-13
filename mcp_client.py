@@ -10,8 +10,8 @@ from mcp.client.sse import sse_client
 from pydantic import AnyUrl
 
 try:
-    # Streamable HTTP transport (mcp >= 1.8.0). This is what n8n's MCP Server
-    # Trigger exposes when configured as `"type": "http"`.
+    # Streamable HTTP transport (mcp >= 1.8.0). This is what most remote MCP
+    # servers expose today — n8n's MCP Server Trigger, FastMCP-based servers, etc.
     from mcp.client.streamable_http import streamablehttp_client
 except ImportError:  # older mcp SDK without Streamable HTTP support
     streamablehttp_client = None
@@ -28,7 +28,7 @@ class MCPClient:
     - http:  connects to a remote server's Streamable HTTP endpoint (`url`).
 
     For the remote transports (sse / http) pass optional `headers` for auth,
-    e.g. {"Authorization": "Bearer <token>"} for n8n's Bearer auth.
+    e.g. {"Authorization": "Bearer <token>"} for a server using Bearer auth.
     """
 
     def __init__(
@@ -148,21 +148,48 @@ class MCPClient:
         await self.cleanup()
 
 
-# For testing the client standalone. Point it at your n8n MCP server:
-#   N8N_MCP_URL=http://192.168.2.12:5678/mcp-server/http \
-#   N8N_MCP_TOKEN=<your token> python mcp_client.py
+# Standalone check of every server in config.toml — connect, list tools, exit:
+#   python mcp_client.py
+# Or test one endpoint without touching the config:
+#   MCP_URL=http://host:8000/mcp MCP_TOKEN=<token> python mcp_client.py
 async def main():
     import os
+    import tomllib
+    from pathlib import Path
 
-    url = os.getenv("N8N_MCP_URL", "http://192.168.2.12:5678/mcp-server/http")
-    token = os.getenv("N8N_MCP_TOKEN")
-    headers = {"Authorization": f"Bearer {token}"} if token else None
+    if os.getenv("MCP_URL"):
+        servers = [{"name": "MCP_URL", "url": os.getenv("MCP_URL")}]
+        tokens = {"MCP_URL": os.getenv("MCP_TOKEN")}
+    else:
+        config_path = Path(__file__).with_name("config.toml")
+        try:
+            with open(config_path, "rb") as f:
+                servers = tomllib.load(f).get("mcp", {}).get("servers", [])
+        except FileNotFoundError:
+            print(f"No {config_path.name} found, and MCP_URL is not set.")
+            return
+        tokens = {
+            s.get("name", ""): os.getenv(s["token_env"]) if s.get("token_env") else None
+            for s in servers
+        }
 
-    async with MCPClient(transport="http", url=url, headers=headers) as client:
-        tools = await client.list_tools()
-        print(f"Connected to {url} — {len(tools)} tool(s):")
-        for tool in tools:
-            print(f"  - {tool.name}: {tool.description}")
+    if not servers:
+        print("No servers configured under [mcp] in config.toml.")
+        return
+
+    for index, server in enumerate(servers):
+        name = server.get("name") or f"server_{index}"
+        url = server.get("url")
+        token = tokens.get(name)
+        headers = {"Authorization": f"Bearer {token}"} if token else None
+        try:
+            async with MCPClient(transport="http", url=url, headers=headers) as client:
+                tools = await client.list_tools()
+                print(f"\n{name}: {url} — {len(tools)} tool(s)")
+                for tool in tools:
+                    print(f"  - {tool.name}: {tool.description}")
+        except BaseException as e:
+            print(f"\n{name}: {url} — FAILED ({type(e).__name__}: {e})")
 
 
 if __name__ == "__main__":

@@ -32,54 +32,68 @@ claude_model = os.getenv("CLAUDE_MODEL") or _config.get("claude", {}).get(
     "model", "claude-sonnet-5"
 )
 
-# n8n MCP server (Streamable HTTP). The endpoint URL comes from config.toml so
-# it isn't hardcoded; the N8N_MCP_URL environment variable overrides it when set.
-# The Bearer token stays in the environment (N8N_MCP_TOKEN) — never in config.
-_n8n_config = _config.get("n8n", {})
-N8N_ENABLED = _n8n_config.get("enabled", True)  # default on
-N8N_MCP_URL = os.getenv("N8N_MCP_URL") or _n8n_config.get("url")
-N8N_MCP_TOKEN = os.getenv("N8N_MCP_TOKEN")  # your n8n Bearer token (env only)
+# MCP servers (Streamable HTTP), declared as a list in config.toml so adding one
+# is a config edit rather than a code change. Bearer tokens stay in the
+# environment: each entry's `token_env` names the variable holding its token.
+_mcp_config = _config.get("mcp", {})
+MCP_ENABLED = _mcp_config.get("enabled", True)  # default on
+MCP_SERVERS = _mcp_config.get("servers", [])
 
 
-def build_primary_client() -> MCPClient:
-    if not N8N_MCP_URL:
-        raise SystemExit(
-            "No n8n URL configured. Set [n8n] url in config.toml, "
-            "or the N8N_MCP_URL environment variable."
-        )
-    headers = (
-        {"Authorization": f"Bearer {N8N_MCP_TOKEN}"} if N8N_MCP_TOKEN else None
-    )
-    return MCPClient(transport="http", url=N8N_MCP_URL, headers=headers)
+def build_client(server: dict, name: str) -> MCPClient:
+    """One Streamable HTTP MCPClient from a [mcp].servers entry."""
+    url = server.get("url")
+    if not url:
+        raise ValueError("no 'url' in its config.toml entry")
 
-
-async def _connect_n8n(stack: AsyncExitStack, clients: dict) -> bool:
-    """Connect the n8n client and register it. On failure, print an actionable
-    message (no traceback) and return False so the caller can exit cleanly."""
-    n8n_client = build_primary_client()
-    try:
-        await n8n_client.connect()
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
-        # A failed connect raises CancelledError from connect() and surfaces the
-        # real cause (e.g. ConnectError) from cleanup(); swallow both quietly.
-        try:
-            await n8n_client.cleanup()
-        except BaseException:
-            pass
+    token_env = server.get("token_env")
+    token = os.getenv(token_env) if token_env else None
+    if token_env and not token:
         print(
-            f"\nCould not connect to the n8n MCP server at {N8N_MCP_URL}.\n"
-            "  - Start (or restore network access to) your n8n server, then retry, or\n"
-            "  - Set  enabled = false  under [n8n] in config.toml to run without it\n"
-            "    (the app still works with its local tools: bash, editor, web,\n"
-            "    browser, python, documents, config, sql, trash).",
+            f"[mcp] {name}: {token_env} is not set — connecting without auth",
             file=sys.stderr,
         )
-        return False
-    stack.push_async_callback(n8n_client.cleanup)
-    clients["n8n"] = n8n_client
-    return True
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+    return MCPClient(transport="http", url=url, headers=headers)
+
+
+async def _connect_mcp_servers(stack: AsyncExitStack, clients: dict) -> None:
+    """Connect every configured server. A server that fails is reported and
+    skipped, so one unreachable endpoint doesn't take the whole app down."""
+    for index, server in enumerate(MCP_SERVERS):
+        name = server.get("name") or f"server_{index}"
+
+        if not server.get("enabled", True):
+            print(f"[mcp] {name}: disabled in config.toml")
+            continue
+
+        try:
+            client = build_client(server, name)
+        except ValueError as e:
+            print(f"[mcp] {name}: skipped — {e}", file=sys.stderr)
+            continue
+
+        try:
+            await client.connect()
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            # A failed connect raises CancelledError from connect() and surfaces
+            # the real cause (e.g. ConnectError) from cleanup(); swallow both and
+            # report the endpoint instead of dumping a traceback.
+            try:
+                await client.cleanup()
+            except BaseException:
+                pass
+            print(
+                f"[mcp] {name}: could not reach {server.get('url')} — skipped",
+                file=sys.stderr,
+            )
+            continue
+
+        stack.push_async_callback(client.cleanup)
+        clients[name] = client
+        print(f"[mcp] {name}: connected")
 
 
 async def main():
@@ -89,11 +103,17 @@ async def main():
     clients = {}
 
     async with AsyncExitStack() as stack:
-        if N8N_ENABLED:
-            if not await _connect_n8n(stack, clients):
-                return
+        if MCP_ENABLED and MCP_SERVERS:
+            await _connect_mcp_servers(stack, clients)
+            if not clients:
+                print(
+                    "[mcp] no server connected — running with local tools only",
+                    file=sys.stderr,
+                )
+        elif not MCP_ENABLED:
+            print("[mcp] disabled in config.toml — running with local tools only")
         else:
-            print("[n8n MCP disabled in config.toml — running with local tools only]")
+            print("[mcp] no servers configured — running with local tools only")
 
         for i, server_script in enumerate(server_scripts):
             client_id = f"client_{i}_{server_script}"

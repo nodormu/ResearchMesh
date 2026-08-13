@@ -1,17 +1,31 @@
 # Linux CLI Research Client for Claude — configuration.
 #
-# Non-secret settings only. The n8n Bearer token is NOT stored here — it stays
-# in the N8N_MCP_TOKEN environment variable (see README.md).
+# Non-secret settings only. MCP bearer tokens are NOT stored here: each server
+# names the environment variable that holds its token (see README.md).
 
 [claude]
 # Anthropic model to use. The CLAUDE_MODEL environment variable overrides this.
 model = "claude-sonnet-5"
 
-[n8n]
-# Set enabled = false to skip connecting to the n8n MCP server entirely (e.g.
-# when it's turned off). The app still runs with its local tools.
-enabled = true # set true if your n8n/mcp server is reachable/turned on
+[mcp]
+# Set enabled = false to skip every MCP server and run with local tools only.
+enabled = true
 
-# n8n MCP Server Trigger endpoint (Streamable HTTP transport).
-# The N8N_MCP_URL environment variable, if set, overrides this value.
-url = "http://192.168.2.12:5678/mcp-server/http"
+# MCP servers to connect to, over Streamable HTTP. Every reachable one connects
+# and its tools are merged into the single list Claude sees; an unreachable one
+# prints a warning and is skipped, so one server being down doesn't stop the app.
+#
+#   name       label used as the client id and in messages
+#   url        the server's Streamable HTTP endpoint
+#   token_env  optional — the environment variable holding this server's bearer
+#              token. Omit for a server that needs no auth. Never put the token
+#              itself here; this file is committed.
+#   enabled    optional (default true) — park a server without deleting its line
+servers = [
+  { name = "n8n",    url = "http://192.168.2.12:5678/mcp-server/http", token_env = "N8N_MCP_TOKEN" },
+  { name = "alpaca", url = "http://192.168.2.12:8000/mcp" },
+]
+
+# For a local stdio MCP server (one the client launches as a subprocess rather
+# than connecting to over HTTP), pass its script as an argument instead:
+#   python main.py path/to/server.py

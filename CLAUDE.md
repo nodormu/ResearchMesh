@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-Linux CLI Research Client for Claude is a command-line chat client for the Anthropic API, built on the Model Context Protocol (MCP). The CLI talks to Claude and to one or more MCP servers, and additionally gives Claude **16 local tools** — Anthropic's built-in "learned" schemas (bash, text editor, web search/fetch) plus custom ones for DOM browsing, document conversion, stateful Python, interactive commands, config editing, SQL, and recoverable deletes. It began as a learning/tutorial project (a Skilljar submodule) but has since been rewired to connect to an external **n8n** MCP server over HTTP instead of the original bundled stdio document server.
+Linux CLI Research Client for Claude is a command-line chat client for the Anthropic API, built on the Model Context Protocol (MCP). The CLI talks to Claude and to one or more MCP servers, and additionally gives Claude **16 local tools** — Anthropic's built-in "learned" schemas (bash, text editor, web search/fetch) plus custom ones for DOM browsing, document conversion, stateful Python, interactive commands, config editing, SQL, and recoverable deletes. It began as a learning/tutorial project (a Skilljar submodule) but has since been rewired to connect to any number of external MCP servers over Streamable HTTP, declared as a list under `[mcp]` in `config.toml`, instead of the original bundled stdio document server.
 
 ## Commands
 
@@ -18,10 +18,10 @@ Requires two environment variables (both read from the shell — the app does no
 
 ```bash
 export ANTHROPIC_API_KEY=...   # in practice lives in ~/.bashrc
-export N8N_MCP_TOKEN=...        # n8n Bearer token
+export N8N_MCP_TOKEN=...        # one per server, named by its token_env in config.toml
 ```
 
-Smoke-test the MCP client against the n8n server standalone (connects, lists tools, exits):
+Check every configured MCP server standalone (connects to each, lists tools, reports failures, exits):
 
 ```bash
 python mcp_client.py
@@ -47,20 +47,19 @@ There are **no tests, linters, or type checks** configured. Sanity-check edits w
 ## Runtime configuration
 
 - `ANTHROPIC_API_KEY` — read from the environment. `main.py` keeps an explicit `os.getenv("ANTHROPIC_API_KEY")` reference on purpose (the user runs a global key from `~/.bashrc`); **do not remove it** even though `core/claude.py` also constructs its own `Anthropic()` that reads the same env var.
-- `N8N_MCP_TOKEN` — Bearer token for the n8n MCP server. Sent as `Authorization: Bearer <token>`.
-- `N8N_MCP_URL` — optional override of the n8n endpoint (default `http://192.168.2.12:5678/mcp-server/http`, Streamable HTTP).
+- **MCP bearer tokens** — each `[mcp].servers` entry may set `token_env` naming the environment variable that holds its token; it is sent as `Authorization: Bearer <token>`. A server with no `token_env` connects unauthenticated. Tokens are never stored in `config.toml`.
 - `CLAUDE_SHOW_USAGE` — set to `1` to print per-request token and prompt-cache counters (see `core/chat.py`). Prompt caching fails silently, so this is how you confirm the `cache_control` breakpoint is landing.
-- The Claude model comes from `config.toml` (`[claude] model`), overridable by the `CLAUDE_MODEL` env var (default `claude-sonnet-5`). The app does **not** load a `.env` file — `ANTHROPIC_API_KEY` and `N8N_MCP_TOKEN` come from the shell environment (e.g. `~/.bashrc`).
+- The Claude model comes from `config.toml` (`[claude] model`), overridable by the `CLAUDE_MODEL` env var (default `claude-sonnet-5`). The app does **not** load a `.env` file — `ANTHROPIC_API_KEY` and any MCP tokens come from the shell environment (e.g. `~/.bashrc`).
 - The 2026 web-tool schemas (`web_search_20260209` / `web_fetch_20260209`) need a current `anthropic` SDK to parse the server-tool result blocks (`pip install -U anthropic`).
 - Python 3.11+ (`pyproject.toml`) — the floor is `tomllib`, used by `main.py`.
 
 ## Architecture
 
-Request flow: **CLI input → Chat.run() agentic loop → Claude API + (local tools | n8n MCP tools)**.
+Request flow: **CLI input → Chat.run() agentic loop → Claude API + (local tools | MCP server tools)**.
 
-- **`main.py`** — entrypoint (in the repo root). Reads the API key, builds a `Claude` service, opens the n8n MCP client over Streamable HTTP via `build_primary_client()` (plus any stdio servers passed as argv), registers `local_tools.shutdown` on the `AsyncExitStack`, wires everything into a `Chat`, and runs the `CliApp` loop.
+- **`main.py`** — entrypoint (in the repo root). Reads the API key, builds a `Claude` service, connects every enabled `[mcp].servers` entry over Streamable HTTP via `build_client()` / `_connect_mcp_servers()` — a server that fails is reported and skipped rather than aborting startup — plus any stdio servers passed as argv, registers `local_tools.shutdown` on the `AsyncExitStack`, wires everything into a `Chat`, and runs the `CliApp` loop.
 
-- **`core/chat.py`** (`Chat`) — the agentic loop, plus `SYSTEM_PROMPT`, sent as `system` on every request. That prompt exists because with tool schemas alone Claude describes capabilities it doesn't have (it invented a sandboxed `code_execution` container in testing); it states the two execution locations, that nothing is sandboxed, which tools are stateful, and how to choose between the overlapping ones. Keep it factual — if you add or remove a tool, update it. Each turn it calls Claude with the merged tool set (`local_tools.TOOLS + ToolManager.get_all_tools(...)`, the MCP half fetched once per turn). While `stop_reason == "tool_use"` it routes each `tool_use` block — `local_tools.execute()` first, then `ToolManager.execute_blocks()` (n8n/MCP) if no local module owns the name — feeds the results back, and loops. `stop_reason == "pause_turn"` (server-side web tools mid-run) is handled by resending. Capped at `MAX_TOOL_ITERATIONS`.
+- **`core/chat.py`** (`Chat`) — the agentic loop, plus `SYSTEM_PROMPT`, sent as `system` on every request. That prompt exists because with tool schemas alone Claude describes capabilities it doesn't have (it invented a sandboxed `code_execution` container in testing); it states the two execution locations, that nothing is sandboxed, which tools are stateful, and how to choose between the overlapping ones. Keep it factual — if you add or remove a tool, update it. Each turn it calls Claude with the merged tool set (`local_tools.TOOLS + ToolManager.get_all_tools(...)`, the MCP half fetched once per turn). While `stop_reason == "tool_use"` it routes each `tool_use` block — `local_tools.execute()` first, then `ToolManager.execute_blocks()` (MCP) if no local module owns the name — feeds the results back, and loops. `stop_reason == "pause_turn"` (server-side web tools mid-run) is handled by resending. Capped at `MAX_TOOL_ITERATIONS`.
 
 - **`core/local_tools.py`** — the registry of client-executed tools. Every module in `MODULES` exposes the same three names (`TOOLS`, `handles(name)`, `await execute(name, input)`), so a new tool is one new module plus one line here rather than edits to the chat loop's declaration list *and* its routing chain. Raises at import on duplicate tool names, and `shutdown()` releases everything the tools may have started (browser, kernel, DuckDB).
 
@@ -84,22 +83,22 @@ Request flow: **CLI input → Chat.run() agentic loop → Claude API + (local to
 
 - **`core/claude.py`** (`Claude`) — thin Anthropic SDK wrapper. Two things to know before editing `chat()`: **no sampling parameters** — current models reject a non-default `temperature`/`top_p`/`top_k` with a 400 and only accept the default, so sending one can only fail; and **no `budget_tokens`** — adaptive thinking replaced it (`{"type": "enabled", "budget_tokens": N}` is a 400 now), with `output_config={"effort": ...}` as the depth knob if ever needed. Also open: `stop_sequences=[]` is a mutable default argument and is sent empty on every request, and `max_tokens=8000` is shared by thinking *and* the reply — a `/think` turn on a hard problem can end in `stop_reason: "max_tokens"`; raise it (streaming is advisable much above ~16K). `chat()` builds request params (max_tokens 8000, optional thinking/tools/system); helpers append user/assistant messages and extract text blocks.
 
-- **`core/tools.py`** (`ToolManager`) — the MCP↔Anthropic bridge (n8n tools only). `get_all_tools` aggregates tool schemas across all MCP clients (called once per user turn by `Chat`, not per tool-use iteration); `execute_blocks` executes a list of `tool_use` blocks against the owning client, resolving owners via one `_tool_owners` map per call.
+- **`core/tools.py`** (`ToolManager`) — the MCP↔Anthropic bridge (remote server tools only). `get_all_tools` aggregates tool schemas across all MCP clients (called once per user turn by `Chat`, not per tool-use iteration); `execute_blocks` executes a list of `tool_use` blocks against the owning client, resolving owners via one `_tool_owners` map per call.
 
 - **`core/cli.py`** (`CliApp`) — a minimal `prompt_toolkit` REPL (history + styling). Delegates all real work to `Chat`.
 
-- **`mcp_client.py`** (`MCPClient`) — async context-manager over an MCP `ClientSession`, supporting three transports: `stdio` (spawn `command`+`args`), `sse` (`url`), and `http` (Streamable HTTP `url`) — the last two accept `headers` for auth (e.g. n8n's Bearer token). Exposes `list_tools`, `call_tool`, `list_prompts`, `get_prompt`, `read_resource`.
+- **`mcp_client.py`** (`MCPClient`) — async context-manager over an MCP `ClientSession`, supporting three transports: `stdio` (spawn `command`+`args`), `sse` (`url`), and `http` (Streamable HTTP `url`) — the last two accept `headers` for auth (e.g. a Bearer token). Exposes `list_tools`, `call_tool`, `list_prompts`, `get_prompt`, `read_resource`.
 
 ### Key conventions
 
-- **Two parallel tool systems.** MCP tools live on remote servers (n8n) and are discovered/executed via `ToolManager`. Local tools are declared and executed in-process, aggregated by `local_tools`. `Chat` merges both into one `tools=` list and routes execution by owner.
+- **Two parallel tool systems.** MCP tools live on remote servers (any number, listed under `[mcp]`) and are discovered/executed via `ToolManager`. Local tools are declared and executed in-process, aggregated by `local_tools`. `Chat` merges both into one `tools=` list and routes execution by owner.
 - **"Learned" vs custom.** `claude_learned_schemas.py` holds Anthropic-defined tools Claude already knows (no descriptions needed). Every other local module holds fully custom tools Claude learns at runtime from its descriptions. Keep these separate from `tools.py`, which is strictly the MCP bridge.
 - **A new local tool must beat `bash` at something structural** — statefulness (`python`), interactivity (`interactive_run`), a correctness guarantee (`config_edit`), recoverability (`trash`), or context economy — since Claude can already shell out to any CLI. Wrapping a command bash could run unaided just spends a tool slot.
-- **Tool-selection accuracy degrades past roughly 30–50 loaded tools.** 16 local + whatever n8n advertises leaves headroom; prefer one tool with a mode parameter (as `document_convert` and `config_edit` do) over one tool per variation.
+- **Tool-selection accuracy degrades past roughly 30–50 loaded tools.** 16 local + whatever the connected MCP servers advertise leaves headroom; prefer one tool with a mode parameter (as `document_convert` and `config_edit` do) over one tool per variation.
 - **`web_search` (discovery) and the browser tool (navigate/interact) are complementary**, not redundant — don't reimplement search inside Playwright.
 - Add an MCP server by passing its script as argv (stdio) or adding another `MCPClient(...)` in `main.py` (e.g. `transport="http"` for another HTTP server). Its tools then appear to Claude automatically.
 - `bash` is **stateless between calls** (fresh subprocess each time — `cd`/env don't persist); the `python` kernel, the browser page, and the DuckDB connection **are** stateful within a session.
-- **No approval gating** — Claude executes whatever bash commands, file edits, browser actions, conversions, kernel code, interactive commands, and n8n tools it chooses. This is intended for local dev only, and is why `trash` exists.
+- **No approval gating** — Claude executes whatever bash commands, file edits, browser actions, conversions, kernel code, interactive commands, and MCP server tools it chooses. This is intended for local dev only, and is why `trash` exists.
 - The app must run from the **repo root** (`main.py` and `mcp_client.py` live there; `core/` is the importable subpackage).
 
 ### Adding or removing a tool
@@ -117,7 +116,7 @@ lies or a prompt that names a tool Claude doesn't have. Touch them all:
    tool count (stated more than once).
 6. `CLAUDE.md` — the module bullet in Architecture, the count in Overview, and the count in
    Key conventions.
-7. `main.py` — the tool list in the n8n-connection-failure message.
+`main.py` no longer needs touching — its MCP messages don't enumerate tools.
 
 Then verify instead of trusting the list: `grep -rni <toolname>` across `*.py`/`*.md`/
 `*.toml`/`*.txt` should come back empty on a removal, and the roster inside `SYSTEM_PROMPT`

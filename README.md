@@ -9,7 +9,7 @@ run the commands, and hand you back a finished `.docx` — in one conversation.
 
 ## What it can do
 
-**16 local tools**, plus anything your n8n server exposes:
+**16 local tools**, plus whatever your MCP servers expose:
 
 | Tool | For |
 |---|---|
@@ -49,7 +49,7 @@ python main.py
 Then just type. **`/think <message>`** gives Claude longer to reason on hard problems;
 **Ctrl-C** exits and shuts everything down cleanly.
 
-**n8n is optional and off by default** — all 16 local tools work without it.
+**MCP servers are optional** — all 16 local tools work without any of them.
 
 ## Try it
 
@@ -82,16 +82,26 @@ Non-secret settings live in `config.toml`. Secrets stay in the environment — t
 [claude]
 model = "claude-sonnet-5"   # CLAUDE_MODEL overrides this
 
-[n8n]
-enabled = false             # true only if you have an n8n MCP server
-url = "http://192.168.2.12:5678/mcp-server/http"
+[mcp]
+enabled = true              # false skips every server; local tools still work
+
+# One line per server. Add as many as you like — every reachable one connects and
+# its tools join the same list Claude sees. token_env names the environment
+# variable holding that server's bearer token; omit it if the server needs none.
+servers = [
+  { name = "n8n",    url = "http://192.168.2.12:5678/mcp-server/http", token_env = "N8N_MCP_TOKEN" },
+  { name = "alpaca", url = "http://192.168.2.12:8000/mcp" },
+]
 ```
+
+A server that's unreachable prints a warning and is skipped, so one box being down
+doesn't stop the app. Tokens are never written in this file — only the *name* of the
+variable that holds them.
 
 | Variable | Purpose |
 |---|---|
 | `ANTHROPIC_API_KEY` | Required |
-| `N8N_MCP_TOKEN` | n8n Bearer token — only if n8n is enabled |
-| `N8N_MCP_URL` | Override the n8n endpoint |
+| *(per server)* | Whatever each `token_env` names, e.g. `N8N_MCP_TOKEN` |
 | `CLAUDE_MODEL` | Override the model |
 | `CLAUDE_SHOW_USAGE=1` | Print token and prompt-cache counts per request |
 
@@ -151,7 +161,7 @@ around `=`; `VAR = value` is a bash syntax error. Then open a fresh shell or `so
 check without revealing anything:
 
 ```bash
-echo "key: ${ANTHROPIC_API_KEY:+set}  token: ${N8N_MCP_TOKEN:+set}"
+echo "key: ${ANTHROPIC_API_KEY:+set}  token: ${N8N_MCP_TOKEN:+set}"   # per your token_env names
 ```
 
 **Built and tested on** Ubuntu 26.04 LTS (kernel 7.0.0), Python 3.14.4, Playwright 1.61.0.
@@ -161,9 +171,9 @@ it was run on. The `install-deps` step assumes a Debian/Ubuntu `apt` system.
 </details>
 
 <details>
-<summary><b>HTTPS and TLS</b> — for a self-signed or private-CA n8n certificate</summary>
+<summary><b>HTTPS and TLS</b> — for an MCP server with a self-signed or private-CA certificate</summary>
 
-The n8n URL may be `http://` or `https://`. TLS is verified by the `httpx` client inside
+A server URL may be `http://` or `https://`. TLS is verified by the `httpx` client inside
 `mcp_client.py`, offline, against a local CA bundle — the CA is not contacted at connect time.
 
 A publicly-signed certificate (Let's Encrypt, DigiCert, …) works with no configuration. A
@@ -179,7 +189,7 @@ Two things that catch people out:
 - `SSL_CERT_FILE` **replaces** the default trust store rather than adding to it. If the same
   process also needs public HTTPS hosts, concatenate:
   `cat "$(python -m certifi)" your-ca.pem > combined-ca.pem`
-- Your n8n server (or its reverse proxy) must present its **full chain**. A missing
+- Your server (or its reverse proxy) must present its **full chain**. A missing
   intermediate is the most common "the cert is valid but it still won't connect" cause, and
   the fix is on the server — the client only needs the root.
 
@@ -191,14 +201,14 @@ The OS trust store (`/etc/ssl/certs`) does not affect this app.
 <summary><b>Project layout and extending</b></summary>
 
 ```
-main.py                          entrypoint — wires the n8n client + Chat + REPL
+main.py                          entrypoint — connects the MCP servers, wires Chat + REPL
 mcp_client.py                    MCP client (stdio / SSE / Streamable HTTP)
 CLAUDE.md                        architecture + conventions, for AI coding agents
 core/
   chat.py                        agentic loop, tool routing, SYSTEM_PROMPT
   claude.py                      Anthropic SDK wrapper
   local_tools.py                 registry of every locally-executed tool
-  tools.py                       MCP <-> Anthropic bridge (n8n)
+  tools.py                       MCP <-> Anthropic bridge
   claude_learned_schemas.py      bash, file editor, web_search, web_fetch
   browser.py                     Playwright DOM surfing
   documents.py                   LibreOffice / pandoc conversion
@@ -222,8 +232,8 @@ core/
   one tool with a mode parameter over several near-duplicates, and don't wrap a command
   `bash` could already run.
 
-Smoke-test the n8n connection on its own with `python mcp_client.py` (connects, lists tools,
-exits).
+Check every configured server on its own with `python mcp_client.py` — it connects to each
+in turn, lists its tools, and reports failures without starting the chat.
 
 </details>
 
@@ -231,7 +241,7 @@ exits).
 <summary><b>Optional: MCP Inspector</b> — for debugging an MCP server (needs Node)</summary>
 
 This project is **pure Python; Node.js is not a dependency.** For hand-calling the tools your
-n8n endpoint exposes, the [MCP Inspector](https://github.com/modelcontextprotocol/inspector)
+MCP endpoint exposes, the [MCP Inspector](https://github.com/modelcontextprotocol/inspector)
 runs on demand with no install step:
 
 ```bash
