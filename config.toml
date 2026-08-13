@@ -10,7 +10,7 @@ model = "claude-sonnet-5"
 [n8n]
 # Set enabled = false to skip connecting to the n8n MCP server entirely (e.g.
 # when it's turned off). The app still runs with its local tools.
-enabled = false # set true if your n8n/mcp server is reachable/turned on
+enabled = true # set true if your n8n/mcp server is reachable/turned on
 
 # n8n MCP Server Trigger endpoint (Streamable HTTP transport).
 # The N8N_MCP_URL environment variable, if set, overrides this value.
