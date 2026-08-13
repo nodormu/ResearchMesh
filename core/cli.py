@@ -22,7 +22,13 @@ class CliApp:
                 if not user_input.strip():
                     continue
 
-                response = await self.agent.run(user_input)
+                text = user_input
+                thinking = False
+                if text.startswith("/think "):
+                    text = text[len("/think "):]
+                    thinking = True
+
+                response = await self.agent.run(text, thinking=thinking)
                 print(f"\nResponse:\n{response}")
 
             except KeyboardInterrupt:

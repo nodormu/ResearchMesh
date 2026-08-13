@@ -1,8 +1,8 @@
 import json
-from typing import Optional, Literal, List
+from typing import Literal, List
 from mcp.types import CallToolResult, Tool, TextContent
 from mcp_client import MCPClient
-from anthropic.types import Message, ToolResultBlockParam
+from anthropic.types import ToolResultBlockParam
 
 
 class ToolManager:
@@ -23,16 +23,16 @@ class ToolManager:
         return tools
 
     @classmethod
-    async def _find_client_with_tool(
-        cls, clients: list[MCPClient], tool_name: str
-    ) -> Optional[MCPClient]:
-        """Finds the first client that has the specified tool."""
-        for client in clients:
-            tools = await client.list_tools()
-            tool = next((t for t in tools if t.name == tool_name), None)
-            if tool:
-                return client
-        return None
+    async def _tool_owners(
+        cls, clients: dict[str, MCPClient]
+    ) -> dict[str, MCPClient]:
+        """Maps tool name -> the first client offering it (one list_tools per
+        client, rather than one per client per tool being executed)."""
+        owners: dict[str, MCPClient] = {}
+        for client in clients.values():
+            for tool in await client.list_tools():
+                owners.setdefault(tool.name, client)
+        return owners
 
     @classmethod
     def _build_tool_result_part(
@@ -50,29 +50,19 @@ class ToolManager:
         }
 
     @classmethod
-    async def execute_tool_requests(
-        cls, clients: dict[str, MCPClient], message: Message
-    ) -> List[ToolResultBlockParam]:
-        """Executes the tool_use blocks in a message against the clients."""
-        tool_requests = [
-            block for block in message.content if block.type == "tool_use"
-        ]
-        return await cls.execute_blocks(clients, tool_requests)
-
-    @classmethod
     async def execute_blocks(
         cls, clients: dict[str, MCPClient], tool_use_blocks
     ) -> List[ToolResultBlockParam]:
         """Executes a list of tool_use blocks against the provided clients."""
         tool_result_blocks: list[ToolResultBlockParam] = []
+        owners = await cls._tool_owners(clients)
+
         for tool_request in tool_use_blocks:
             tool_use_id = tool_request.id
             tool_name = tool_request.name
             tool_input = tool_request.input
 
-            client = await cls._find_client_with_tool(
-                list(clients.values()), tool_name
-            )
+            client = owners.get(tool_name)
 
             if not client:
                 tool_result_blocks.append(

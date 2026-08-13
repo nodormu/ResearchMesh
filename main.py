@@ -8,7 +8,7 @@ from mcp_client import MCPClient
 from core.claude import Claude
 from core.chat import Chat
 from core.cli import CliApp
-from core import browser
+from core import local_tools
 
 # Anthropic Config
 api_key = os.getenv("ANTHROPIC_API_KEY") # api key is in .bashrc file, which is why this is here
@@ -72,7 +72,8 @@ async def _connect_n8n(stack: AsyncExitStack, clients: dict) -> bool:
             f"\nCould not connect to the n8n MCP server at {N8N_MCP_URL}.\n"
             "  - Start (or restore network access to) your n8n server, then retry, or\n"
             "  - Set  enabled = false  under [n8n] in config.toml to run without it\n"
-            "    (the app still works with its local tools: bash, editor, web, browser).",
+            "    (the app still works with its local tools: bash, editor, web,\n"
+            "    browser, python, documents, config, sql, trash).",
             file=sys.stderr,
         )
         return False
@@ -102,8 +103,8 @@ async def main():
 
             clients[client_id] = client
 
-        # Close the headless browser (if it was ever launched) on exit.
-        stack.push_async_callback(browser.shutdown)
+        # Close anything a local tool started (browser, IPython kernel, DuckDB).
+        stack.push_async_callback(local_tools.shutdown)
 
         chat = Chat(
             clients=clients,

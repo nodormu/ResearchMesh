@@ -2,6 +2,8 @@ import asyncio
 import subprocess
 from pathlib import Path
 
+from core.output import clip
+
 # Anthropic-defined ("learned") tool schemas. Claude already knows how to use
 # these, so they carry no description.
 #   bash + text_editor      -> client-executed (we run them below)
@@ -37,12 +39,6 @@ async def execute(name: str, tool_input: dict) -> str:
     return f"Error: {name} is not locally executable"
 
 
-def _clip(text: str) -> str:
-    if len(text) > _MAX_OUTPUT:
-        return text[:_MAX_OUTPUT] + f"\n…[truncated, {len(text) - _MAX_OUTPUT} more chars]"
-    return text
-
-
 # --- bash ---------------------------------------------------------------
 # Note: each call is a fresh subprocess, so shell state (cwd, env, variables)
 # does NOT persist between calls. Chain with `&&` / `cd x && ...` when needed.
@@ -71,7 +67,7 @@ def _run_bash(tool_input: dict) -> str:
         out += ("\n" if out else "") + result.stderr
     if not out:
         out = f"(no output; exit code {result.returncode})"
-    return _clip(out)
+    return clip(out, _MAX_OUTPUT)
 
 
 # --- text editor --------------------------------------------------------
@@ -114,7 +110,7 @@ def _view(path: str, view_range) -> str:
     start = max(start, 1)
     end = min(end, len(lines))
     numbered = [f"{i}\t{lines[i - 1]}" for i in range(start, end + 1)]
-    return _clip("\n".join(numbered)) or "(empty file)"
+    return clip("\n".join(numbered), _MAX_OUTPUT) or "(empty file)"
 
 
 def _str_replace(path: str, old: str, new: str) -> str:

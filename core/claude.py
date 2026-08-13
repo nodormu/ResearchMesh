@@ -34,25 +34,42 @@ class Claude:
         self,
         messages,
         system=None,
-        temperature=1.0,
         stop_sequences=[],
         tools=None,
         thinking=False,
-        thinking_budget=1024,
     ) -> Message:
+        # No temperature / top_p / top_k. Current models (Sonnet 5, Opus 5, Opus
+        # 4.7+) reject non-default sampling parameters with a 400, and the only
+        # value they accept is the default — so sending it can never do anything
+        # except fail. Steer behaviour with the system prompt instead.
         params = {
             "model": self.model,
             "max_tokens": 8000,
             "messages": messages,
-            "temperature": temperature,
             "stop_sequences": stop_sequences,
+            # Prompt caching. Top-level cache_control auto-places the breakpoint on
+            # the last cacheable block, so each request re-reads the stable prefix
+            # (tools -> system -> prior turns, in render order) at ~0.1x input price
+            # instead of full. Writes cost ~1.25x, so it breaks even on the second
+            # request — and Chat's agentic loop makes up to MAX_TOOL_ITERATIONS
+            # requests per user turn, each resending the whole conversation.
+            #
+            # Silent-failure notes: a prefix under the model's minimum (1024 tokens
+            # on Sonnet 5) simply isn't cached, with no error. And any byte change
+            # early in the prefix invalidates everything after it — so keep
+            # SYSTEM_PROMPT static and the tool list in a stable order. Verify with
+            # CLAUDE_SHOW_USAGE=1 (see core/chat.py).
+            "cache_control": {"type": "ephemeral"},
         }
 
+        # Adaptive thinking replaces the old fixed budget. The 4.5-era form
+        # {"type": "enabled", "budget_tokens": N} now returns a 400 on Sonnet 5
+        # and Opus 5 / 4.7+, so there is no thinking_budget to pass — Claude
+        # decides how much to think per request. If you ever want to bias that,
+        # the knob is output_config={"effort": "low"|"medium"|"high"|...}, which
+        # controls depth rather than a token count.
         if thinking:
-            params["thinking"] = {
-                "type": "enabled",
-                "budget_tokens": thinking_budget,
-            }
+            params["thinking"] = {"type": "adaptive"}
 
         if tools:
             params["tools"] = tools

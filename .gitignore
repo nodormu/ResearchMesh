@@ -2,4 +2,12 @@
 __pycache__
 .venv
 .DS_Store
-**/.claude/settings.local.json
+# Claude Code editor config — not part of the app. This project uses the
+# anthropic Client SDK directly (core/claude.py), NOT the Claude Agent SDK,
+# so nothing here is needed to run or use the project.
+.claude/
+
+# Personal brainstorming notes — not part of the project
+SUPER_CHAT_BOT_ADDITIONS.md
+SUPER_CHAT_BOT_DIVIDED_INTO_AGENTS_BY_SCHOOL.md
+advisor-strategy-*
