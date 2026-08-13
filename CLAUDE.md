@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-Linux CLI Research Client for Claude is a command-line chat client for the Anthropic API, built on the Model Context Protocol (MCP). The CLI talks to Claude and to one or more MCP servers, and additionally gives Claude **16 local tools** — Anthropic's built-in "learned" schemas (bash, text editor, web search/fetch) plus custom ones for DOM browsing, document conversion, stateful Python, interactive commands, config editing, SQL, and recoverable deletes. It began as a learning/tutorial project (a Skilljar submodule) but has since been rewired to connect to any number of external MCP servers over Streamable HTTP, declared as a list under `[mcp]` in `config.toml`, instead of the original bundled stdio document server.
+ResearchMesh, a Linux CLI Research Client for Claude is a command-line chat client for the Anthropic API, built on the Model Context Protocol (MCP). The CLI talks to Claude and to one or more MCP servers, and additionally gives Claude **16 local tools** — Anthropic's built-in "learned" schemas (bash, text editor, web search/fetch) plus custom ones for DOM browsing, document conversion, stateful Python, interactive commands, config editing, SQL, and recoverable deletes. It began as a learning/tutorial project (a Skilljar submodule) but has since been rewired to connect to any number of external MCP servers over Streamable HTTP, declared as a list under `[mcp]` in `config.toml`, instead of the original bundled stdio document server.
 
 ## Commands
 

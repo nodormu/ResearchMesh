@@ -1,6 +1,17 @@
-# Linux CLI Research Client for Claude
+# ResearchMesh, a Linux CLI Research Client for Claude
 
 > *Unofficial, community-built client — not affiliated with or endorsed by Anthropic. "Claude" is a trademark of Anthropic.*
+
+                    ┌── /think
+                    │
+                    ├── Bash / Linux
+                    ├── Filesystem
+                    ├── LibreOffice
+     ResearchMesh ──┼── Playwright
+                    ├── MCP #1
+                    ├── MCP #2
+                    ├── MCP #3
+                    └── ...
 
 A terminal chat client for the Anthropic API that hands Claude real tools on your own Linux
 machine: a shell, a file editor, a headless browser it can surf with, a persistent Python
@@ -30,6 +41,10 @@ Claude chooses the tools and keeps working until it has an answer.
 
 You need **Linux**, **Python 3.11+**, and an Anthropic **API key** — this is an API client,
 so a Claude subscription won't work.
+
+**MCP servers are optional.** The `[mcp]` block in `config.toml` ships with example
+servers pointing at a private LAN address — replace those URLs with your own, or set
+`enabled = false` to run on the 16 local tools alone.
 
 ```bash
 sudo apt install python3 python3-venv python3-dev build-essential libreoffice pandoc

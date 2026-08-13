@@ -1,4 +1,4 @@
-# Linux CLI Research Client for Claude — configuration.
+# ResearchMesh, a Linux CLI Research Client for Claude — configuration.
 #
 # Non-secret settings only. MCP bearer tokens are NOT stored here: each server
 # names the environment variable that holds its token (see README.md).
@@ -21,6 +21,7 @@ enabled = true
 #              token. Omit for a server that needs no auth. Never put the token
 #              itself here; this file is committed.
 #   enabled    optional (default true) — park a server without deleting its line
+# be sure you change this for your servers
 servers = [
   { name = "n8n",    url = "http://192.168.2.12:5678/mcp-server/http", token_env = "N8N_MCP_TOKEN" },
   { name = "alpaca", url = "http://192.168.2.12:8000/mcp" },
