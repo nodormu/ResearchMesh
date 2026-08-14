@@ -7,6 +7,10 @@ __pycache__
 # so nothing here is needed to run or use the project.
 .claude/
 
+# The `memory` tool's store (core/memory.py, CLAUDE_MEMORY_DIR). Claude's own
+# notes to itself across sessions — local state, not source.
+memories/
+
 # Personal brainstorming notes — not part of the project
 SUPER_CHAT_BOT_ADDITIONS.md
 SUPER_CHAT_BOT_DIVIDED_INTO_AGENTS_BY_SCHOOL.md

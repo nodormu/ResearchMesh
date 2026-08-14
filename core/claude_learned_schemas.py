@@ -3,15 +3,7 @@ import base64
 import subprocess
 from pathlib import Path
 
-from core.output import clip
-
-# Extensions the text_editor tool advertises image support for (matches the
-# tool's own description: "Image files (.jpg, .jpeg, or .png)").
-_IMAGE_MEDIA_TYPES = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-}
+from core.output import IMAGE_MEDIA_TYPES, clip, image_result
 
 # Anthropic-defined ("learned") tool schemas. Claude already knows how to use
 # these, so they carry no description.
@@ -23,8 +15,13 @@ TEXT_EDITOR_TOOL = {
     "type": "text_editor_20250728",
     "name": "str_replace_based_edit_tool",
 }
-WEB_SEARCH_TOOL = {"type": "web_search_20260209", "name": "web_search"}
-WEB_FETCH_TOOL = {"type": "web_fetch_20260209", "name": "web_fetch"}
+# The web tools are versioned by capability, not superseded: each dated variant
+# is a superset of the last, so we track the newest. 20260318 adds an optional
+# `response_inclusion` to both (set it to "excluded" to drop dynamically-filtered
+# result blocks from the response); web_fetch also carries `use_cache` from
+# 20260309. Both are left at their defaults ("full" / true) here.
+WEB_SEARCH_TOOL = {"type": "web_search_20260318", "name": "web_search"}
+WEB_FETCH_TOOL = {"type": "web_fetch_20260318", "name": "web_fetch"}
 
 TOOLS = [BASH_TOOL, TEXT_EDITOR_TOOL, WEB_SEARCH_TOOL, WEB_FETCH_TOOL]
 
@@ -111,17 +108,12 @@ def _view(path: str, view_range):
     if p.is_dir():
         return "\n".join(sorted(x.name for x in p.iterdir())) or "(empty directory)"
 
-    media_type = _IMAGE_MEDIA_TYPES.get(p.suffix.lower())
+    media_type = IMAGE_MEDIA_TYPES.get(p.suffix.lower())
     if media_type is not None:
         if not p.is_file():
             return f"Error: no such file: {path}"
-        data = p.read_bytes()
-        return {
-            "__kind__": "image",
-            "media_type": media_type,
-            "data": base64.standard_b64encode(data).decode("ascii"),
-            "path": str(p),
-        }
+        data = base64.standard_b64encode(p.read_bytes()).decode("ascii")
+        return image_result(media_type, data, f"Displayed image: {p}")
 
     lines = p.read_text(encoding="utf-8").splitlines()
     start, end = 1, len(lines)

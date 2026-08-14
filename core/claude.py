@@ -1,5 +1,20 @@
 from anthropic import Anthropic
 from anthropic.types import Message
+from anthropic.types.beta import BetaMessage
+
+from core.computer import BETA_FLAG as COMPUTER_BETA
+
+# Betas sent on every request. The computer tool's `computer_20251124` schema is
+# beta-gated, and local_tools declares it on every request, so the header has to
+# be unconditional — omitting it 400s the whole request, not just computer use.
+# The beta Messages endpoint is a superset of the stable one, so nothing else
+# changes shape.
+BETAS = [COMPUTER_BETA]
+
+# The beta endpoint returns BetaMessage, which is NOT a subclass of Message, so
+# the response-vs-raw-content checks below must accept both. Testing only
+# `Message` would silently stuff the response object into `content`.
+_RESPONSE_TYPES = (Message, BetaMessage)
 
 
 class Claude:
@@ -11,7 +26,7 @@ class Claude:
         user_message = {
             "role": "user",
             "content": message.content
-            if isinstance(message, Message)
+            if isinstance(message, _RESPONSE_TYPES)
             else message,
         }
         messages.append(user_message)
@@ -20,12 +35,12 @@ class Claude:
         assistant_message = {
             "role": "assistant",
             "content": message.content
-            if isinstance(message, Message)
+            if isinstance(message, _RESPONSE_TYPES)
             else message,
         }
         messages.append(assistant_message)
 
-    def text_from_message(self, message: Message):
+    def text_from_message(self, message: Message | BetaMessage):
         return "\n".join(
             [block.text for block in message.content if block.type == "text"]
         )
@@ -37,7 +52,7 @@ class Claude:
         stop_sequences=[],
         tools=None,
         thinking=False,
-    ) -> Message:
+    ) -> BetaMessage:
         # No temperature / top_p / top_k. Current models (Sonnet 5, Opus 5, Opus
         # 4.7+) reject non-default sampling parameters with a 400, and the only
         # value they accept is the default — so sending it can never do anything
@@ -47,6 +62,7 @@ class Claude:
             "max_tokens": 8000,
             "messages": messages,
             "stop_sequences": stop_sequences,
+            "betas": BETAS,
             # Prompt caching. Top-level cache_control auto-places the breakpoint on
             # the last cacheable block, so each request re-reads the stable prefix
             # (tools -> system -> prior turns, in render order) at ~0.1x input price
@@ -77,5 +93,6 @@ class Claude:
         if system:
             params["system"] = system
 
-        message = self.client.messages.create(**params)
+        # Beta endpoint, not client.messages.create — see BETAS above.
+        message = self.client.beta.messages.create(**params)
         return message

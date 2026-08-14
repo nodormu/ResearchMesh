@@ -20,13 +20,15 @@ run the commands, and hand you back a finished `.docx` — in one conversation.
 
 ## What it can do
 
-**16 local tools**, plus whatever your MCP servers expose:
+**18 local tools**, plus whatever your MCP servers expose:
 
 | Tool | For |
 |---|---|
 | `bash` | Shell commands as your user. Stateless — fresh subprocess each call |
 | `str_replace_based_edit_tool` | View, create, and edit files |
 | `web_search` · `web_fetch` | Anthropic's server-side search and page fetch |
+| `memory` | A `/memories` store that **persists across sessions** — the only state that outlives the process |
+| `computer` | Screenshots plus mouse/keyboard control of your desktop. **Needs an X11 session** ([see below](#full-setup-detail)) |
 | `browser_navigate` · `_links` · `_click` · `_fill` · `_extract` · `_back` | Headless [Playwright](https://playwright.dev/) — real DOM surfing: renders JavaScript, follows links, fills forms |
 | `document_convert` | LibreOffice + pandoc. Markdown → `.docx`/`.odt`/`.pdf`, or any office format to any other |
 | `python` | Persistent IPython kernel — **variables survive between calls** |
@@ -44,7 +46,7 @@ so a Claude subscription won't work.
 
 **MCP servers are optional.** The `[mcp]` block in `config.toml` ships with example
 servers pointing at a private LAN address — replace those URLs with your own, or set
-`enabled = false` to run on the 16 local tools alone.
+`enabled = false` to run on the 18 local tools alone.
 
 mcp_client.py is just a script to connect to your MCP server and pull a list of tools, be sure you change the IP address in the code.
 
@@ -66,7 +68,7 @@ python main.py
 Then just type. **`/think <message>`** gives Claude longer to reason on hard problems;
 **Ctrl-C** exits and shuts everything down cleanly.
 
-**MCP servers are optional** — all 16 local tools work without any of them.
+**MCP servers are optional** — all 18 local tools work without any of them.
 
 ## Try it
 
@@ -121,6 +123,9 @@ variable that holds them.
 | *(per server)* | Whatever each `token_env` names, e.g. `N8N_MCP_TOKEN` |
 | `CLAUDE_MODEL` | Override the model |
 | `CLAUDE_SHOW_USAGE=1` | Print token and prompt-cache counts per request |
+| `CLAUDE_MEMORY_DIR` | Where `memory` stores `/memories` (default `./memories`) |
+| `CLAUDE_DISPLAY_SIZE` | Logical screen size `computer` reports, e.g. `1280x800` |
+| `CLAUDE_COMPUTER_FORCE=1` | Let `computer` try anyway on a Wayland session |
 
 ## Good to know
 
@@ -134,10 +139,18 @@ variable that holds them.
   the file written to disk.
 - Nothing under `/tmp` can be trashed (tmpfs has no trash), so deletes there would be
   permanent — the tool says so rather than pretending.
+- **`computer` does not work on Wayland.** It drives the screen through X11/XTEST, which
+  Wayland compositors ignore by design, so clicks and keystrokes never reach native windows
+  and screenshots come back blank. Check with `echo $XDG_SESSION_TYPE`; if it prints
+  `wayland`, the tool refuses up front and tells you why rather than clicking into the void.
+  Fix it with an Xorg session or `xvfb-run -s '-screen 0 1280x800x24' python main.py` —
+  details under [Full setup detail](#full-setup-detail). Every other tool is unaffected.
 - If Sonnet gets inconsistent on a complicated multi-tool request, set `model` to an Opus one.
 - Optional packages are imported only when a tool is used, so a missing one breaks just that
   tool and tells you what to install.
 - No tests or linters. Sanity-check edits with `python -m py_compile core/*.py main.py`.
+
+<a id="full-setup-detail"></a>
 
 <details>
 <summary><b>Full setup detail</b> — OS libraries, document tools, which package backs which tool</summary>
@@ -159,6 +172,30 @@ import; `md → pdf` goes through odt on the way, since pandoc's own PDF writer 
 LaTeX engine. `libreoffice-writer`/`-calc`/`-impress` alone are enough if you don't want the
 whole suite.
 
+**Computer use needs X11.** The `computer` tool synthesises input through X11/XTEST, which
+Wayland compositors deliberately ignore — on a Wayland session clicks and keystrokes never
+reach native windows and screenshots come back blank, so the tool refuses up front and says
+so instead of failing silently. Check with `echo $XDG_SESSION_TYPE`. Options:
+
+```bash
+# 1. Log in to an "Xorg"/"X11" session at your display manager, or
+# 2. Run the whole client inside a nested X server:
+sudo apt install xvfb
+xvfb-run -s '-screen 0 1280x800x24' python main.py
+# 3. XWayland-only setup and you want to try regardless:
+export CLAUDE_COMPUTER_FORCE=1
+```
+
+The tool reports a fixed logical screen size (`CLAUDE_DISPLAY_SIZE`, default `1280x800`)
+and downscales every screenshot to exactly that, scaling Claude's coordinates back up to
+your real resolution. That's what keeps clicks landing where Claude aims — the declared
+size and the image it sees can never drift apart. Below roughly `1280x720`, accuracy drops.
+
+**Memory** writes to `./memories` by default (`CLAUDE_MEMORY_DIR` to relocate). Claude sees
+it as `/memories`; every command is confined to that directory, so a traversal path like
+`/memories/../../.ssh/id_rsa` is rejected rather than served. It's a private scratchpad for
+Claude, not a place for your project files — and it persists until you delete it.
+
 **Optional Python packages** (all in `requirements.txt`; each is imported lazily):
 
 | Tool | Needs |
@@ -168,6 +205,8 @@ whole suite.
 | `config_edit` | `ruamel.yaml` (YAML), `tomlkit` (TOML), `jsonpath-ng` (`$…` queries); JSON needs nothing |
 | `sql_query` | `duckdb` |
 | `trash` | `send2trash` |
+| `computer` | `pyautogui`, `pillow` — **plus an X11 display** (see below) |
+| `memory` | nothing — standard library only |
 
 To drop a tool entirely, remove its module from `MODULES` in `core/local_tools.py`.
 
@@ -227,6 +266,8 @@ core/
   local_tools.py                 registry of every locally-executed tool
   tools.py                       MCP <-> Anthropic bridge
   claude_learned_schemas.py      bash, file editor, web_search, web_fetch
+  memory.py                      /memories store, persists across sessions
+  computer.py                    screenshots + mouse/keyboard (X11 only)
   browser.py                     Playwright DOM surfing
   documents.py                   LibreOffice / pandoc conversion
   kernel.py                      persistent IPython kernel
@@ -234,7 +275,7 @@ core/
   config_edit.py                 comment-preserving YAML/TOML/JSON edits
   data.py                        DuckDB queries
   files.py                       recoverable deletes
-  output.py                      shared output trimming
+  output.py                      shared output trimming + image results
   cli.py                         prompt_toolkit REPL
 ```
 

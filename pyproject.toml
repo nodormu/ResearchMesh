@@ -21,4 +21,6 @@ dependencies = [
     "jsonpath-ng>=1.6",
     "duckdb>=0.10",
     "send2trash>=1.8",
+    "pyautogui>=0.9.54",
+    "pillow>=10.0",
 ]
