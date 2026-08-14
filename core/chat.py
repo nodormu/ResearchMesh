@@ -85,6 +85,27 @@ def _report_usage(response) -> None:
     )
 
 
+def _local_result_to_content(local):
+    """Local tool executors normally return a plain string. The text_editor
+    'view' command can also return a dict marker for image files
+    ({"__kind__": "image", ...}) which we translate into a real
+    tool_result content list carrying an `image` block, so the model
+    actually receives pixels instead of a UTF-8 decode error."""
+    if isinstance(local, dict) and local.get("__kind__") == "image":
+        return [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": local["media_type"],
+                    "data": local["data"],
+                },
+            },
+            {"type": "text", "text": f"Displayed image: {local['path']}"},
+        ]
+    return local
+
+
 class Chat:
     def __init__(self, claude_service: Claude, clients: dict[str, MCPClient]):
         self.claude_service: Claude = claude_service
@@ -104,7 +125,7 @@ class Chat:
                     {
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": local,
+                        "content": _local_result_to_content(local),
                     }
                 )
             else:

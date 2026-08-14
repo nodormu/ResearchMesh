@@ -1,6 +1,6 @@
 import json
 from typing import Literal, List
-from mcp.types import CallToolResult, Tool, TextContent
+from mcp.types import CallToolResult, Tool, TextContent, ImageContent
 from mcp_client import MCPClient
 from anthropic.types import ToolResultBlockParam
 
@@ -50,6 +50,22 @@ class ToolManager:
         }
 
     @classmethod
+    def _build_tool_result_part_content(
+        cls,
+        tool_use_id: str,
+        content,
+        status: Literal["success"] | Literal["error"],
+    ) -> ToolResultBlockParam:
+        """Like _build_tool_result_part, but accepts pre-built content
+        (a string, or a list of content blocks e.g. text + image)."""
+        return {
+            "tool_use_id": tool_use_id,
+            "type": "tool_result",
+            "content": content,
+            "is_error": status == "error",
+        }
+
+    @classmethod
     async def execute_blocks(
         cls, clients: dict[str, MCPClient], tool_use_blocks
     ) -> List[ToolResultBlockParam]:
@@ -77,20 +93,45 @@ class ToolManager:
                     tool_name, tool_input
                 )
                 items = tool_output.content if tool_output else []
-                content_list = [
+                text_list = [
                     item.text for item in items if isinstance(item, TextContent)
                 ]
-                content_json = json.dumps(content_list)
+                image_items = [
+                    item for item in items if isinstance(item, ImageContent)
+                ]
+                content_json = json.dumps(text_list)
                 status = (
                     "error"
                     if tool_output and tool_output.isError
                     else "success"
                 )
-                tool_result_blocks.append(
-                    cls._build_tool_result_part(
-                        tool_use_id, content_json, status
+
+                if image_items:
+                    # Forward images as real image content blocks (base64,
+                    # e.g. from manage_camera's include_image=true) instead
+                    # of silently dropping them and keeping only the text.
+                    content = [{"type": "text", "text": content_json}] + [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": item.mimeType,
+                                "data": item.data,
+                            },
+                        }
+                        for item in image_items
+                    ]
+                    tool_result_blocks.append(
+                        cls._build_tool_result_part_content(
+                            tool_use_id, content, status
+                        )
                     )
-                )
+                else:
+                    tool_result_blocks.append(
+                        cls._build_tool_result_part(
+                            tool_use_id, content_json, status
+                        )
+                    )
             except Exception as e:
                 error_message = f"Error executing tool '{tool_name}': {e}"
                 print(error_message)

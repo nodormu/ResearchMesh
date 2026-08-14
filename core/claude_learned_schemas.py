@@ -1,8 +1,17 @@
 import asyncio
+import base64
 import subprocess
 from pathlib import Path
 
 from core.output import clip
+
+# Extensions the text_editor tool advertises image support for (matches the
+# tool's own description: "Image files (.jpg, .jpeg, or .png)").
+_IMAGE_MEDIA_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+}
 
 # Anthropic-defined ("learned") tool schemas. Claude already knows how to use
 # these, so they carry no description.
@@ -97,10 +106,23 @@ def _run_text_editor(tool_input: dict) -> str:
         return f"Error: {e}"
 
 
-def _view(path: str, view_range) -> str:
+def _view(path: str, view_range):
     p = Path(path)
     if p.is_dir():
         return "\n".join(sorted(x.name for x in p.iterdir())) or "(empty directory)"
+
+    media_type = _IMAGE_MEDIA_TYPES.get(p.suffix.lower())
+    if media_type is not None:
+        if not p.is_file():
+            return f"Error: no such file: {path}"
+        data = p.read_bytes()
+        return {
+            "__kind__": "image",
+            "media_type": media_type,
+            "data": base64.standard_b64encode(data).decode("ascii"),
+            "path": str(p),
+        }
+
     lines = p.read_text(encoding="utf-8").splitlines()
     start, end = 1, len(lines)
     if view_range:
