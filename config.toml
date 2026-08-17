@@ -11,23 +11,47 @@ model = "claude-sonnet-5"
 # Set enabled = false to skip every MCP server and run with local tools only.
 enabled = true
 
-# MCP servers to connect to, over Streamable HTTP. Every reachable one connects
-# and its tools are merged into the single list Claude sees; an unreachable one
-# prints a warning and is skipped, so one server being down doesn't stop the app.
+# MCP servers to connect to. Every reachable/launchable one connects and its
+# tools are merged into the single list Claude sees; one that fails prints a
+# warning and is skipped, so it doesn't stop the app. Two entry shapes:
 #
+# 1) Streamable HTTP (a server already running elsewhere, reached over the network):
 #   name       label used as the client id and in messages
 #   url        the server's Streamable HTTP endpoint
 #   token_env  optional — the environment variable holding this server's bearer
 #              token. Omit for a server that needs no auth. Never put the token
 #              itself here; this file is committed.
-#   enabled    optional (default true) — park a server without deleting its line
+#
+# 2) stdio (a local server main.py launches itself as a subprocess, talking
+#    JSON-RPC over stdin/stdout — no port, no separate process to start by hand):
+#   name       label used as the client id and in messages
+#   command    full argv as a list, e.g. ["node", "/path/to/bin.js"]
+#   env        optional table of extra environment variables for the
+#              subprocess (merged with a safe default set — PATH, HOME, etc.
+#              — by the MCP SDK; you only need to list the extras).
+#
+# `enabled` (optional, default true) works on either shape — park a server
+# without deleting its line.
 # be sure you change this for your servers
 servers = [
-#  { name = "n8n",    url = "http://192.168.2.12:5678/mcp-server/http", token_env = "N8N_MCP_TOKEN" },
-#  { name = "alpaca", url = "http://192.168.2.12:8000/mcp" },
-  { name = "unity", url = "http://127.0.0.1:8080/mcp" },
+#  { name = "n8n",    url = "http://192.168.2.12:5678/mcp-server/http", token_env = "N8N_MCP_TOKEN" }, # works
+#  { name = "alpaca", url = "http://192.168.2.12:8000/mcp" }, # works
+#  { name = "unity", url = "http://127.0.0.1:8080/mcp" }, # works
+#  { name = "blender", url = "http://127.0.0.1:8033/" }, # works
+  { name = "unreal", command = ["node", "/home/invent/Programs/unreal-mcp/dist/bin.js", "--project-path", "/run/media/invent/POD2/Unreal-Engine-zip-deploys/Unreal-Projects/5.8.1-Projects/Test_MCP_Project/Test_MCP_Project.uproject", "--engine-path", "/run/media/invent/POD2/Unreal-Engine-zip-deploys/Linux_Unreal_Engine_5.8.1"], env = {DOTNET_ROOT = "/run/media/invent/POD2/Unreal-Engine-zip-deploys/Linux_Unreal_Engine_5.8.1/Engine/Binaries/ThirdParty/DotNet/10.0/linux-x64",DOTNET_ROOT_X64 = "/run/media/invent/POD2/Unreal-Engine-zip-deploys/Linux_Unreal_Engine_5.8.1/Engine/Binaries/ThirdParty/DotNet/10.0/linux-x64"}},
+  # ^ sam-david/unreal-mcp (https://github.com/sam-david/unreal-mcp) — stdio transport,
+  #   confirmed present & runnable at that path (built dist/bin.js exists, `node dist/bin.js`
+  #   launches and blocks on stdin as expected for an MCP stdio server).
+  #   Needs UE 5.x open with its editor's Python Editor Script Plugin's "Enable Remote
+  #   Execution" checked (see the repo README) for most tools to actually work end-to-end;
+  #   the connection itself doesn't require that.
+  #   If you want it scoped to one Unreal project, uncomment and fill in the env line below
+  #   (or drop a .unrealmcp.json with {"projectPath": "."} in that project's directory instead —
+  #   see the repo README's "Config File" section for the full set of optional keys):
+  #   { name = "unreal", command = ["node", "/home/invent/Programs/unreal-mcp/dist/bin.js"],
+  #     env = { UNREAL_MCP_PROJECT_PATH = "/path/to/YourProject.uproject" } },
 ]
 
-# For a local stdio MCP server (one the client launches as a subprocess rather
-# than connecting to over HTTP), pass its script as an argument instead:
+# For a local stdio MCP server passed on the command line instead of listed
+# above (equivalent to a `command` entry, but only for a Python script):
 #   python main.py path/to/server.py

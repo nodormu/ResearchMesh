@@ -41,10 +41,34 @@ MCP_SERVERS = _mcp_config.get("servers", [])
 
 
 def build_client(server: dict, name: str) -> MCPClient:
-    """One Streamable HTTP MCPClient from a [mcp].servers entry."""
+    """One MCPClient from a [mcp].servers entry.
+
+    Two kinds of entry are recognized:
+
+    - Streamable HTTP (remote server):
+        { name = "...", url = "http://host:port/...", token_env = "..." }
+
+    - stdio (local subprocess the client launches itself):
+        { name = "...", command = ["node", "/path/to/bin.js"], env = { ... } }
+      `command` is the full argv — command[0] is the executable, the rest are
+      its arguments. `env` is optional: extra environment variables to hand
+      the subprocess (merged with a safe default set — PATH, HOME, etc. — by
+      the MCP SDK itself, so you don't need to repeat those).
+    """
+    if "command" in server:
+        command_list = server.get("command")
+        if not isinstance(command_list, list) or not command_list:
+            raise ValueError(
+                "'command' must be a non-empty list, e.g. "
+                '["node", "/path/to/bin.js"]'
+            )
+        command, *args = command_list
+        env = server.get("env")
+        return MCPClient(command=command, args=args, env=env, transport="stdio")
+
     url = server.get("url")
     if not url:
-        raise ValueError("no 'url' in its config.toml entry")
+        raise ValueError("entry needs either 'url' (http) or 'command' (stdio)")
 
     token_env = server.get("token_env")
     token = os.getenv(token_env) if token_env else None
@@ -85,8 +109,9 @@ async def _connect_mcp_servers(stack: AsyncExitStack, clients: dict) -> None:
                 await client.cleanup()
             except BaseException:
                 pass
+            target = server.get("url") or " ".join(server.get("command", []))
             print(
-                f"[mcp] {name}: could not reach {server.get('url')} — skipped",
+                f"[mcp] {name}: could not reach/launch {target} — skipped",
                 file=sys.stderr,
             )
             continue

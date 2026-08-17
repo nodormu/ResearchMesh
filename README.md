@@ -104,18 +104,28 @@ model = "claude-sonnet-5"   # CLAUDE_MODEL overrides this
 [mcp]
 enabled = true              # false skips every server; local tools still work
 
-# One line per server. Add as many as you like — every reachable one connects and
-# its tools join the same list Claude sees. token_env names the environment
-# variable holding that server's bearer token; omit it if the server needs none.
+# One line per server. Add as many as you like — every reachable/launchable one
+# connects and its tools join the same list Claude sees. Two entry shapes:
+#
+#   Streamable HTTP (a server already running elsewhere):
+#     url        the server's endpoint
+#     token_env  names the environment variable holding that server's bearer
+#                token; omit it if the server needs none
+#
+#   stdio (a local server main.py launches itself, no separate process to start
+#   by hand — it talks JSON-RPC over the subprocess's stdin/stdout):
+#     command    full argv as a list, e.g. ["node", "/path/to/bin.js"]
+#     env        optional table of extra environment variables for it
 servers = [
   { name = "n8n",    url = "http://192.168.2.12:5678/mcp-server/http", token_env = "N8N_MCP_TOKEN" },
   { name = "alpaca", url = "http://192.168.2.12:8000/mcp" },
+  { name = "unreal", command = ["node", "/path/to/unreal-mcp/dist/bin.js"] },
 ]
 ```
 
-A server that's unreachable prints a warning and is skipped, so one box being down
-doesn't stop the app. Tokens are never written in this file — only the *name* of the
-variable that holds them.
+A server that's unreachable (http) or fails to launch (stdio) prints a warning and is
+skipped, so one being down doesn't stop the app. Tokens are never written in this file —
+only the *name* of the variable that holds them.
 
 | Variable | Purpose |
 |---|---|
@@ -279,9 +289,11 @@ core/
   cli.py                         prompt_toolkit REPL
 ```
 
-- **Add an MCP server:** pass a stdio server script as an argument
-  (`python main.py path/to/server.py`), or add another `MCPClient(...)` in `main.py`
-  (`transport="http"` for another HTTP server). Its tools appear to Claude automatically.
+- **Add an MCP server:** add an entry under `[mcp].servers` in `config.toml` — see
+  "Configuration" above for both entry shapes (`url` for Streamable HTTP, `command` for a
+  local stdio server main.py launches itself). Its tools appear to Claude automatically once
+  it connects. A one-off Python stdio script can also be passed as an argument instead
+  (`python main.py path/to/server.py`) without touching config.toml.
 - **Add a local tool:** write a module exposing `TOOLS`, `handles(name)`, and
   `async execute(name, tool_input)`, then add it to `MODULES` in `core/local_tools.py`.
   That's the only registration step. Update `SYSTEM_PROMPT` in `core/chat.py` too — it
