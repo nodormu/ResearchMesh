@@ -6,7 +6,7 @@ from core.tools import ToolManager
 from core import local_tools
 from anthropic.types import MessageParam
 
-MAX_TOOL_ITERATIONS = 30
+MAX_TOOL_ITERATIONS = 75
 
 # Set CLAUDE_SHOW_USAGE=1 to print token and cache counters per request. Prompt
 # caching fails *silently* (a too-short prefix or a changed byte early in the
@@ -124,13 +124,33 @@ class Chat:
         self.messages: list[MessageParam] = []
 
     async def _run_tool_uses(self, message) -> list:
-        """Route each tool_use block: local executor, or the MCP ToolManager."""
+        """Route each tool_use block: local executor, or the MCP ToolManager.
+
+        Every tool_use block here owes the API a matching tool_result in the
+        very next message, no exceptions — so a local executor that raises
+        must not abort the batch and orphan its block (or the blocks after
+        it). Turn the raise into an error tool_result instead, the same way
+        ToolManager.execute_blocks already does for MCP-side tools below.
+        """
         blocks = [b for b in message.content if b.type == "tool_use"]
         results: list = []
         mcp_blocks: list = []
 
         for block in blocks:
-            local = await local_tools.execute(block.name, block.input)
+            try:
+                local = await local_tools.execute(block.name, block.input)
+            except Exception as e:
+                print(f"[local tool '{block.name}' raised: {e}]")
+                results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": f"Error executing tool '{block.name}': {e}",
+                        "is_error": True,
+                    }
+                )
+                continue
+
             if local is not None:
                 results.append(
                     {
@@ -148,6 +168,36 @@ class Chat:
             )
         return results
 
+    def _resolve_pending_tool_uses(self, response, reason: str) -> None:
+        """Guarantee every tool_use block in `response` has a tool_result.
+
+        self.messages persists for the life of the process (one Chat per
+        run), so any tool_use left unresolved here doesn't just affect this
+        turn — it poisons *every* request for the rest of the session with a
+        400 (`tool_use ids were found without tool_result blocks immediately
+        after`), because that block is still sitting there with nothing after
+        it. This is the fallback of last resort for the two ways that used to
+        happen: the MAX_TOOL_ITERATIONS cutoff firing right after a
+        stop_reason == "tool_use" response (the loop broke before ever
+        calling _run_tool_uses for it), and an exception escaping tool
+        routing entirely. Safe to call even when there's nothing to resolve.
+        """
+        if response is None or response.stop_reason != "tool_use":
+            return
+        blocks = [b for b in response.content if b.type == "tool_use"]
+        if not blocks:
+            return
+        results = [
+            {
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": f"[{reason}]",
+                "is_error": True,
+            }
+            for block in blocks
+        ]
+        self.claude_service.add_user_message(self.messages, results)
+
     async def run(self, query: str, thinking: bool=False) -> str:
         final_text_response = ""
         self.claude_service.add_user_message(self.messages, query)
@@ -163,6 +213,15 @@ class Chat:
         while True:
             iterations += 1
             if iterations > MAX_TOOL_ITERATIONS:
+                # `response` is still the last one we received (this iteration
+                # never calls chat() again). If it ended on stop_reason ==
+                # "tool_use", its tool_use blocks are already sitting in
+                # self.messages with nothing after them — resolve them before
+                # breaking, or the *next* user turn's first chat() call fails
+                # immediately with a 400, however many messages later.
+                self._resolve_pending_tool_uses(
+                    response, "stopped: exceeded tool-iteration limit"
+                )
                 final_text_response = (
                     self.claude_service.text_from_message(response)
                     or "[stopped: exceeded tool-iteration limit]"
@@ -184,7 +243,24 @@ class Chat:
 
             if response.stop_reason == "tool_use":
                 print(self.claude_service.text_from_message(response))
-                tool_result_parts = await self._run_tool_uses(response)
+                try:
+                    tool_result_parts = await self._run_tool_uses(response)
+                except Exception as e:
+                    # _run_tool_uses already turns a per-block failure (local
+                    # or MCP) into an error tool_result rather than raising, so
+                    # reaching here means something broke outside any single
+                    # block's execution (tool routing itself). Resolve the
+                    # pending blocks with a synthetic error result and stop
+                    # for this turn instead of crashing the process and
+                    # leaving self.messages permanently broken.
+                    print(f"[tool routing error: {e}]")
+                    self._resolve_pending_tool_uses(
+                        response, f"tool execution failed: {e}"
+                    )
+                    final_text_response = (
+                        f"[error running tools: {e}]"
+                    )
+                    break
                 self.claude_service.add_user_message(
                     self.messages, tool_result_parts
                 )

@@ -33,3 +33,10 @@ class CliApp:
 
             except KeyboardInterrupt:
                 break
+            except Exception as e:
+                # Chat.run() now resolves any pending tool_use blocks before
+                # returning or raising (see core/chat.py), so self.messages
+                # stays valid even after a bad turn — safe to report the
+                # error and keep prompting instead of taking the whole
+                # session down for what may be a single tool's failure.
+                print(f"\n[error: {e}]")
