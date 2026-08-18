@@ -165,7 +165,25 @@ those you edit by hand.
 - If Sonnet gets inconsistent on a complicated multi-tool request, set `model` to an Opus one.
 - Optional packages are imported only when a tool is used, so a missing one breaks just that
   tool and tells you what to install.
-- No tests or linters. Sanity-check edits with `python -m py_compile core/*.py main.py`.
+- If a tool reports a missing package that `requirements.txt` already lists (e.g.
+  `sql_query`'s `duckdb`, or `config_edit`'s `ruamel.yaml`/`jsonpath-ng`), that's not a docs
+  gap — your venv just predates that line. Everything in `requirements.txt` is a `>=` floor
+  rather than a pin (there's no lockfile), so a venv can satisfy it and still miss a package
+  added later. Re-run `pip install -r requirements.txt`; you don't need to restart the app,
+  because each optional package is imported at the moment its tool is called.
+- No tests or linters are wired into the project — no `[tool.ruff]`/`[tool.black]` in
+  `pyproject.toml`, no `.pylintrc`, nothing runs automatically. Sanity-check edits with
+  `python -m py_compile core/*.py main.py`. If your venv happens to have `pylint`/`mypy`/
+  `black`/`ruff` installed (none are project dependencies — add them yourself if you want
+  them) or the system has `shellcheck`, they're safe to run by hand.
+- **If you run `ruff`, don't dismiss the whole report.** This codebase deliberately uses
+  broad `except Exception`/`except BaseException` at tool-execution boundaries throughout
+  `core/` (each local tool must catch anything and return an error string rather than crash
+  the chat loop), so most `BLE001` (blind-except) findings really are by design — on ruff
+  0.16.3 that's 30 of the 45 findings in `core/`. The other 15 aren't, and some are real:
+  `B006` flags a genuine mutable-default argument in `core/claude.py`. Counts are
+  version-sensitive — `BLE001` isn't in ruff's historical default rule set, so an older ruff
+  won't report it at all.
 
 <a id="full-setup-detail"></a>
 

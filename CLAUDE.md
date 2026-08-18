@@ -43,9 +43,38 @@ The `computer` tool needs an **X11** display — Wayland ignores the XTEST input
 
 Optional tool dependencies are imported **lazily, inside the tool that needs them**, so a missing package only breaks that one tool — it still gets declared to Claude and returns an install hint if used. To drop a tool entirely, remove its module from `MODULES` in `core/local_tools.py`.
 
+If a tool's install hint names a package that `requirements.txt` already lists (e.g.
+`sql_query`'s `duckdb`, or `config_edit`'s `ruamel.yaml`/`jsonpath-ng`), the docs aren't
+incomplete — the active venv predates that line. There is no lockfile here: every entry in
+`requirements.txt` is a `>=` floor rather than a pin, so a venv can still satisfy the file as
+it stood when it was built and lack a package added to it since. Re-running
+`pip install -r requirements.txt` fixes it **without restarting the app** — every optional
+backing is imported inside the function that needs it, and a failed import leaves no cached
+sentinel behind (`core/data.py` assigns `_connection` only on success), so the next tool call
+simply retries the import.
+
 See **`README.md`** for the full environment setup — the quick start is at the top, and the collapsed "Full setup detail" section covers browser system libraries, the optional per-tool packages, and environment variables. (`SETUP.md` was merged into it; the two duplicated ~60% of their content and drifted apart.)
 
-There are **no tests, linters, or type checks** configured. Sanity-check edits with `python -m py_compile` and an import smoke test (`PYTHONPATH=.. python -c "import core.chat"`).
+There are **no tests, linters, or type checks** configured — no `[tool.ruff]`/`[tool.black]`
+in `pyproject.toml`, no `.pylintrc`, nothing runs in CI or on save. Sanity-check edits with
+`python -m py_compile` and an import smoke test (`PYTHONPATH=.. python -c "import
+core.chat"`). `pylint`/`mypy`/`black`/`ruff` (in whatever venv you run the project from) and
+`shellcheck` (system) are not project dependencies but are safe to run by hand if present.
+
+If you run `ruff`, read the output in two halves — **only the first half is by design.**
+`ruff check --isolated core/` reports 45 findings on ruff 0.16.3, 30 of them `BLE001`
+(blind-except). Most of those are the deliberate tool-execution isolation boundaries: each
+local tool catches anything and returns an error string instead of raising, so one bad tool
+call can't crash the chat loop (see `core/chat.py`'s `_run_tool_uses` /
+`_resolve_pending_tool_uses`). Not all of them, though — the ones in `core/cli.py` (REPL
+loop), `core/tools.py` (MCP execute path) and `core/chat.py` itself are loop guards rather
+than per-tool boundaries, and `main.py`'s connect fallback adds two more outside `core/`.
+Scope or ignore `BLE001` in a ruff config rather than "fixing" it by narrowing the excepts.
+**The remaining 15 findings are not covered by that argument and are worth actually
+reading** — `B006` at `core/claude.py:52` is the mutable-default `stop_sequences=[]` listed
+as a known open issue in the `core/claude.py` bullet below, not a false positive. One caveat
+on the counts: `BLE001` is not in ruff's historical default `E4`/`E7`/`E9`/`F` set, so an
+older ruff than 0.16.3 reports none of it and the totals above won't match.
 
 ## Runtime configuration
 
