@@ -138,11 +138,142 @@ those you edit by hand.
 |---|---|
 | `ANTHROPIC_API_KEY` | Required |
 | *(per server)* | Whatever each `token_env` names, e.g. `N8N_MCP_TOKEN` |
+| `RESEARCHMESH_MCP_TOKEN` | Bearer token clients must present to `mcp_server.py --transport streamable-http`; unset = no auth |
 | `CLAUDE_MODEL` | Override the model |
 | `CLAUDE_SHOW_USAGE=1` | Print token and prompt-cache counts per request |
 | `CLAUDE_MEMORY_DIR` | Where `memory` stores `/memories` (default `./memories`) |
 | `CLAUDE_DISPLAY_SIZE` | Logical screen size `computer` reports, e.g. `1280x800` |
 | `CLAUDE_COMPUTER_FORCE=1` | Let `computer` try anyway on a Wayland session |
+
+## MCP, in both directions
+
+ResearchMesh is a client and a server at the same time. The two are independent — use either,
+both, or neither:
+
+```
+   Claude Code  ──delegate──▶  ResearchMesh  ──▶  n8n / Unreal / Unity / …
+   (any MCP client)            (server AND client)     (its own MCP servers)
+        │                            │                          │
+     mcp_server.py            18 local tools           [mcp] in config.toml
+```
+
+**As a client**, it connects out to MCP servers and merges their tools with its own — that's
+`[mcp]` in [Configuration](#configuration) above. **As a server**, it hands another client the
+whole agent as one `delegate` tool, so Claude Code can offload what it structurally can't do
+itself: drive GUI apps, answer password / `[y/N]` prompts, keep a live Python kernel between
+steps, surf a real DOM, and reach ResearchMesh's own MCP servers.
+
+### Add it to Claude Code
+
+```bash
+claude mcp add researchmesh --scope user \
+  --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  -- "$HOME/tif-env/bin/python" /path/to/ResearchMesh/mcp_server.py
+```
+
+That's it — no token, no ports, nothing to start. Claude Code launches the server itself when
+it needs it. Then just ask it to delegate something: *"use researchmesh to take a screenshot
+and tell me what window is focused."*
+
+Two ways it fails, both at the first call:
+
+- **`ANTHROPIC_API_KEY` not set** — a client passes stdio servers only a small safe subset of
+  the environment, so exporting it in your shell isn't enough. That's what `--env` above is
+  for. The server says so at startup rather than failing cryptically later.
+- **Wrong python** — use the venv interpreter that has the dependencies, not bare `python`.
+  The client spawns this with no `PATH` of yours and no activated venv.
+
+A `.mcp.json` ships in the repo as a working equivalent if you'd rather commit the config than
+run the command.
+
+<details>
+<summary><b>Streamable HTTP</b> — for clients that connect to an already-running endpoint</summary>
+
+stdio (above) is right whenever the client launches its own server — Claude Code, Claude
+Desktop, most editors. Use HTTP instead to share one agent between several clients, or for a
+client that only speaks HTTP:
+
+```bash
+python mcp_server.py --transport streamable-http --port 8765
+# point the client at http://127.0.0.1:8765/mcp
+```
+
+`--host` defaults to **127.0.0.1**, reachable only from this machine. `--path`, `--port` and
+`--json-response` are there too (`--json-response` returns one JSON body instead of an SSE
+stream).
+
+**Auth is the `token_env` arrangement from `config.toml`, pointed the other way.** Set the
+variable and it's required; leave it unset and the endpoint is unauthenticated, which is
+allowed by design and announced at startup:
+
+```bash
+export RESEARCHMESH_MCP_TOKEN=<token>          # see Tokens below
+python mcp_server.py --transport streamable-http --host 0.0.0.0
+```
+
+Clients send `Authorization: Bearer <token>` — exactly what a `token_env` entry produces, so
+another ResearchMesh consumes this one with a plain `config.toml` line. Same token, same
+variable name, set on both machines:
+
+```toml
+{ name = "desktop", url = "http://192.168.2.5:8765/mcp", token_env = "RESEARCHMESH_MCP_TOKEN" }
+```
+
+Unauthenticated *and* bound off-loopback prints a warning, because at that point anyone who
+can reach the port has unrestricted shell and desktop control of the machine. The token is
+read from the environment, never passed as an argument, so it stays out of `ps` and shell
+history. `--token-env VAR` renames the variable.
+
+Both transports are the same server object — no separate build, no FastMCP rewrite. Under HTTP
+the stdout guard is skipped (fd 1 isn't the wire there) so the app's messages become ordinary
+service logs, line-buffered so a redirected log fills in live rather than on exit. Running the
+stdio form by hand just waits on stdin, which is a healthy stdio server behaving normally.
+
+</details>
+
+<details>
+<summary><b>Tokens</b> — generating one, and where it actually has to live</summary>
+
+**Only needed for `--transport streamable-http`.** Under stdio there's no port and nothing to
+authenticate.
+
+Generate one with the interpreter this project already requires — no `openssl` needed:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+256 bits from the OS CSPRNG. There's deliberately no `generate_token.py` here: a file wrapping
+one line of stdlib would be the same mistake as a tool wrapping a command `bash` could already
+run.
+
+The value lives in an environment variable; only its *name* goes in a file. Which file depends
+on how the process starts, and this is the part that catches people:
+
+| How it starts | Where the token has to be |
+|---|---|
+| You, from an interactive shell | `export RESEARCHMESH_MCP_TOKEN=…` in `~/.bashrc` |
+| `systemd` unit | `EnvironmentFile=` — a unit does **not** read `~/.bashrc` |
+| Spawned by an MCP client | the `env` block of that server's entry in the client config |
+
+Two things to get right:
+
+- **Never put the literal token in a committed file.** `.mcp.json` and `config.toml` are both
+  in git — use `${RESEARCHMESH_MCP_TOKEN}` and `token_env` respectively.
+- **One name is normally right.** It's one token, and each end reads the variable from its own
+  environment, so both machines can call it `RESEARCHMESH_MCP_TOKEN`. You only need a second
+  name if a *single* machine both serves an endpoint and consumes someone else's — then one
+  variable would have to mean two different secrets. Rename either end with `--token-env VAR`
+  or `token_env = "VAR"`.
+
+**Can you just ask ResearchMesh to set it up?** Mostly. It can generate the token, append the
+export to `~/.bashrc`, write a systemd `EnvironmentFile`, and update a consuming
+`config.toml`. It *cannot* set the variable in your shell — the `bash` tool is a fresh
+subprocess per call, and a child can't alter its parent's environment anyway — so you still
+need a new shell (or `source ~/.bashrc`) and a server restart. Tell it not to write the
+literal token into anything in the repo.
+
+</details>
 
 ## Good to know
 
@@ -178,11 +309,16 @@ those you edit by hand.
   ruff added. (The rule selection is left at ruff's defaults, which do shift between
   versions.) Ruff is **not** a dependency and nothing runs it for you — install it yourself
   if you want it. There's no `[tool.black]` and no `.pylintrc`.
-- **No tests, no type checking, no CI.** Nothing runs automatically on commit or push.
-  Sanity-check edits with `python -m py_compile core/*.py main.py`. If your venv happens to
-  have `pylint`/`mypy`/`black` installed (none are project dependencies) or the system has
-  `shellcheck`, they're safe to run by hand — expect plenty of output, since nothing is
-  configured for them.
+- **`python smoke_test.py` before you commit.** Seconds, no API key, no network, no optional
+  packages. It checks that everything imports, that the tool registry is well-formed, that the
+  tool count in the docs still matches the code, and that `mcp_server.py` completes an MCP
+  handshake. GitHub Actions runs it plus `ruff` on every push and PR to `main`
+  (`.github/workflows/ci.yml`), on Python 3.11 and 3.14.
+- **There are still no unit tests and no type checking**, and CI deliberately doesn't exercise
+  the tools themselves — that would need LibreOffice, a browser, an X11 display and real API
+  credits. If your venv happens to have `pylint`/`mypy`/`black` installed (none are project
+  dependencies) or the system has `shellcheck`, they're safe to run by hand — expect plenty of
+  output, since nothing is configured for them.
 - **Two things a linter will fight you on here** — worth knowing before you "fix" them.
   Broad `except Exception`/`except BaseException` is the design, not sloppiness: every local
   tool must catch anything and return an error string rather than crash the chat loop, which
@@ -300,6 +436,10 @@ The OS trust store (`/etc/ssl/certs`) does not affect this app.
 ```
 main.py                          entrypoint — connects the MCP servers, wires Chat + REPL
 mcp_client.py                    MCP client (stdio / SSE / Streamable HTTP)
+mcp_server.py                    the other direction — serve this agent to an MCP client
+.mcp.json                        example Claude Code registration for mcp_server.py
+smoke_test.py                    fast wiring checks — no API key, no network
+.github/workflows/ci.yml         runs ruff + smoke_test.py on push and PR
 config.toml                      model + MCP server list (no secrets; committed)
 pyproject.toml                   metadata, deps, and the ruff exemptions (lint config)
 requirements.txt                 the same deps, for `pip install -r`

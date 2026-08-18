@@ -1,6 +1,6 @@
 [project]
 name = "ResearchMesh"
-version = "0.1.0"
+version = "0.2.0"
 description = "ResearchMesh, a Linux CLI Research Client for Claude is a command-line chat client for the Anthropic API."
 readme = "README.md"
 license = "MIT"

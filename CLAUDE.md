@@ -63,10 +63,23 @@ means the finding is new: either something you just wrote, or a rule a newer ruf
 `BLE001`/`S110`/`PLW1510` only began appearing around 0.16). Triage it rather than assuming
 it's more of the same. Ruff itself is not a project dependency and nothing runs it for you.
 
-Beyond that there are **no tests and no type checks**, and nothing runs in CI or on save.
-Sanity-check edits with `python -m py_compile` and an import smoke test (`PYTHONPATH=..
-python -c "import core.chat"`). `pylint`/`mypy`/`black` (in whatever venv you run the project
-from) and `shellcheck` (system) are unconfigured but safe to run by hand if present.
+**`python smoke_test.py` is the other gate**, and CI (`.github/workflows/ci.yml`) runs it plus
+`ruff` on every push and PR to `main`. It is not a test suite: it never exercises a tool's
+behaviour, because that would need LibreOffice, a browser, an X11 display and real API credits.
+It checks the four things that break silently — everything imports, the tool registry is
+well-formed with no duplicate names, **the tool count claimed in the docs still equals
+`len(local_tools.TOOLS)`**, and `mcp_server.py` completes an MCP handshake advertising
+`delegate`. That third check exists because this repo states its tool count in five places
+across two files; the fourth because a stray byte on stdout desynchronising JSON-RPC is
+invisible until a client connects. It needs no API key (a placeholder satisfies
+`_require_api_key`, and listing tools never reaches the API) and no optional packages, since
+every optional backing is imported lazily — which is why CI installs only the five
+module-level dependencies and finishes in seconds.
+
+There are still **no unit tests and no type checks**. `pylint`/`mypy`/`black` (in whatever venv
+you run the project from) and `shellcheck` (system) are unconfigured but safe to run by hand.
+For a quick manual check, `python -m py_compile` and an import smoke test (`PYTHONPATH=..
+python -c "import core.chat"`) are what `smoke_test.py` automates.
 
 Two rules about this codebase that a linter will fight you on, both learned the hard way:
 
@@ -105,6 +118,7 @@ The blow-by-blow of how these were triaged lives in `git log`, not here.
 
 - `ANTHROPIC_API_KEY` — read from the environment. `main.py` keeps an explicit `os.getenv("ANTHROPIC_API_KEY")` reference on purpose (the user runs a global key from `~/.bashrc`); **do not remove it** even though `core/claude.py` also constructs its own `Anthropic()` that reads the same env var.
 - **MCP bearer tokens** — each `[mcp].servers` entry may set `token_env` naming the environment variable that holds its token; it is sent as `Authorization: Bearer <token>`. A server with no `token_env` connects unauthenticated. Tokens are never stored in `config.toml`.
+- `RESEARCHMESH_MCP_TOKEN` — the *serving* side of that same contract: the bearer token `mcp_server.py --transport streamable-http` requires from its clients (rename with `--token-env`). Unset means the endpoint is unauthenticated, which is allowed by design; only stdio needs no token at all, since there is no port. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"` — there is deliberately no generator script, as a file wrapping one line of stdlib fails the same "must beat `bash` at something structural" test that governs the tools. Three placement rules that are easy to get wrong: a `systemd` unit does **not** read `~/.bashrc` (use `EnvironmentFile=`); an MCP client passes a stdio server only a small safe env subset, so the variable must be named in that server's `env` block in the client config; and the literal token must never land in `.mcp.json` or `config.toml`, both of which are committed — use `${VAR}` and `token_env`. It is one token and each end reads the variable from its own environment, so serving and consuming machines normally share the *same* name — a second name is only needed if one machine both serves an endpoint and consumes another, where one variable would otherwise have to mean two different secrets at once.
 - **`$VAR` in `[mcp].servers`** — `tomllib` does no substitution, so `main.py`'s `_expand_paths()` expands `~` and `$VAR`/`${VAR}` in `command`, `url`, and the *values* of `env` before the entry reaches `build_client()`. That is what lets the committed config say `/home/$USER/...` instead of one developer's home directory. `env`'s keys are variable names and are deliberately not expanded, and an undefined variable is left verbatim (`expandvars`' behaviour) so it surfaces in the "could not reach/launch" warning rather than collapsing to `/home//...`.
 - `CLAUDE_SHOW_USAGE` — set to `1` to print per-request token and prompt-cache counters (see `core/chat.py`). Prompt caching fails silently, so this is how you confirm the `cache_control` breakpoint is landing.
 - The Claude model comes from `config.toml` (`[claude] model`), overridable by the `CLAUDE_MODEL` env var (default `claude-sonnet-5`). The app does **not** load a `.env` file — `ANTHROPIC_API_KEY` and any MCP tokens come from the shell environment (e.g. `~/.bashrc`).
@@ -154,6 +168,12 @@ Request flow: **CLI input → Chat.run() agentic loop → Claude API + (local to
 
 - **`mcp_client.py`** (`MCPClient`) — async context-manager over an MCP `ClientSession`, supporting three transports: `stdio` (spawn `command`+`args`), `sse` (`url`), and `http` (Streamable HTTP `url`) — the last two accept `headers` for auth (e.g. a Bearer token). Exposes `list_tools`, `call_tool`, `list_prompts`, `get_prompt`, `read_resource`.
 
+- **`mcp_server.py`** — the opposite direction: serves this agent to an MCP client (Claude Code) as a **single `delegate(task, session, thinking)` tool**, so the app is a server and a client at once. Four things decide its shape. **One tool, not 18** — `bash_20250124`, `memory_20250818` and `computer_20251124` are learned schemas, and `computer` needs the `computer-use-2025-11-24` header on the request that *declares* it; that header belongs to this app's own API call, so re-exporting those tools over MCP would strip the trained schema. Wrapping `Chat.run()` keeps them intact and keeps `SYSTEM_PROMPT` in force, which is why the `bash`/editor overlap with the caller's own tools is deliberate rather than redundant, and why the ~30-50 tool ceiling doesn't apply. **The stdout guard must run before any `core/` import** — on stdio, fd 1 *is* the JSON-RPC channel, and the app `print()`s to stdout in ~22 places; it therefore `dup`s fd 1 for JSON-RPC and points fd 1 itself at stderr. Doing that at the *file-descriptor* level rather than reassigning `sys.stdout` is load-bearing: it also catches subprocesses that inherit fd 1, which is what keeps a downstream stdio server's own banner (`[unreal-mcp] Server started`) from corrupting the stream. **It `chdir`s to the repo root**, because a client spawns it with the client's project as cwd and `CLAUDE_MEMORY_DIR` defaults to a *relative* `memories`. **Calls are serialised behind an `asyncio.Lock`** — one mouse, one browser page, one kernel. One `Chat` is kept per `session` id, so the caller can follow up on a previous delegation; a new id starts clean.
+
+  `--transport stdio|streamable-http` (default stdio, `--host` default `127.0.0.1`) drives both from the *same* `Server` object: the low-level MCP `Server.run()` takes only read/write streams, so a transport supplies streams rather than being a different server. **Don't port this to `FastMCP`** — it would be a downgrade here, because `FastMCP.run_stdio_async()` calls `stdio_server()` with no arguments and so insists on the real `sys.stdout`, which is precisely the descriptor the stdout guard has to take away; the guard, not the tool registration, is the hard part of this file. Two transport-conditional details: the stdout guard is **stdio-only** (under HTTP fd 1 isn't the wire), and under HTTP `sys.stdout` is set line-buffered because Python block-buffers a redirected stdout, which otherwise swallows the whole startup log — including the `listening on …` line — until the process exits cleanly.
+
+  **HTTP auth is `config.toml`'s `token_env` contract inverted**, deliberately: `--token-env` (default `RESEARCHMESH_MCP_TOKEN`) names the variable holding a bearer token, the token never appears in a file or an argv, and an unset variable means unauthenticated rather than an error — matching `build_client()`'s "no `token_env` connects unauthenticated" and its warn-don't-fail posture when a named variable is empty. The consequence worth keeping: another ResearchMesh can consume this one with an ordinary `{ url = …, token_env = … }` line, no new concepts. `_bearer_auth()` is plain ASGI middleware wrapping the `Mount`, comparing with `hmac.compare_digest`. Note Starlette's router 307-redirects `/mcp` → `/mcp/` *before* the mounted app runs, so a request to the un-slashed path is redirected rather than 401'd — the endpoint itself is still guarded, but don't read a 307 in testing as the guard failing.
+
 ### Key conventions
 
 - **Two parallel tool systems.** MCP tools live on remote servers (any number, listed under `[mcp]`) and are discovered/executed via `ToolManager`. Local tools are declared and executed in-process, aggregated by `local_tools`. `Chat` merges both into one `tools=` list and routes execution by owner.
@@ -198,4 +218,4 @@ counting by hand.
 
 ### Removed from the original tutorial
 
-`mcp_server.py` (the bundled stdio document server) and `core/cli_chat.py` (the `@mention` / `/command` document-resource layer) have been **deleted** — that whole `docs://documents` resource/prompt system was tutorial scaffolding and is gone. Don't reintroduce a `doc_client`.
+The tutorial's `mcp_server.py` (the bundled stdio *document* server) and `core/cli_chat.py` (the `@mention` / `/command` document-resource layer) have been **deleted** — that whole `docs://documents` resource/prompt system was tutorial scaffolding and is gone. Don't reintroduce a `doc_client`. **The `mcp_server.py` in the repo today is unrelated** — it is the delegation server described in Architecture above, written from scratch, and shares nothing with the deleted one but the filename.
