@@ -1,14 +1,16 @@
 import asyncio
-import sys
 import os
+import sys
 import tomllib
-from anthropic import Anthropic
 from contextlib import AsyncExitStack
-from mcp_client import MCPClient
-from core.claude import Claude
-from core.chat import Chat
-from core.cli import CliApp
+
+from anthropic import Anthropic
+
 from core import local_tools
+from core.chat import Chat
+from core.claude import Claude
+from core.cli import CliApp
+from mcp_client import MCPClient
 
 # Anthropic Config
 api_key = os.getenv("ANTHROPIC_API_KEY") # api key is in .bashrc file, which is why this is here
@@ -151,8 +153,16 @@ async def _connect_mcp_servers(stack: AsyncExitStack, clients: dict) -> None:
             # report the endpoint instead of dumping a traceback.
             try:
                 await client.cleanup()
-            except BaseException:
-                pass
+            except BaseException as cleanup_error:
+                # Same rule as core/local_tools.shutdown(): cleanup must not be
+                # able to fail, but it must not fail *silently* either — this is
+                # already an error path, so a swallowed second failure here is
+                # the least visible place in the app.
+                print(
+                    f"[mcp] {name}: cleanup after failed connect also failed "
+                    f"(ignored): {cleanup_error}",
+                    file=sys.stderr,
+                )
             target = server.get("url") or " ".join(server.get("command", []))
             print(
                 f"[mcp] {name}: could not reach/launch {target} — skipped",

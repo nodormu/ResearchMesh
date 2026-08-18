@@ -62,6 +62,7 @@ def _run_bash(tool_input: dict) -> str:
             encoding="utf-8",
             errors="replace",
             timeout=120,
+            check=False,
         )
     except subprocess.TimeoutExpired:
         return "Error: command timed out after 120s"

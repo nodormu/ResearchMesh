@@ -111,6 +111,7 @@ def _run(argv: list[str], timeout: int) -> tuple[bool, str]:
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            check=False,
         )
     except FileNotFoundError:
         return False, f"{argv[0]} is not installed or not on PATH"

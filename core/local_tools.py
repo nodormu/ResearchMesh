@@ -12,16 +12,18 @@ hint if the model reaches for it.
 
 import inspect
 
-from core import browser
+from core import (
+    browser,
+    computer,
+    config_edit,
+    data,
+    documents,
+    files,
+    kernel,
+    memory,
+    processes,
+)
 from core import claude_learned_schemas as learned
-from core import computer
-from core import config_edit
-from core import data
-from core import documents
-from core import files
-from core import kernel
-from core import memory
-from core import processes
 
 MODULES = [
     learned,     # bash, text editor, web_search, web_fetch

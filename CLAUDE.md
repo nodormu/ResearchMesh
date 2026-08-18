@@ -55,66 +55,51 @@ simply retries the import.
 
 See **`README.md`** for the full environment setup — the quick start is at the top, and the collapsed "Full setup detail" section covers browser system libraries, the optional per-tool packages, and environment variables. (`SETUP.md` was merged into it; the two duplicated ~60% of their content and drifted apart.)
 
-There are **no tests, linters, or type checks** configured — no `[tool.ruff]`/`[tool.black]`
-in `pyproject.toml`, no `.pylintrc`, nothing runs in CI or on save. Sanity-check edits with
-`python -m py_compile` and an import smoke test (`PYTHONPATH=.. python -c "import
-core.chat"`). `pylint`/`mypy`/`black`/`ruff` (in whatever venv you run the project from) and
-`shellcheck` (system) are not project dependencies but are safe to run by hand if present.
+**One linter is configured: `ruff`.** `pyproject.toml` has a `[tool.ruff.lint]` section, so
+**`ruff check .` should come back clean** — treat that as the bar for an edit. It adds no
+rules; it only lists exemptions, each with its reason beside it. A run that is *not* clean
+means the finding is new: either something you just wrote, or a rule a newer ruff added
+(`select` is deliberately left at ruff's defaults, which do shift between versions —
+`BLE001`/`S110`/`PLW1510` only began appearing around 0.16). Triage it rather than assuming
+it's more of the same. Ruff itself is not a project dependency and nothing runs it for you.
 
-If you run `ruff`, read the output in two halves — **only the first half is by design.**
-`ruff check --isolated core/` reports 34 findings on ruff 0.16.3 (was 45 before a 2026
-cleanup pass, see below), 29 of them `BLE001` (blind-except). Most of those are the
-deliberate tool-execution isolation boundaries: each local tool catches anything and
-returns an error string instead of raising, so one bad tool call can't crash the chat loop
-(see `core/chat.py`'s `_run_tool_uses` / `_resolve_pending_tool_uses`). Not all of them,
-though — the ones in `core/cli.py` (REPL loop), `core/tools.py` (MCP execute path) and
-`core/chat.py` itself are loop guards rather than per-tool boundaries, and `main.py`'s
-connect fallback adds two more outside `core/`. Scope or ignore `BLE001` in a ruff config
-rather than "fixing" it by narrowing the excepts. One caveat on the counts: `BLE001` is
-not in ruff's historical default `E4`/`E7`/`E9`/`F` set, so an older ruff than 0.16.3
-reports none of it and the totals above won't match.
+Beyond that there are **no tests and no type checks**, and nothing runs in CI or on save.
+Sanity-check edits with `python -m py_compile` and an import smoke test (`PYTHONPATH=..
+python -c "import core.chat"`). `pylint`/`mypy`/`black` (in whatever venv you run the project
+from) and `shellcheck` (system) are unconfigured but safe to run by hand if present.
 
-**2026 cleanup pass (applied):** the non-`BLE001` findings were triaged individually before
-fixing anything, specifically checking whether fixing one could change another's report —
-worth knowing if you touch this area again. `B006` (`core/claude.py`'s mutable-default
-`stop_sequences=[]`) is fixed — see the `core/claude.py` bullet below, no longer an open
-issue. The 4 `S110` (bare `except: pass`) findings were all best-effort *shutdown/cleanup*
-code — `core/data.py` DuckDB `close()`, `core/kernel.py` `_shutdown_sync()` ×2,
-`core/processes.py`'s pexpect `child.close()`. **The real defect S110 was pointing at is the
-silent `pass`, not the breadth of the catch** — so the fix is a `print()` diagnostic, and
-narrowing the exception type on top of that is a separate decision that has to be judged per
-site. It was right for `core/data.py` (`duckdb.Error` is the base of duckdb's whole
-exception tree) and `core/processes.py` (`(OSError, pexpect.ExceptionPexpect)`, which covers
-`TIMEOUT`/`EOF`, and `pexpect` is guaranteed bound there). It was **wrong** for
-`core/kernel.py`, which is why those two are back to a blanket `except Exception`:
-`stop_channels()` ends in pyzmq's `context.destroy()` (reachable — the client builds its own
-context, so `_created_context` is `True`), and `zmq.ZMQError` derives from `Exception`, not
-`OSError`, so `(RuntimeError, OSError)` let it escape into a traceback on an ordinary
-Ctrl-C. Narrowing therefore cleared the `BLE001` on 2 of those 4 lines, not 4.
-`core/tools.py`'s 5 mechanical findings (`I001`, `UP035`, `UP006`, `PYI030` ×2) were cleared
-with one `ruff check --isolated core/tools.py --fix` — ruff sequences these correctly
-itself: fixing `UP006`'s `List[...]` → `list[...]` drops the last usage of capital `List`,
-which trips `F401` (unused import, not even in the original 45-finding report — it only
-exists transiently mid-fix), and `F401`'s fixer is what actually removes `List` from the
-`typing` import; `UP035`'s own autofix does nothing in isolation, it just rides along.
-**Deliberately NOT fixed:** the 2 `PLW1510` (`subprocess.run` without `check=`) findings in
-`core/claude_learned_schemas.py` and `core/documents.py` — both functions exist specifically
-to turn a non-zero exit code into a normal `(ok, output)`-shaped return rather than an
-exception, so adding `check=True` would be the *wrong* fix: it'd raise `CalledProcessError`
-on routine non-zero exits, which in `claude_learned_schemas.py` would get silently misrouted
-through the real `BLE001` two lines below (turning normal command output into a generic
-error and losing stdout), and in `documents.py` would propagate uncaught since there's no
-enclosing except at all. Also left alone: the 3 remaining `I001`s (`core/chat.py`,
-`core/cli.py`, `core/local_tools.py`) — mechanical and safe, just not asked for — and all
-29 remaining `BLE001`s.
+Two rules about this codebase that a linter will fight you on, both learned the hard way:
+
+- **Blanket `except` is the architecture, not an oversight** (`BLE001`, ~32 sites). Every
+  local tool must catch anything and return an error string rather than crash the chat loop
+  (see `core/chat.py`'s `_run_tool_uses` / `_resolve_pending_tool_uses`); the ones in
+  `core/cli.py`, `core/tools.py`, `core/chat.py` and `main.py` are the equivalent guards for
+  the REPL, the MCP execute path and the connect fallback. Don't narrow them.
+- **Cleanup paths must not be able to fail, and must not fail silently either.** Narrowing
+  an exception type in a `shutdown`/`close` path has already caused one real bug: `zmq.ZMQError`
+  derives from `Exception`, *not* `OSError`, so an `except (RuntimeError, OSError)` on
+  `core/kernel.py`'s `stop_channels()` — which ends in pyzmq's `context.destroy()` — let it
+  escape through `local_tools.shutdown()` and the `AsyncExitStack` into a traceback on an
+  ordinary Ctrl-C. Use a blanket catch **plus a `print()`**: when `S110` (`except: pass`)
+  fires, the defect it names is the silence, not the breadth.
 
 **Shutdown is isolated per tool.** `local_tools.shutdown()` runs each tool's cleanup in its
 own `try`, because it is an `AsyncExitStack` callback: an exception escaping any one of them
-skips every *later* one (leaking whatever that tool owns) and turns a normal Ctrl-C into a
+skips every *later* one (leaking whatever that tool owns) as well as producing that
 traceback. `browser.shutdown()` runs first and is itself unguarded, so before this it could
-take the kernel and the DuckDB connection down with it. Cleanup code here is the one place
-where a blanket `except Exception` is not a smell but the requirement — treat `BLE001` and
-any urge to narrow an exception type in `shutdown`/`close` paths accordingly.
+take the kernel and the DuckDB connection down with it. `main.py`'s post-failed-connect
+cleanup follows the same rule.
+
+**`subprocess.run` here is deliberately `check=False`** (`core/claude_learned_schemas.py`,
+`core/documents.py`). Both functions exist to turn a non-zero exit into a normal return
+value — a string for `bash`, an `(ok, output)` tuple for `document_convert` — so `check=True`
+is the wrong fix for `PLW1510`: in `claude_learned_schemas.py` the resulting
+`CalledProcessError` would be caught by the broad `except` two lines below and reported as a
+generic error with stdout lost, and in `documents.py` nothing would catch it at all (`_run`
+handles only `FileNotFoundError` and `TimeoutExpired`). The explicit `check=False` is the
+existing default written out, satisfying the rule while changing no behaviour.
+
+The blow-by-blow of how these were triaged lives in `git log`, not here.
 
 ## Runtime configuration
 

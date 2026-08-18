@@ -171,47 +171,25 @@ those you edit by hand.
   rather than a pin (there's no lockfile), so a venv can satisfy it and still miss a package
   added later. Re-run `pip install -r requirements.txt`; you don't need to restart the app,
   because each optional package is imported at the moment its tool is called.
-- No tests or linters are wired into the project — no `[tool.ruff]`/`[tool.black]` in
-  `pyproject.toml`, no `.pylintrc`, nothing runs automatically. Sanity-check edits with
-  `python -m py_compile core/*.py main.py`. If your venv happens to have `pylint`/`mypy`/
-  `black`/`ruff` installed (none are project dependencies — add them yourself if you want
-  them) or the system has `shellcheck`, they're safe to run by hand.
-- **If you run `ruff`, don't dismiss the whole report.** This codebase deliberately uses
-  broad `except Exception`/`except BaseException` at tool-execution boundaries throughout
-  `core/` (each local tool must catch anything and return an error string rather than crash
-  the chat loop), so most `BLE001` (blind-except) findings really are by design — on ruff
-  0.16.3 that's 29 of the 34 findings in `core/` (was 30 of 45 before a 2026 cleanup pass —
-  see below). Counts are version-sensitive — `BLE001` isn't in ruff's historical default
-  rule set, so an older ruff won't report it at all. Shutdown and cleanup paths are the one
-  place where the blanket catch is a hard requirement rather than a habit: `shutdown()` runs
-  as an exit callback, so anything escaping it skips the remaining tools' cleanup and turns
-  Ctrl-C into a traceback.
-- **2026 cleanup pass (applied):** the genuine, non-by-design
-  findings from that ruff run were triaged and fixed. `B006` (mutable default arg,
-  `core/claude.py`'s `stop_sequences=[]`) is now `None` with a conditional add to `params`,
-  matching the existing `tools`/`system` pattern in the same function. The 4 `S110`
-  (bare `try`/`except`/`pass`) findings — all best-effort *shutdown/cleanup* code
-  (`core/data.py`'s DuckDB `close()`, `core/kernel.py`'s `_shutdown_sync()` ×2,
-  `core/processes.py`'s pexpect `child.close()`) — each got a `print()` diagnostic instead
-  of a silent `pass`, which is the part `S110` was actually complaining about. Two of them
-  (`core/data.py`, `core/processes.py`) also got a narrowed exception type (`duckdb.Error`,
-  `(OSError, pexpect.ExceptionPexpect)`), which cleared their `BLE001` too. `core/kernel.py`
-  keeps a blanket `except Exception`: `stop_channels()` ends in a pyzmq `context.destroy()`
-  and `zmq.ZMQError` isn't an `OSError`, so narrowing there let it escape and turn an
-  ordinary Ctrl-C into a traceback. `core/tools.py`'s 5 mechanical findings
-  (`I001`, `UP035`, `UP006`, `PYI030` ×2) were cleared with a single
-  `ruff check --isolated core/tools.py --fix` — verified that ruff's own fixer sequences
-  these correctly in one pass (fixing `UP006`'s `List[...]` → `list[...]` drops the last
-  usage of `List`, which triggers `F401` unused-import, whose fixer is what actually
-  removes `List` from the `typing` import — `UP035`'s own fixer does nothing on its own,
-  it just rides along). **Deliberately left alone:** the 2 `PLW1510`
-  (`subprocess.run` without `check=`) findings in `core/claude_learned_schemas.py` and
-  `core/documents.py` — both functions exist specifically to turn a non-zero exit code
-  into a normal `(ok, output)`-style return rather than an exception, so `check=True`
-  would be the *wrong* fix (it'd raise `CalledProcessError` on routine non-zero exits,
-  either getting misrouted through a real BLE001 catch or propagating uncaught). Also left
-  alone: the 3 remaining `I001`s (`core/chat.py`, `core/cli.py`, `core/local_tools.py`) and
-  all 29 remaining `BLE001`s (still by-design tool-isolation/loop-guard boundaries).
+- **Linting: one linter is configured, `ruff`, and `ruff check .` should pass.**
+  `pyproject.toml` has a `[tool.ruff.lint]` section. It adds no rules — it only switches
+  three *off*, each with its reason written next to it, so a clean run is the expected
+  baseline and any finding you do see is genuinely new: your own code, or a rule a newer
+  ruff added. (The rule selection is left at ruff's defaults, which do shift between
+  versions.) Ruff is **not** a dependency and nothing runs it for you — install it yourself
+  if you want it. There's no `[tool.black]` and no `.pylintrc`.
+- **No tests, no type checking, no CI.** Nothing runs automatically on commit or push.
+  Sanity-check edits with `python -m py_compile core/*.py main.py`. If your venv happens to
+  have `pylint`/`mypy`/`black` installed (none are project dependencies) or the system has
+  `shellcheck`, they're safe to run by hand — expect plenty of output, since nothing is
+  configured for them.
+- **Two things a linter will fight you on here** — worth knowing before you "fix" them.
+  Broad `except Exception`/`except BaseException` is the design, not sloppiness: every local
+  tool must catch anything and return an error string rather than crash the chat loop, which
+  is why `BLE001` is switched off project-wide. And cleanup paths (`shutdown`, `close`) must
+  not be able to fail *or* fail silently — narrowing one has already caused a real bug, since
+  `zmq.ZMQError` isn't an `OSError` and escaping `shutdown()` turns an ordinary Ctrl-C into a
+  traceback. Blanket catch plus a `print()` is the pattern.
 
 <a id="full-setup-detail"></a>
 
@@ -322,6 +300,9 @@ The OS trust store (`/etc/ssl/certs`) does not affect this app.
 ```
 main.py                          entrypoint — connects the MCP servers, wires Chat + REPL
 mcp_client.py                    MCP client (stdio / SSE / Streamable HTTP)
+config.toml                      model + MCP server list (no secrets; committed)
+pyproject.toml                   metadata, deps, and the ruff exemptions (lint config)
+requirements.txt                 the same deps, for `pip install -r`
 CLAUDE.md                        architecture + conventions, for AI coding agents
 core/
   chat.py                        agentic loop, tool routing, SYSTEM_PROMPT

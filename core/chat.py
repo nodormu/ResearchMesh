@@ -1,10 +1,11 @@
 import os
 
-from core.claude import Claude
-from mcp_client import MCPClient
-from core.tools import ToolManager
-from core import local_tools
 from anthropic.types import MessageParam
+
+from core import local_tools
+from core.claude import Claude
+from core.tools import ToolManager
+from mcp_client import MCPClient
 
 MAX_TOOL_ITERATIONS = 75
 
