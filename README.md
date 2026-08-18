@@ -15,8 +15,12 @@
 
 A terminal chat client for the Anthropic API that hands Claude real tools on your own Linux
 machine: a shell, a file editor, a headless browser it can surf with, a persistent Python
-session, and document conversion. Ask it something and it can look it up, read the pages,
-run the commands, and hand you back a finished `.docx` — in one conversation.
+session, desktop control, and document conversion. Ask it something and it can look it up,
+read the pages, run the commands, and hand you back a finished `.docx` — in one conversation.
+
+It works in both directions: it connects out to your own MCP servers, and it can itself be
+added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do —
+[see below](#mcp-in-both-directions).
 
 ## What it can do
 
@@ -51,7 +55,8 @@ servers pointing at a private LAN address — replace those URLs with your own, 
 mcp_client.py is just a script to connect to your MCP server and pull a list of tools, be sure you change the IP address in the code.
 
 ```bash
-sudo apt install python3 python3-venv python3-dev build-essential libreoffice pandoc
+sudo apt install python3 python3-venv python3-dev build-essential \
+                 libreoffice pandoc python3-tk scrot
 
 python3 -m venv ~/claude-chat-plus-more-tools
 source ~/claude-chat-plus-more-tools/bin/activate
@@ -349,7 +354,18 @@ import; `md → pdf` goes through odt on the way, since pandoc's own PDF writer 
 LaTeX engine. `libreoffice-writer`/`-calc`/`-impress` alone are enough if you don't want the
 whole suite.
 
-**Computer use needs X11.** The `computer` tool synthesises input through X11/XTEST, which
+**Computer use needs two apt packages that pip won't install.** `pip install pyautogui`
+succeeds without them, so the failure is misleading — the tool reports pyautogui as missing
+when it is right there:
+
+- **`python3-tk`** — `pyautogui` pulls in `mouseinfo`, which imports `tkinter` at module
+  level. Without it, `import pyautogui` raises and `computer` returns its install hint for a
+  package you already have.
+- **`scrot`** — `pyscreeze` only has a screenshot path if `gnome-screenshot` is present (which
+  lets it use Pillow's `ImageGrab`) or `scrot` is. With neither, capture fails on X11 even
+  though every Python package is installed. Either works; `scrot` is the lighter one.
+
+**Computer use also needs X11.** The `computer` tool synthesises input through X11/XTEST, which
 Wayland compositors deliberately ignore — on a Wayland session clicks and keystrokes never
 reach native windows and screenshots come back blank, so the tool refuses up front and says
 so instead of failing silently. Check with `echo $XDG_SESSION_TYPE`. Options:
@@ -382,7 +398,7 @@ Claude, not a place for your project files — and it persists until you delete 
 | `config_edit` | `ruamel.yaml` (YAML), `tomlkit` (TOML), `jsonpath-ng` (`$…` queries); JSON needs nothing |
 | `sql_query` | `duckdb` |
 | `trash` | `send2trash` |
-| `computer` | `pyautogui`, `pillow` — **plus an X11 display** (see below) |
+| `computer` | `pyautogui`, `pillow` — **plus `python3-tk` and `scrot` from apt, and an X11 display** (see below) |
 | `memory` | nothing — standard library only |
 
 To drop a tool entirely, remove its module from `MODULES` in `core/local_tools.py`.

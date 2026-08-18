@@ -36,10 +36,13 @@ pip install -r requirements.txt
 playwright install chromium
 sudo playwright install-deps chromium   # Linux: OS libraries the browser needs (e.g. libmanette)
 sudo apt install libreoffice pandoc     # document_convert: soffice + the markdown path
+sudo apt install python3-tk scrot       # computer: see below — both are apt, not pip
 sudo apt install xvfb                   # computer: only if you're on Wayland or headless
 ```
 
 The `computer` tool needs an **X11** display — Wayland ignores the XTEST input it synthesises, so it refuses there rather than failing silently. On a Wayland box, run the client under a nested X server instead: `xvfb-run -s '-screen 0 1280x800x24' python main.py`.
+
+It also has two **apt** dependencies that `pip install pyautogui` does not bring, and whose absence is easy to misdiagnose because the failure names a package that *is* installed: `mouseinfo` imports `tkinter` at module level, so without **`python3-tk`** the `import pyautogui` inside `computer` raises and the tool reports pyautogui as missing when it isn't. And `pyscreeze` only has a screenshot path if either `gnome-screenshot` (which lets it use Pillow's `ImageGrab`) or **`scrot`** is on PATH — with neither, capture fails on X11 even though every Python package is present. `scrot` is the one to install, since this tool is X11-only by design.
 
 Optional tool dependencies are imported **lazily, inside the tool that needs them**, so a missing package only breaks that one tool — it still gets declared to Claude and returns an install hint if used. To drop a tool entirely, remove its module from `MODULES` in `core/local_tools.py`.
 
