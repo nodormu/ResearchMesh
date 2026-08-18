@@ -1,8 +1,10 @@
 import json
-from typing import Literal, List
-from mcp.types import CallToolResult, Tool, TextContent, ImageContent
-from mcp_client import MCPClient
+from typing import Literal
+
 from anthropic.types import ToolResultBlockParam
+from mcp.types import CallToolResult, ImageContent, TextContent, Tool
+
+from mcp_client import MCPClient
 
 
 class ToolManager:
@@ -39,7 +41,7 @@ class ToolManager:
         cls,
         tool_use_id: str,
         text: str,
-        status: Literal["success"] | Literal["error"],
+        status: Literal["success", "error"],
     ) -> ToolResultBlockParam:
         """Builds a tool result part dictionary."""
         return {
@@ -54,7 +56,7 @@ class ToolManager:
         cls,
         tool_use_id: str,
         content,
-        status: Literal["success"] | Literal["error"],
+        status: Literal["success", "error"],
     ) -> ToolResultBlockParam:
         """Like _build_tool_result_part, but accepts pre-built content
         (a string, or a list of content blocks e.g. text + image)."""
@@ -68,7 +70,7 @@ class ToolManager:
     @classmethod
     async def execute_blocks(
         cls, clients: dict[str, MCPClient], tool_use_blocks
-    ) -> List[ToolResultBlockParam]:
+    ) -> list[ToolResultBlockParam]:
         """Executes a list of tool_use blocks against the provided clients."""
         tool_result_blocks: list[ToolResultBlockParam] = []
         owners = await cls._tool_owners(clients)

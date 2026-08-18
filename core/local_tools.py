@@ -10,6 +10,8 @@ tool whose dependency is missing declares itself normally and returns an install
 hint if the model reaches for it.
 """
 
+import inspect
+
 from core import browser
 from core import claude_learned_schemas as learned
 from core import computer
@@ -58,7 +60,21 @@ async def execute(name: str, tool_input: dict) -> str | None:
 
 
 async def shutdown():
-    """Release everything a local tool may have started. Safe if unused."""
-    await browser.shutdown()
-    await kernel.shutdown()
-    data.close()
+    """Release everything a local tool may have started. Safe if unused.
+
+    Each step is isolated: these run as an AsyncExitStack callback on the way
+    out, so an exception escaping one of them would both skip every later step
+    (leaking whatever it owns) and turn an ordinary Ctrl-C into a traceback.
+    One tool failing to clean up must not stop the others from trying.
+    """
+    for label, close in (
+        ("browser", browser.shutdown),
+        ("kernel", kernel.shutdown),
+        ("sql_query", data.close),
+    ):
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except Exception as e:
+            print(f"[shutdown] {label} cleanup failed (ignored): {e}")

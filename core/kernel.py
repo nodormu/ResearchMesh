@@ -189,17 +189,24 @@ def _run(tool_input: dict) -> str:
 
 
 def _shutdown_sync():
+    # Both excepts are deliberately blanket (ruff BLE001) rather than narrowed.
+    # These run on the way out and must not be able to fail: stop_channels()
+    # ends in pyzmq's context.destroy(), and zmq.ZMQError derives from
+    # Exception, *not* OSError — so `except (RuntimeError, OSError)` lets it
+    # escape, out through local_tools.shutdown() and the AsyncExitStack, into a
+    # traceback on an ordinary Ctrl-C. The S110 finding these replaced was about
+    # the silent `pass`, not the breadth, so the print() is the actual fix.
     global _manager, _client
     if _client is not None:
         try:
             _client.stop_channels()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[kernel] stop_channels failed (ignored): {e}")
     if _manager is not None:
         try:
             _manager.shutdown_kernel(now=True)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[kernel] shutdown_kernel failed (ignored): {e}")
     _manager = _client = None
 
 

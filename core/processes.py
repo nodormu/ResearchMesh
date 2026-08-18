@@ -159,8 +159,8 @@ def _run(tool_input: dict) -> str:
     finally:
         try:
             child.close(force=True)
-        except Exception:
-            pass
+        except (OSError, pexpect.ExceptionPexpect) as e:
+            print(f"[processes] child.close failed (ignored): {e}")
 
     return json.dumps(
         {

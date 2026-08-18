@@ -112,8 +112,10 @@ def _run(tool_input: dict) -> str:
 def close():
     global _connection
     if _connection is not None:
+        import duckdb  # already loaded — a live _connection implies a prior success
+
         try:
             _connection.close()
-        except Exception:
-            pass
+        except duckdb.Error as e:
+            print(f"[data] duckdb close failed (ignored): {e}")
         _connection = None

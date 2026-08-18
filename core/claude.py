@@ -49,7 +49,7 @@ class Claude:
         self,
         messages,
         system=None,
-        stop_sequences=[],
+        stop_sequences=None,
         tools=None,
         thinking=False,
     ) -> BetaMessage:
@@ -61,7 +61,6 @@ class Claude:
             "model": self.model,
             "max_tokens": 8000,
             "messages": messages,
-            "stop_sequences": stop_sequences,
             "betas": BETAS,
             # Prompt caching. Top-level cache_control auto-places the breakpoint on
             # the last cacheable block, so each request re-reads the stable prefix
@@ -86,6 +85,9 @@ class Claude:
         # controls depth rather than a token count.
         if thinking:
             params["thinking"] = {"type": "adaptive"}
+
+        if stop_sequences:
+            params["stop_sequences"] = stop_sequences
 
         if tools:
             params["tools"] = tools

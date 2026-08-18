@@ -180,10 +180,38 @@ those you edit by hand.
   broad `except Exception`/`except BaseException` at tool-execution boundaries throughout
   `core/` (each local tool must catch anything and return an error string rather than crash
   the chat loop), so most `BLE001` (blind-except) findings really are by design — on ruff
-  0.16.3 that's 30 of the 45 findings in `core/`. The other 15 aren't, and some are real:
-  `B006` flags a genuine mutable-default argument in `core/claude.py`. Counts are
-  version-sensitive — `BLE001` isn't in ruff's historical default rule set, so an older ruff
-  won't report it at all.
+  0.16.3 that's 29 of the 34 findings in `core/` (was 30 of 45 before a 2026 cleanup pass —
+  see below). Counts are version-sensitive — `BLE001` isn't in ruff's historical default
+  rule set, so an older ruff won't report it at all. Shutdown and cleanup paths are the one
+  place where the blanket catch is a hard requirement rather than a habit: `shutdown()` runs
+  as an exit callback, so anything escaping it skips the remaining tools' cleanup and turns
+  Ctrl-C into a traceback.
+- **2026 cleanup pass (applied):** the genuine, non-by-design
+  findings from that ruff run were triaged and fixed. `B006` (mutable default arg,
+  `core/claude.py`'s `stop_sequences=[]`) is now `None` with a conditional add to `params`,
+  matching the existing `tools`/`system` pattern in the same function. The 4 `S110`
+  (bare `try`/`except`/`pass`) findings — all best-effort *shutdown/cleanup* code
+  (`core/data.py`'s DuckDB `close()`, `core/kernel.py`'s `_shutdown_sync()` ×2,
+  `core/processes.py`'s pexpect `child.close()`) — each got a `print()` diagnostic instead
+  of a silent `pass`, which is the part `S110` was actually complaining about. Two of them
+  (`core/data.py`, `core/processes.py`) also got a narrowed exception type (`duckdb.Error`,
+  `(OSError, pexpect.ExceptionPexpect)`), which cleared their `BLE001` too. `core/kernel.py`
+  keeps a blanket `except Exception`: `stop_channels()` ends in a pyzmq `context.destroy()`
+  and `zmq.ZMQError` isn't an `OSError`, so narrowing there let it escape and turn an
+  ordinary Ctrl-C into a traceback. `core/tools.py`'s 5 mechanical findings
+  (`I001`, `UP035`, `UP006`, `PYI030` ×2) were cleared with a single
+  `ruff check --isolated core/tools.py --fix` — verified that ruff's own fixer sequences
+  these correctly in one pass (fixing `UP006`'s `List[...]` → `list[...]` drops the last
+  usage of `List`, which triggers `F401` unused-import, whose fixer is what actually
+  removes `List` from the `typing` import — `UP035`'s own fixer does nothing on its own,
+  it just rides along). **Deliberately left alone:** the 2 `PLW1510`
+  (`subprocess.run` without `check=`) findings in `core/claude_learned_schemas.py` and
+  `core/documents.py` — both functions exist specifically to turn a non-zero exit code
+  into a normal `(ok, output)`-style return rather than an exception, so `check=True`
+  would be the *wrong* fix (it'd raise `CalledProcessError` on routine non-zero exits,
+  either getting misrouted through a real BLE001 catch or propagating uncaught). Also left
+  alone: the 3 remaining `I001`s (`core/chat.py`, `core/cli.py`, `core/local_tools.py`) and
+  all 29 remaining `BLE001`s (still by-design tool-isolation/loop-guard boundaries).
 
 <a id="full-setup-detail"></a>
 

@@ -62,19 +62,59 @@ core.chat"`). `pylint`/`mypy`/`black`/`ruff` (in whatever venv you run the proje
 `shellcheck` (system) are not project dependencies but are safe to run by hand if present.
 
 If you run `ruff`, read the output in two halves — **only the first half is by design.**
-`ruff check --isolated core/` reports 45 findings on ruff 0.16.3, 30 of them `BLE001`
-(blind-except). Most of those are the deliberate tool-execution isolation boundaries: each
-local tool catches anything and returns an error string instead of raising, so one bad tool
-call can't crash the chat loop (see `core/chat.py`'s `_run_tool_uses` /
-`_resolve_pending_tool_uses`). Not all of them, though — the ones in `core/cli.py` (REPL
-loop), `core/tools.py` (MCP execute path) and `core/chat.py` itself are loop guards rather
-than per-tool boundaries, and `main.py`'s connect fallback adds two more outside `core/`.
-Scope or ignore `BLE001` in a ruff config rather than "fixing" it by narrowing the excepts.
-**The remaining 15 findings are not covered by that argument and are worth actually
-reading** — `B006` at `core/claude.py:52` is the mutable-default `stop_sequences=[]` listed
-as a known open issue in the `core/claude.py` bullet below, not a false positive. One caveat
-on the counts: `BLE001` is not in ruff's historical default `E4`/`E7`/`E9`/`F` set, so an
-older ruff than 0.16.3 reports none of it and the totals above won't match.
+`ruff check --isolated core/` reports 34 findings on ruff 0.16.3 (was 45 before a 2026
+cleanup pass, see below), 29 of them `BLE001` (blind-except). Most of those are the
+deliberate tool-execution isolation boundaries: each local tool catches anything and
+returns an error string instead of raising, so one bad tool call can't crash the chat loop
+(see `core/chat.py`'s `_run_tool_uses` / `_resolve_pending_tool_uses`). Not all of them,
+though — the ones in `core/cli.py` (REPL loop), `core/tools.py` (MCP execute path) and
+`core/chat.py` itself are loop guards rather than per-tool boundaries, and `main.py`'s
+connect fallback adds two more outside `core/`. Scope or ignore `BLE001` in a ruff config
+rather than "fixing" it by narrowing the excepts. One caveat on the counts: `BLE001` is
+not in ruff's historical default `E4`/`E7`/`E9`/`F` set, so an older ruff than 0.16.3
+reports none of it and the totals above won't match.
+
+**2026 cleanup pass (applied):** the non-`BLE001` findings were triaged individually before
+fixing anything, specifically checking whether fixing one could change another's report —
+worth knowing if you touch this area again. `B006` (`core/claude.py`'s mutable-default
+`stop_sequences=[]`) is fixed — see the `core/claude.py` bullet below, no longer an open
+issue. The 4 `S110` (bare `except: pass`) findings were all best-effort *shutdown/cleanup*
+code — `core/data.py` DuckDB `close()`, `core/kernel.py` `_shutdown_sync()` ×2,
+`core/processes.py`'s pexpect `child.close()`. **The real defect S110 was pointing at is the
+silent `pass`, not the breadth of the catch** — so the fix is a `print()` diagnostic, and
+narrowing the exception type on top of that is a separate decision that has to be judged per
+site. It was right for `core/data.py` (`duckdb.Error` is the base of duckdb's whole
+exception tree) and `core/processes.py` (`(OSError, pexpect.ExceptionPexpect)`, which covers
+`TIMEOUT`/`EOF`, and `pexpect` is guaranteed bound there). It was **wrong** for
+`core/kernel.py`, which is why those two are back to a blanket `except Exception`:
+`stop_channels()` ends in pyzmq's `context.destroy()` (reachable — the client builds its own
+context, so `_created_context` is `True`), and `zmq.ZMQError` derives from `Exception`, not
+`OSError`, so `(RuntimeError, OSError)` let it escape into a traceback on an ordinary
+Ctrl-C. Narrowing therefore cleared the `BLE001` on 2 of those 4 lines, not 4.
+`core/tools.py`'s 5 mechanical findings (`I001`, `UP035`, `UP006`, `PYI030` ×2) were cleared
+with one `ruff check --isolated core/tools.py --fix` — ruff sequences these correctly
+itself: fixing `UP006`'s `List[...]` → `list[...]` drops the last usage of capital `List`,
+which trips `F401` (unused import, not even in the original 45-finding report — it only
+exists transiently mid-fix), and `F401`'s fixer is what actually removes `List` from the
+`typing` import; `UP035`'s own autofix does nothing in isolation, it just rides along.
+**Deliberately NOT fixed:** the 2 `PLW1510` (`subprocess.run` without `check=`) findings in
+`core/claude_learned_schemas.py` and `core/documents.py` — both functions exist specifically
+to turn a non-zero exit code into a normal `(ok, output)`-shaped return rather than an
+exception, so adding `check=True` would be the *wrong* fix: it'd raise `CalledProcessError`
+on routine non-zero exits, which in `claude_learned_schemas.py` would get silently misrouted
+through the real `BLE001` two lines below (turning normal command output into a generic
+error and losing stdout), and in `documents.py` would propagate uncaught since there's no
+enclosing except at all. Also left alone: the 3 remaining `I001`s (`core/chat.py`,
+`core/cli.py`, `core/local_tools.py`) — mechanical and safe, just not asked for — and all
+29 remaining `BLE001`s.
+
+**Shutdown is isolated per tool.** `local_tools.shutdown()` runs each tool's cleanup in its
+own `try`, because it is an `AsyncExitStack` callback: an exception escaping any one of them
+skips every *later* one (leaking whatever that tool owns) and turns a normal Ctrl-C into a
+traceback. `browser.shutdown()` runs first and is itself unguarded, so before this it could
+take the kernel and the DuckDB connection down with it. Cleanup code here is the one place
+where a blanket `except Exception` is not a smell but the requirement — treat `BLE001` and
+any urge to narrow an exception type in `shutdown`/`close` paths accordingly.
 
 ## Runtime configuration
 
@@ -97,7 +137,7 @@ Request flow: **CLI input → Chat.run() agentic loop → Claude API + (local to
 
 - **`core/chat.py`** (`Chat`) — the agentic loop, plus `SYSTEM_PROMPT`, sent as `system` on every request. That prompt exists because with tool schemas alone Claude describes capabilities it doesn't have (it invented a sandboxed `code_execution` container in testing); it states the two execution locations, that nothing is sandboxed, which tools are stateful, and how to choose between the overlapping ones. Keep it factual — if you add or remove a tool, update it. Each turn it calls Claude with the merged tool set (`local_tools.TOOLS + ToolManager.get_all_tools(...)`, the MCP half fetched once per turn). While `stop_reason == "tool_use"` it routes each `tool_use` block — `local_tools.execute()` first, then `ToolManager.execute_blocks()` (MCP) if no local module owns the name — feeds the results back, and loops. `stop_reason == "pause_turn"` (server-side web tools mid-run) is handled by resending. Capped at `MAX_TOOL_ITERATIONS`.
 
-- **`core/local_tools.py`** — the registry of client-executed tools. Every module in `MODULES` exposes the same three names (`TOOLS`, `handles(name)`, `await execute(name, input)`), so a new tool is one new module plus one line here rather than edits to the chat loop's declaration list *and* its routing chain. Raises at import on duplicate tool names, and `shutdown()` releases everything the tools may have started (browser, kernel, DuckDB).
+- **`core/local_tools.py`** — the registry of client-executed tools. Every module in `MODULES` exposes the same three names (`TOOLS`, `handles(name)`, `await execute(name, input)`), so a new tool is one new module plus one line here rather than edits to the chat loop's declaration list *and* its routing chain. Raises at import on duplicate tool names, and `shutdown()` releases everything the tools may have started (browser, kernel, DuckDB) — each in its own `try`, so one tool failing to clean up neither skips the others nor turns Ctrl-C into a traceback (see "Shutdown is isolated per tool" above).
 
 - **`core/claude_learned_schemas.py`** — Anthropic's built-in ("learned") tools. `bash` (`bash_20250124`) and the text editor (`text_editor_20250728` / `str_replace_based_edit_tool`) are **client-executed** here; `web_search` (`web_search_20260318`) and `web_fetch` (`web_fetch_20260318`) are **server-executed** by Anthropic (declaration only, no local handler). `handles()` reports the two client-side names; `execute()` runs them off the event loop via `asyncio.to_thread`.
 
@@ -121,7 +161,7 @@ Request flow: **CLI input → Chat.run() agentic loop → Claude API + (local to
 
 - **`core/output.py`** — `clip(text, limit)`, the one truncation helper the local tool modules share (bash/editor/kernel/pexpect budget 12000 chars, browser 6000), plus `IMAGE_MEDIA_TYPES` and `image_result(...)`. The latter builds the `{"__kind__": "image", ...}` marker that a tool returns instead of a string when its result is pixels (file-editor/memory `view` on an image, every computer screenshot); `Chat._local_result_to_content` turns it into a real `image` content block.
 
-- **`core/claude.py`** (`Claude`) — thin Anthropic SDK wrapper. It posts to **`client.beta.messages.create`, not `client.messages.create`**, with `betas=BETAS` — the `computer` tool's schema is beta-gated and `local_tools` declares it on *every* request, so the header is unconditional; omitting it 400s the whole request, not just computer use. The beta endpoint is a superset, but it returns **`BetaMessage`, which is not a subclass of `Message`** — hence `_RESPONSE_TYPES`; an `isinstance(message, Message)` check alone silently stuffs the response object into `content` instead of its blocks. Three more things to know before editing `chat()`: **no sampling parameters** — current models reject a non-default `temperature`/`top_p`/`top_k` with a 400 and only accept the default, so sending one can only fail; and **no `budget_tokens`** — adaptive thinking replaced it (`{"type": "enabled", "budget_tokens": N}` is a 400 now), with `output_config={"effort": ...}` as the depth knob if ever needed. Also open: `stop_sequences=[]` is a mutable default argument and is sent empty on every request, and `max_tokens=8000` is shared by thinking *and* the reply — a `/think` turn on a hard problem can end in `stop_reason: "max_tokens"`; raise it (streaming is advisable much above ~16K). `chat()` builds request params (max_tokens 8000, optional thinking/tools/system); helpers append user/assistant messages and extract text blocks.
+- **`core/claude.py`** (`Claude`) — thin Anthropic SDK wrapper. It posts to **`client.beta.messages.create`, not `client.messages.create`**, with `betas=BETAS` — the `computer` tool's schema is beta-gated and `local_tools` declares it on *every* request, so the header is unconditional; omitting it 400s the whole request, not just computer use. The beta endpoint is a superset, but it returns **`BetaMessage`, which is not a subclass of `Message`** — hence `_RESPONSE_TYPES`; an `isinstance(message, Message)` check alone silently stuffs the response object into `content` instead of its blocks. Three more things to know before editing `chat()`: **no sampling parameters** — current models reject a non-default `temperature`/`top_p`/`top_k` with a 400 and only accept the default, so sending one can only fail; and **no `budget_tokens`** — adaptive thinking replaced it (`{"type": "enabled", "budget_tokens": N}` is a 400 now), with `output_config={"effort": ...}` as the depth knob if ever needed. `stop_sequences` defaults to `None` (fixed from a mutable `[]` default — a 2026 ruff `B006` finding) and is only added to `params` when truthy, matching the existing `tools`/`system` pattern. Also open: `max_tokens=8000` is shared by thinking *and* the reply — a `/think` turn on a hard problem can end in `stop_reason: "max_tokens"`; raise it (streaming is advisable much above ~16K). `chat()` builds request params (max_tokens 8000, optional thinking/tools/system); helpers append user/assistant messages and extract text blocks.
 
 - **`core/tools.py`** (`ToolManager`) — the MCP↔Anthropic bridge (remote server tools only). `get_all_tools` aggregates tool schemas across all MCP clients (called once per user turn by `Chat`, not per tool-use iteration); `execute_blocks` executes a list of `tool_use` blocks against the owning client, resolving owners via one `_tool_owners` map per call.
 
