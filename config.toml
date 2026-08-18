@@ -32,13 +32,22 @@ enabled = true
 #
 # `enabled` (optional, default true) works on either shape — park a server
 # without deleting its line.
-# be sure you change this for your servers
+#
+# Paths and URLs are expanded before use: `~`, `$USER`, `$HOME`, `${VAR}` in
+# `command`, `url` and the *values* of `env` are substituted from the
+# environment (main.py `_expand_paths`), so nobody's username has to be baked
+# into this file. `env`'s keys are variable names and are left alone. An
+# undefined variable is left as written rather than becoming empty, so a typo
+# shows up in the startup warning instead of producing a silently wrong path.
+#
+# The absolute paths below are still machine-specific — be sure you change
+# these for your servers.
 servers = [
 #  { name = "n8n",    url = "http://192.168.2.12:5678/mcp-server/http", token_env = "N8N_MCP_TOKEN" }, # works
 #  { name = "alpaca", url = "http://192.168.2.12:8000/mcp" }, # works
 #  { name = "unity", url = "http://127.0.0.1:8080/mcp" }, # works
 #  { name = "blender", url = "http://127.0.0.1:8033/" }, # works
-  { name = "unreal", command = ["node", "/home/invent/Programs/unreal-mcp/dist/bin.js", "--project-path", "/run/media/invent/POD2/Unreal-Engine-zip-deploys/Unreal-Projects/5.8.1-Projects/Test_MCP_Project/Test_MCP_Project.uproject", "--engine-path", "/run/media/invent/POD2/Unreal-Engine-zip-deploys/Linux_Unreal_Engine_5.8.1"], env = {DOTNET_ROOT = "/run/media/invent/POD2/Unreal-Engine-zip-deploys/Linux_Unreal_Engine_5.8.1/Engine/Binaries/ThirdParty/DotNet/10.0/linux-x64",DOTNET_ROOT_X64 = "/run/media/invent/POD2/Unreal-Engine-zip-deploys/Linux_Unreal_Engine_5.8.1/Engine/Binaries/ThirdParty/DotNet/10.0/linux-x64"}},
+  { name = "unreal", command = ["node", "/home/$USER/Programs/unreal-mcp/dist/bin.js", "--project-path", "/run/media/$USER/POD2/Unreal-Engine-zip-deploys/Unreal-Projects/5.8.1-Projects/Test_MCP_Project/Test_MCP_Project.uproject", "--engine-path", "/run/media/$USER/POD2/Unreal-Engine-zip-deploys/Linux_Unreal_Engine_5.8.1"], env = {DOTNET_ROOT = "/run/media/$USER/POD2/Unreal-Engine-zip-deploys/Linux_Unreal_Engine_5.8.1/Engine/Binaries/ThirdParty/DotNet/10.0/linux-x64",DOTNET_ROOT_X64 = "/run/media/$USER/POD2/Unreal-Engine-zip-deploys/Linux_Unreal_Engine_5.8.1/Engine/Binaries/ThirdParty/DotNet/10.0/linux-x64"}},
   # ^ sam-david/unreal-mcp (https://github.com/sam-david/unreal-mcp) — stdio transport,
   #   confirmed present & runnable at that path (built dist/bin.js exists, `node dist/bin.js`
   #   launches and blocks on stdin as expected for an MCP stdio server).
@@ -48,7 +57,7 @@ servers = [
   #   If you want it scoped to one Unreal project, uncomment and fill in the env line below
   #   (or drop a .unrealmcp.json with {"projectPath": "."} in that project's directory instead —
   #   see the repo README's "Config File" section for the full set of optional keys):
-  #   { name = "unreal", command = ["node", "/home/invent/Programs/unreal-mcp/dist/bin.js"],
+  #   { name = "unreal", command = ["node", "/home/$USER/Programs/unreal-mcp/dist/bin.js"],
   #     env = { UNREAL_MCP_PROJECT_PATH = "/path/to/YourProject.uproject" } },
 ]
 

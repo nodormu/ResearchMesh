@@ -40,6 +40,42 @@ MCP_ENABLED = _mcp_config.get("enabled", True)  # default on
 MCP_SERVERS = _mcp_config.get("servers", [])
 
 
+def _expand(value):
+    """Expand `~` and `$VAR`/`${VAR}` in a config value, recursing into lists
+    and dicts.
+
+    config.toml is plain TOML and `tomllib` does no substitution of its own, so
+    without this a path like `/home/$USER/...` would be handed to the
+    subprocess literally. An undefined variable is left as-is (that is
+    `expandvars`' behaviour, not an accident) so a typo shows up verbatim in
+    the "could not reach/launch" message instead of silently collapsing to a
+    path that starts with `/home//`.
+    """
+    if isinstance(value, str):
+        return os.path.expanduser(os.path.expandvars(value))
+    if isinstance(value, list):
+        return [_expand(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _expand(v) for k, v in value.items()}
+    return value
+
+
+def _expand_paths(server: dict) -> dict:
+    """A copy of a [mcp].servers entry with `~`/`$VAR` expanded in the fields
+    that hold paths or URLs, so config.toml can be checked in without anyone's
+    home directory or mount point baked into it.
+
+    Only `command`, `url` and `env` are touched. `env`'s keys are variable
+    *names* and are left alone; only its values are expanded. `token_env` is
+    likewise a name, and the token itself never appears in this file.
+    """
+    expanded = dict(server)
+    for key in ("command", "url", "env"):
+        if key in expanded:
+            expanded[key] = _expand(expanded[key])
+    return expanded
+
+
 def build_client(server: dict, name: str) -> MCPClient:
     """One MCPClient from a [mcp].servers entry.
 
@@ -54,6 +90,10 @@ def build_client(server: dict, name: str) -> MCPClient:
       its arguments. `env` is optional: extra environment variables to hand
       the subprocess (merged with a safe default set — PATH, HOME, etc. — by
       the MCP SDK itself, so you don't need to repeat those).
+
+    Paths are expected to arrive already expanded (`_connect_mcp_servers` runs
+    `_expand_paths` first); calling this directly with a raw config entry will
+    pass `$USER` through to the subprocess unsubstituted.
     """
     if "command" in server:
         command_list = server.get("command")
@@ -90,6 +130,10 @@ async def _connect_mcp_servers(stack: AsyncExitStack, clients: dict) -> None:
         if not server.get("enabled", True):
             print(f"[mcp] {name}: disabled in config.toml")
             continue
+
+        # Do this before build_client so the failure message below also shows
+        # the real path rather than the `$USER` the file was written with.
+        server = _expand_paths(server)
 
         try:
             client = build_client(server, name)

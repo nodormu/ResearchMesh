@@ -119,13 +119,20 @@ enabled = true              # false skips every server; local tools still work
 servers = [
   { name = "n8n",    url = "http://192.168.2.12:5678/mcp-server/http", token_env = "N8N_MCP_TOKEN" },
   { name = "alpaca", url = "http://192.168.2.12:8000/mcp" },
-  { name = "unreal", command = ["node", "/path/to/unreal-mcp/dist/bin.js"] },
+  { name = "unreal", command = ["node", "$HOME/unreal-mcp/dist/bin.js"] },
 ]
 ```
 
 A server that's unreachable (http) or fails to launch (stdio) prints a warning and is
 skipped, so one being down doesn't stop the app. Tokens are never written in this file —
 only the *name* of the variable that holds them.
+
+`~`, `$USER`, `$HOME` and `${ANY_VAR}` are expanded in `command`, `url` and the *values* of
+`env`, so the checked-in config doesn't have to name your home directory or mount point.
+(`env`'s keys are variable names and are left alone.) An undefined variable is left as
+written rather than expanding to nothing, so a typo shows up in the startup warning instead
+of becoming a silently wrong path. Absolute paths beyond that are still machine-specific —
+those you edit by hand.
 
 | Variable | Purpose |
 |---|---|
