@@ -48,9 +48,11 @@ Claude chooses the tools and keeps working until it has an answer.
 You need **Linux**, **Python 3.11+**, and an Anthropic **API key** — this is an API client,
 so a Claude subscription won't work.
 
-**MCP servers are optional.** The `[mcp]` block in `config.toml` ships with example
-servers pointing at a private LAN address — replace those URLs with your own, or set
-`enabled = false` to run on the 18 local tools alone.
+**MCP servers are optional.** The `[mcp]` block in `config.toml` ships with
+`enabled = false` and every server commented out, so a fresh clone runs on the 18
+local tools alone. The commented entries are kept as worked examples of both entry
+shapes — the addresses and paths in them are machine-specific, so replace them with
+your own before uncommenting and setting `enabled = true`.
 
 mcp_client.py is just a script to connect to your MCP server and pull a list of tools, be sure you change the IP address in the code.
 
