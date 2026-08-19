@@ -3,7 +3,17 @@
 #   playwright install chromium    # one-time: downloads the headless browser (pip does NOT)
 
 anthropic>=0.51.0        # keep current — the 2026 web_search/web_fetch schemas need a recent SDK
-mcp[cli]>=1.8.0          # MCP client + Streamable HTTP transport
+mcp[cli]>=1.8.0,<2       # MCP client + Streamable HTTP transport
+# The `<2` ceiling is load-bearing, and removing it breaks two things at once.
+# `claude-agent-sdk` declares `mcp<2.0.0,>=1.23.0` (litellm's `proxy` extra says
+# the same), so any environment shared with them cannot resolve mcp 2.x at all.
+# And mcp 2.0 dropped the low-level `@server.list_tools()` / `@server.call_tool()`
+# decorators that mcp_server.py registers `delegate` with, so it fails at *import*
+# — which is what an unbounded floor did to CI, since a fresh runner installs the
+# newest release while a long-lived venv keeps the 1.x it was built with.
+# Lift this only when agent-sdk supports 2.x and mcp_server.py has been ported to
+# `add_request_handler()` (and mcp_client.py to `streamable_http_client`, renamed
+# from `streamablehttp_client`).
 prompt-toolkit>=3.0.51   # interactive CLI REPL
 pydantic>=2.0            # imported directly in mcp_client.py (AnyUrl); also required by mcp/anthropic
 playwright>=1.40.0       # headless browser tool (core/browser.py)
@@ -32,7 +42,13 @@ pillow>=10.0             # `computer` — screenshot encode/resize; also pyautog
 #   sudo apt install libreoffice   # soffice: docx/odt/xlsx/pptx <-> pdf conversion
 #   sudo apt install pandoc        # markdown -> docx/odt/pdf authoring path
 #
-# `computer` needs an X11 display. Wayland sessions ignore the XTEST input it
+# `computer` needs two apt packages that `pip install pyautogui` does not bring.
+# Both fail confusingly: without them the tool reports pyautogui as missing, or
+# capture fails, even though every package above is installed.
+#   sudo apt install python3-tk    # mouseinfo imports tkinter at module level
+#   sudo apt install scrot         # pyscreeze's only screenshot path on X11
+#
+# It also needs an X11 display. Wayland sessions ignore the XTEST input it
 # synthesises, so it refuses to run on one (see core/computer.py). For a
 # headless or Wayland machine:
 #   sudo apt install xvfb          # xvfb-run -s '-screen 0 1280x800x24' python main.py
