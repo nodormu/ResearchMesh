@@ -129,6 +129,13 @@ def _run(tool_input: dict) -> str:
     if not code.strip():
         return json.dumps({"error": "no code provided"})
 
+    # Both are set by _ensure_kernel/_restart above, which return an error
+    # string if they couldn't — so this is unreachable in practice. It is
+    # spelled out rather than assumed because every use below dereferences
+    # them, and a silent None here would be an AttributeError mid-execution.
+    if _client is None or _manager is None:
+        return json.dumps({"error": "kernel is not running"})
+
     timeout = int(tool_input.get("timeout") or _DEFAULT_TIMEOUT)
     msg_id = _client.execute(code)
     deadline = time.monotonic() + timeout

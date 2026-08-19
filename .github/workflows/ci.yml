@@ -65,6 +65,17 @@ jobs:
           pip install ruff
           ruff check .
 
+      - name: Type check
+        # Runs *here* rather than only by hand because mypy checks against the
+        # installed packages, and a runner installs them fresh: this is the step
+        # that catches a dependency changing shape underneath the code. It is
+        # what would have named every mcp 1.x -> 2.x breakage directly, instead
+        # of a bare AttributeError on the first MCP tool call. Config and
+        # reasoning live in pyproject.toml's [tool.mypy].
+        run: |
+          pip install mypy
+          mypy .
+
       - name: Smoke test
         run: python smoke_test.py
 

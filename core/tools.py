@@ -1,16 +1,23 @@
 import json
-from typing import Literal
+from typing import Any, Literal
 
 from anthropic.types import ToolResultBlockParam
-from mcp.types import CallToolResult, ImageContent, TextContent, Tool
+from mcp.types import CallToolResult, ImageContent, TextContent
 
 from mcp_client import MCPClient
 
 
 class ToolManager:
     @classmethod
-    async def get_all_tools(cls, clients: dict[str, MCPClient]) -> list[Tool]:
-        """Gets all tools from the provided clients."""
+    async def get_all_tools(
+        cls, clients: dict[str, MCPClient]
+    ) -> list[dict[str, Any]]:
+        """Gets all tools from the provided clients.
+
+        Returns Anthropic tool-schema dicts, not the MCP `Tool` models they are
+        built from — this is the bridge between the two, and `Chat` concatenates
+        the result straight onto `local_tools.TOOLS`.
+        """
         tools = []
         for client in clients.values():
             tool_models = await client.list_tools()
@@ -109,7 +116,7 @@ class ToolManager:
                     item for item in items if isinstance(item, ImageContent)
                 ]
                 content_json = json.dumps(text_list)
-                status = (
+                status: Literal["success", "error"] = (
                     "error"
                     if tool_output and tool_output.is_error
                     else "success"

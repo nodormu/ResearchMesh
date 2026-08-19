@@ -55,3 +55,25 @@ ignore = [
 # diagnostic script. True by the letter of the rule, irrelevant in context:
 # there is no concurrent work to starve.
 "mcp_client.py" = ["ASYNC230"]
+
+# `mypy .` should come back clean, the same bar as `ruff check .`.
+#
+# It earns its place on this project specifically: the one failure mode here is
+# a dependency changing underneath the code, and mypy type-checks against the
+# *installed* packages. Every mcp 1.x -> 2.x breakage was caught by it in one
+# run, naming each renamed attribute and suggesting the new spelling — including
+# `core/tools.py`, which smoke_test.py structurally cannot reach (it never calls
+# an MCP tool) and which would otherwise have failed as an AttributeError on the
+# first real delegation, long after the upgrade.
+#
+# Left at mypy's defaults: bodies of unannotated functions are not checked, so
+# this is a floor, not a straitjacket. Annotating a function opts it in, which
+# is the right direction of travel for new code.
+[tool.mypy]
+# The optional tool backings (duckdb, playwright, pyautogui, jupyter_client,
+# pexpect, ruamel, tomlkit, jsonpath_ng, send2trash) are imported lazily inside
+# the tool that needs them, so they are legitimately absent from a bare
+# environment — CI installs only the five module-level dependencies. Without
+# this, every one of those imports is an error about a package that is *meant*
+# to be missing. Genuinely wrong imports of installed packages still fail.
+ignore_missing_imports = true

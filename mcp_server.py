@@ -36,6 +36,7 @@ nothing is reachable off this machine unless you ask for it.
 import argparse
 import os
 import sys
+from io import TextIOWrapper
 
 # Mirrors how this app authenticates *to* its own MCP servers (config.toml's
 # `token_env`): the config names an environment variable, the variable holds the
@@ -117,7 +118,10 @@ elif ARGS is not None:
     # Python block-buffers stdout when it isn't a terminal, so without this the
     # log stays empty until ~8KB accumulates, and a `kill` loses the lot —
     # including the "listening on ..." line you started it to see.
-    sys.stdout.reconfigure(line_buffering=True)
+    # `reconfigure` belongs to TextIOWrapper, not the TextIO interface, and a
+    # replaced sys.stdout need not have it — hence the narrowing check.
+    if isinstance(sys.stdout, TextIOWrapper):
+        sys.stdout.reconfigure(line_buffering=True)
 
 # The app must run from the repo root: config.toml is resolved relative to
 # main.py, but the `memory` tool's CLAUDE_MEMORY_DIR default ("memories") is
@@ -129,7 +133,6 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 import asyncio
 import hmac
 from contextlib import AsyncExitStack
-from io import TextIOWrapper
 
 import anyio
 from mcp import types
@@ -223,6 +226,10 @@ _lock = asyncio.Lock()
 
 
 def _session(session_id: str) -> Chat:
+    if _claude is None:
+        # run() builds the service before either transport starts serving, so
+        # a delegation can't arrive first. Stated rather than assumed.
+        raise RuntimeError("Claude service was not initialised before serving")
     if session_id not in _sessions:
         _sessions[session_id] = Chat(clients=_clients, claude_service=_claude)
     return _sessions[session_id]
@@ -304,6 +311,9 @@ def _require_api_key() -> None:
 
 async def _serve_stdio() -> None:
     """JSON-RPC over this process's stdin/stdout."""
+    if _JSONRPC_FD is None:
+        # Set by the stdout guard, which runs for exactly this transport.
+        raise RuntimeError("stdio transport started without the duplicated fd")
     # Hand the *real* stdout (dup'd before fd 1 was pointed at stderr) to the
     # transport, so JSON-RPC still reaches the client.
     jsonrpc_out = anyio.wrap_file(
@@ -456,7 +466,9 @@ async def run(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
+    # ARGS is parsed at import under exactly this condition, so it is never
+    # None here; the fallback keeps that provable rather than assumed.
     try:
-        asyncio.run(run(ARGS))
+        asyncio.run(run(ARGS if ARGS is not None else _parse_args()))
     except (KeyboardInterrupt, EOFError):
         pass

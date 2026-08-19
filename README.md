@@ -314,16 +314,23 @@ literal token into anything in the repo.
   ruff added. (The rule selection is left at ruff's defaults, which do shift between
   versions.) Ruff is **not** a dependency and nothing runs it for you — install it yourself
   if you want it. There's no `[tool.black]` and no `.pylintrc`.
+- **Type checking: `mypy .` should pass too.** `pyproject.toml` has a `[tool.mypy]` section
+  setting exactly one option (`ignore_missing_imports`, because the optional tool backings
+  are lazily imported and legitimately absent from a bare venv); strictness stays at mypy's
+  defaults, so unannotated function bodies aren't checked. It's worth having here because
+  mypy checks against the packages you actually have installed, which makes it the gate that
+  catches a dependency changing shape under you — it named every mcp 1.x → 2.x rename in one
+  run, including the ones in `core/tools.py` that the smoke test can't reach.
 - **`python smoke_test.py` before you commit.** Seconds, no API key, no network, no optional
   packages. It checks that everything imports, that the tool registry is well-formed, that the
   tool count in the docs still matches the code, and that `mcp_server.py` completes an MCP
-  handshake. GitHub Actions runs it plus `ruff` on every push and PR to `main`
+  handshake. GitHub Actions runs it plus `ruff` and `mypy` on every push and PR to `main`
   (`.github/workflows/ci.yml`), on Python 3.11 and 3.14.
-- **There are still no unit tests and no type checking**, and CI deliberately doesn't exercise
-  the tools themselves — that would need LibreOffice, a browser, an X11 display and real API
-  credits. If your venv happens to have `pylint`/`mypy`/`black` installed (none are project
-  dependencies) or the system has `shellcheck`, they're safe to run by hand — expect plenty of
-  output, since nothing is configured for them.
+- **There are still no unit tests**, and CI deliberately doesn't exercise the tools themselves
+  — that would need LibreOffice, a browser, an X11 display and real API credits. If your venv
+  happens to have `pylint`/`black` installed (neither is a project dependency) or the system
+  has `shellcheck`, they're safe to run by hand — expect plenty of output, since nothing is
+  configured for them.
 - **Two things a linter will fight you on here** — worth knowing before you "fix" them.
   Broad `except Exception`/`except BaseException` is the design, not sloppiness: every local
   tool must catch anything and return an error string rather than crash the chat loop, which

@@ -79,10 +79,22 @@ invisible until a client connects. It needs no API key (a placeholder satisfies
 every optional backing is imported lazily — which is why CI installs only the five
 module-level dependencies and finishes in seconds.
 
-There are still **no unit tests and no type checks**. `pylint`/`mypy`/`black` (in whatever venv
-you run the project from) and `shellcheck` (system) are unconfigured but safe to run by hand.
-For a quick manual check, `python -m py_compile` and an import smoke test (`PYTHONPATH=..
-python -c "import core.chat"`) are what `smoke_test.py` automates.
+**`mypy .` is the third gate**, configured in `pyproject.toml`'s `[tool.mypy]` and run by CI
+alongside `ruff`. It should come back clean. Only one option is set —
+`ignore_missing_imports`, because the optional tool backings are lazily imported and
+legitimately absent from a bare environment — and strictness is left at mypy's defaults, so
+bodies of unannotated functions go unchecked and annotating a function is what opts it in.
+It earns its slot for a specific reason: **mypy checks against the packages actually
+installed**, which makes it the one gate that notices a dependency changing shape. Every
+mcp 1.x → 2.x breakage in this repo was caught in a single run, each renamed attribute named
+with its new spelling — including the three in `core/tools.py` that `smoke_test.py`
+structurally cannot reach, since it never calls an MCP tool. Note the flip side: run against
+an *old* installed version it stays quiet, so it warns at upgrade time, not before.
+
+There are still **no unit tests**. `pylint`/`black` (in whatever venv you run the project
+from) and `shellcheck` (system) are unconfigured but safe to run by hand. For a quick manual
+check, `python -m py_compile` and an import smoke test (`PYTHONPATH=.. python -c "import
+core.chat"`) are what `smoke_test.py` automates.
 
 Two rules about this codebase that a linter will fight you on, both learned the hard way:
 

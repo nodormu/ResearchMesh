@@ -214,6 +214,11 @@ class Chat:
         while True:
             iterations += 1
             if iterations > MAX_TOOL_ITERATIONS:
+                if response is None:
+                    # Only reachable with MAX_TOOL_ITERATIONS < 1, i.e. the
+                    # limit was hit before anything was ever sent: there is no
+                    # turn to resolve and no text to report.
+                    break
                 # `response` is still the last one we received (this iteration
                 # never calls chat() again). If it ended on stop_reason ==
                 # "tool_use", its tool_use blocks are already sitting in

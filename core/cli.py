@@ -10,7 +10,7 @@ class CliApp:
         self.agent = agent
 
         self.history = InMemoryHistory()
-        self.session = PromptSession(
+        self.session: PromptSession[str] = PromptSession(
             history=self.history,
             style=Style.from_dict({"prompt": "#aaaaaa"}),
         )

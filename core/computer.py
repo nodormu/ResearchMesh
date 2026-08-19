@@ -343,7 +343,12 @@ def _screenshot(pyautogui, caption: str) -> str | dict:
     if image.size != (DISPLAY_WIDTH, DISPLAY_HEIGHT):
         from PIL import Image
 
-        image = image.resize((DISPLAY_WIDTH, DISPLAY_HEIGHT), Image.LANCZOS)
+        # `Image.Resampling.LANCZOS`, not the older `Image.LANCZOS` alias:
+        # the enum is the canonical spelling since Pillow 9.1, and the alias
+        # is absent from the type stubs.
+        image = image.resize(
+            (DISPLAY_WIDTH, DISPLAY_HEIGHT), Image.Resampling.LANCZOS
+        )
     return _encode(image, f"{caption} Screen is {DISPLAY_WIDTH}x{DISPLAY_HEIGHT}.")
 
 
