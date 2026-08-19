@@ -50,12 +50,12 @@ jobs:
         # required to import the app or start the MCP server. Installing just
         # these keeps CI to seconds and avoids pulling a browser binary.
         #
-        # Keep the `<2` on mcp in step with requirements.txt, which explains it.
-        # A runner installs fresh every time, so an unbounded floor is how CI
-        # ends up testing a version no developer here can even install.
+        # Keep mcp's bounds in step with requirements.txt, which explains them.
+        # A runner installs fresh every time, so an unbounded range is how CI
+        # ends up testing a version no developer here is running.
         run: |
           python -m pip install --upgrade pip
-          pip install 'anthropic>=0.51.0' 'mcp[cli]>=1.8.0,<2' \
+          pip install 'anthropic>=0.51.0' 'mcp[cli]>=2.0,<3' \
                       'prompt-toolkit>=3.0.51' 'pydantic>=2.0' anyio
 
       - name: Lint

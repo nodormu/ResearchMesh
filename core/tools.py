@@ -18,7 +18,14 @@ class ToolManager:
                 {
                     "name": t.name,
                     "description": t.description,
-                    "input_schema": t.inputSchema,
+                    # mcp 2.0 renamed the model fields to snake_case
+                    # (`inputSchema` -> `input_schema`, `isError` ->
+                    # `is_error`, `mimeType` -> `mime_type` below). The
+                    # camelCase spellings survive as serialization aliases, so
+                    # constructing still works either way — but attribute
+                    # *reads* like these do not, and fail at runtime rather
+                    # than at import.
+                    "input_schema": t.input_schema,
                 }
                 for t in tool_models
             ]
@@ -104,7 +111,7 @@ class ToolManager:
                 content_json = json.dumps(text_list)
                 status = (
                     "error"
-                    if tool_output and tool_output.isError
+                    if tool_output and tool_output.is_error
                     else "success"
                 )
 
@@ -117,7 +124,7 @@ class ToolManager:
                             "type": "image",
                             "source": {
                                 "type": "base64",
-                                "media_type": item.mimeType,
+                                "media_type": item.mime_type,
                                 "data": item.data,
                             },
                         }

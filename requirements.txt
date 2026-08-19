@@ -3,17 +3,17 @@
 #   playwright install chromium    # one-time: downloads the headless browser (pip does NOT)
 
 anthropic>=0.51.0        # keep current — the 2026 web_search/web_fetch schemas need a recent SDK
-mcp[cli]>=1.8.0,<2       # MCP client + Streamable HTTP transport
-# The `<2` ceiling is load-bearing, and removing it breaks two things at once.
-# `claude-agent-sdk` declares `mcp<2.0.0,>=1.23.0` (litellm's `proxy` extra says
-# the same), so any environment shared with them cannot resolve mcp 2.x at all.
-# And mcp 2.0 dropped the low-level `@server.list_tools()` / `@server.call_tool()`
-# decorators that mcp_server.py registers `delegate` with, so it fails at *import*
-# — which is what an unbounded floor did to CI, since a fresh runner installs the
-# newest release while a long-lived venv keeps the 1.x it was built with.
-# Lift this only when agent-sdk supports 2.x and mcp_server.py has been ported to
-# `add_request_handler()` (and mcp_client.py to `streamable_http_client`, renamed
-# from `streamablehttp_client`).
+mcp[cli]>=2.0,<3         # MCP client + Streamable HTTP transport
+# The floor is 2.0, not a preference: mcp 2.0 is a breaking major and this code
+# now uses the new API on both sides — `Server(on_list_tools=…, on_call_tool=…)`
+# in mcp_server.py (1.x's `@server.list_tools()` decorators are gone),
+# `streamable_http_client` in mcp_client.py (renamed from `streamablehttp_client`,
+# and headers now arrive via an httpx2 client rather than a `headers=` argument),
+# and snake_case model fields in core/tools.py (`input_schema`, `is_error`,
+# `mime_type`). None of it runs on 1.x. Note `pip install mcp` resolves to 2.x by
+# default now; 1.x is maintenance-only, receiving security fixes alone.
+# The `<3` matches what claude-agent-sdk declares, so the two can share a venv —
+# it pinned `mcp<2.0.0` until 0.2.140, which is the version this port needed.
 prompt-toolkit>=3.0.51   # interactive CLI REPL
 pydantic>=2.0            # imported directly in mcp_client.py (AnyUrl); also required by mcp/anthropic
 playwright>=1.40.0       # headless browser tool (core/browser.py)

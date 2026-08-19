@@ -229,7 +229,7 @@ can reach the port has unrestricted shell and desktop control of the machine. Th
 read from the environment, never passed as an argument, so it stays out of `ps` and shell
 history. `--token-env VAR` renames the variable.
 
-Both transports are the same server object — no separate build, no FastMCP rewrite. Under HTTP
+Both transports are the same server object — no separate build, no high-level-server rewrite. Under HTTP
 the stdout guard is skipped (fd 1 isn't the wire there) so the app's messages become ordinary
 service logs, line-buffered so a redirected log fills in live rather than on exit. Running the
 stdio form by hand just waits on stdin, which is a healthy stdio server behaving normally.

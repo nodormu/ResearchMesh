@@ -7,15 +7,10 @@ from typing import Any, Literal, Optional
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
-from pydantic import AnyUrl
-
-try:
-    # Streamable HTTP transport (mcp >= 1.8.0). This is what most remote MCP
-    # servers expose today — n8n's MCP Server Trigger, FastMCP-based servers, etc.
-    from mcp.client.streamable_http import streamablehttp_client
-except ImportError:  # older mcp SDK without Streamable HTTP support
-    streamablehttp_client = None
-
+from mcp.client.streamable_http import (
+    create_mcp_http_client,
+    streamable_http_client,
+)
 
 Transport = Literal["stdio", "sse", "http"]
 
@@ -87,19 +82,25 @@ class MCPClient:
         return read, write
 
     async def _connect_http(self):
-        if streamablehttp_client is None:
-            raise RuntimeError(
-                "Streamable HTTP transport requires mcp >= 1.8.0 "
-                "(mcp.client.streamable_http.streamablehttp_client not found)."
-            )
         if not self._url:
             raise ValueError("http transport requires a `url`")
-        # streamablehttp_client yields (read, write, get_session_id_callback);
-        # we only need the read/write streams.
-        transport = await self._exit_stack.enter_async_context(
-            streamablehttp_client(self._url, headers=self._headers)
+        # Streamable HTTP is what most remote MCP servers expose today (n8n's
+        # MCP Server Trigger, and anything built on the high-level server). It
+        # was `streamablehttp_client` in mcp 1.x, and it also dropped this
+        # transport's `headers=` argument in 2.0: HTTP settings now come from an
+        # httpx2 client you build yourself. `create_mcp_http_client`
+        # is the SDK's own factory, so the recommended MCP timeouts still apply —
+        # a bare `httpx2.AsyncClient(headers=...)` would silently drop them.
+        # Passing a client also transfers its lifecycle to us (the transport only
+        # closes one it created itself), hence entering it on the exit stack.
+        http_client = None
+        if self._headers:
+            http_client = await self._exit_stack.enter_async_context(
+                create_mcp_http_client(headers=self._headers)
+            )
+        read, write = await self._exit_stack.enter_async_context(
+            streamable_http_client(self._url, http_client=http_client)
         )
-        read, write = transport[0], transport[1]
         return read, write
 
     def session(self) -> ClientSession:
@@ -127,11 +128,12 @@ class MCPClient:
         return result.messages
 
     async def read_resource(self, uri: str) -> Any:
-        result = await self.session().read_resource(AnyUrl(uri))
+        # 2.0 takes a plain `str` here; 1.x wanted a pydantic `AnyUrl`.
+        result = await self.session().read_resource(uri)
         resource = result.contents[0]  # only the first content is used
 
         if isinstance(resource, types.TextResourceContents):
-            if resource.mimeType == "application/json":
+            if resource.mime_type == "application/json":
                 return json.loads(resource.text)
 
             return resource.text  # fallback: return as plain text

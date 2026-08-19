@@ -8,7 +8,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.11"   # tomllib (used by main.py) is stdlib only from 3.11
 dependencies = [
     "anthropic>=0.51.0",
-    "mcp[cli]>=1.8.0,<2",   # <2 is required, not caution — see requirements.txt
+    "mcp[cli]>=2.0,<3",     # 2.0 is a breaking major — see requirements.txt
     "prompt-toolkit>=3.0.51",
     "pydantic>=2.0",
     "playwright>=1.40.0",

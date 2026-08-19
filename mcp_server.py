@@ -134,6 +134,7 @@ from io import TextIOWrapper
 import anyio
 from mcp import types
 from mcp.server import Server
+from mcp.server.context import ServerRequestContext
 from mcp.server.stdio import stdio_server
 
 import main as app
@@ -183,7 +184,7 @@ TOOLS = [
     types.Tool(
         name="delegate",
         description=_DELEGATE_DESCRIPTION,
-        inputSchema={
+        input_schema={
             "type": "object",
             "properties": {
                 "task": {
@@ -209,8 +210,6 @@ TOOLS = [
     )
 ]
 
-server = Server(SERVER_NAME)
-
 # One Chat per session id. Chat.messages is the entire conversation, so this is
 # what makes a follow-up call able to refer back to the previous one.
 _sessions: dict[str, Chat] = {}
@@ -229,22 +228,37 @@ def _session(session_id: str) -> Chat:
     return _sessions[session_id]
 
 
-@server.list_tools()
-async def list_tools() -> list[types.Tool]:
-    return TOOLS
+def _text_result(text: str, *, is_error: bool = False) -> types.CallToolResult:
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=text)], is_error=is_error
+    )
 
 
-@server.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-    if name != "delegate":
-        return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
+# Handlers are plain functions registered on the Server below, not decorated
+# ones: mcp 2.0 removed `@server.list_tools()` / `@server.call_tool()` in favour
+# of constructor `on_*` arguments (and `add_request_handler()` for methods
+# outside the spec set). The handler signature gained a leading request context
+# and now returns a whole Result model rather than a bare content list, so the
+# `is_error` flag below is ours to set instead of the framework's to infer.
+async def list_tools(
+    ctx: ServerRequestContext, params: types.PaginatedRequestParams | None
+) -> types.ListToolsResult:
+    return types.ListToolsResult(tools=TOOLS)
 
-    task = (arguments or {}).get("task", "")
+
+async def call_tool(
+    ctx: ServerRequestContext, params: types.CallToolRequestParams
+) -> types.CallToolResult:
+    if params.name != "delegate":
+        return _text_result(f"Unknown tool: {params.name}", is_error=True)
+
+    arguments = params.arguments or {}
+    task = arguments.get("task", "")
     if not task.strip():
-        return [types.TextContent(type="text", text="Error: no task provided")]
+        return _text_result("Error: no task provided", is_error=True)
 
-    session_id = (arguments or {}).get("session") or "default"
-    thinking = bool((arguments or {}).get("thinking"))
+    session_id = arguments.get("session") or "default"
+    thinking = bool(arguments.get("thinking"))
 
     async with _lock:
         chat = _session(session_id)
@@ -257,15 +271,12 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             # client as a transport-level error with no detail, and this server
             # stays up for the next call either way.
             print(f"[delegate] session {session_id!r} failed: {e}")
-            return [
-                types.TextContent(type="text", text=f"Delegation failed: {e}")
-            ]
+            return _text_result(f"Delegation failed: {e}", is_error=True)
 
-    return [
-        types.TextContent(
-            type="text", text=answer or "[the agent returned no text]"
-        )
-    ]
+    return _text_result(answer or "[the agent returned no text]")
+
+
+server = Server(SERVER_NAME, on_list_tools=list_tools, on_call_tool=call_tool)
 
 
 def _require_api_key() -> None:
@@ -354,7 +365,8 @@ async def _serve_http(args: argparse.Namespace) -> None:
     The same `server` object drives both transports — the low-level MCP
     `Server` only ever deals in read/write streams, so a transport is a
     different way of supplying those, not a different server. (This is also why
-    switching to FastMCP would be a downgrade here: its stdio path calls
+    switching to the high-level server — `FastMCP` in mcp 1.x, renamed
+    `MCPServer` in 2.0 — would be a downgrade here: its stdio path calls
     `stdio_server()` with no arguments, i.e. it insists on the real `sys.stdout`,
     which is exactly the file descriptor the stdout guard has to take away.)
     """
