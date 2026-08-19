@@ -44,9 +44,9 @@ enabled = true
 # these for your servers.
 servers = [
 #  { name = "n8n",    url = "http://192.168.2.12:5678/mcp-server/http", token_env = "N8N_MCP_TOKEN" }, # works
-#  { name = "alpaca", url = "http://192.168.2.12:8000/mcp" }, # works
-#  { name = "unity", url = "http://127.0.0.1:8080/mcp" }, # works
-#  { name = "blender", url = "http://127.0.0.1:8033/" }, # works
+#  { name = "alpaca", url = "http://192.168.2.12:8000/mcp" }, # works https://github.com/alpacahq/alpaca-mcp-server
+#  { name = "unity", url = "http://127.0.0.1:8080/mcp" }, # works 
+#  { name = "blender", url = "http://127.0.0.1:8033/" }, # works https://projects.blender.org/lab/blender_mcp/src/branch/main/mcp
   { name = "unreal", command = ["node", "/home/$USER/Programs/unreal-mcp/dist/bin.js", "--project-path", "/run/media/$USER/POD2/Unreal-Engine-zip-deploys/Unreal-Projects/5.8.1-Projects/Test_MCP_Project/Test_MCP_Project.uproject", "--engine-path", "/run/media/$USER/POD2/Unreal-Engine-zip-deploys/Linux_Unreal_Engine_5.8.1"], env = {DOTNET_ROOT = "/run/media/$USER/POD2/Unreal-Engine-zip-deploys/Linux_Unreal_Engine_5.8.1/Engine/Binaries/ThirdParty/DotNet/10.0/linux-x64",DOTNET_ROOT_X64 = "/run/media/$USER/POD2/Unreal-Engine-zip-deploys/Linux_Unreal_Engine_5.8.1/Engine/Binaries/ThirdParty/DotNet/10.0/linux-x64"}},
   # ^ sam-david/unreal-mcp (https://github.com/sam-david/unreal-mcp) — stdio transport,
   #   confirmed present & runnable at that path (built dist/bin.js exists, `node dist/bin.js`
