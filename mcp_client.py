@@ -156,42 +156,61 @@ class MCPClient:
 #   MCP_URL=http://host:8000/mcp MCP_TOKEN=<token> python mcp_client.py
 async def main():
     import os
-    import tomllib
-    from pathlib import Path
 
+    # Imported inside the function, not at module scope, because main.py imports
+    # *this* module — at module scope that is a circular import. Reusing its
+    # `build_client` / `_expand_paths` is the entire point: a standalone check is
+    # only worth running if it builds each client exactly the way the app does.
+    # Doing it by hand here is what made this command claim `unreal` was
+    # unreachable while `python main.py` connected to it perfectly well — it
+    # forced `transport="http"` on every entry, so a stdio entry (`command`, no
+    # `url`) failed on a missing URL, and `~`/`$USER` were never expanded either.
+    import main as app
+
+    override_headers = None
     if os.getenv("MCP_URL"):
         servers = [{"name": "MCP_URL", "url": os.getenv("MCP_URL")}]
-        tokens = {"MCP_URL": os.getenv("MCP_TOKEN")}
+        if os.getenv("MCP_TOKEN"):
+            override_headers = {
+                "Authorization": f"Bearer {os.getenv('MCP_TOKEN')}"
+            }
     else:
-        config_path = Path(__file__).with_name("config.toml")
-        try:
-            with open(config_path, "rb") as f:
-                servers = tomllib.load(f).get("mcp", {}).get("servers", [])
-        except FileNotFoundError:
-            print(f"No {config_path.name} found, and MCP_URL is not set.")
-            return
-        tokens = {
-            s.get("name", ""): os.getenv(s["token_env"]) if s.get("token_env") else None
-            for s in servers
-        }
+        servers = app.MCP_SERVERS
 
     if not servers:
         print("No servers configured under [mcp] in config.toml.")
         return
 
+    if not app.MCP_ENABLED:
+        # Checking them anyway: this command exists to tell you whether a server
+        # *would* work, and `enabled = false` is usually why the app isn't
+        # using one you expected it to.
+        print("[mcp] enabled = false in config.toml — the app skips all of these.")
+
     for index, server in enumerate(servers):
         name = server.get("name") or f"server_{index}"
-        url = server.get("url")
-        token = tokens.get(name)
-        headers = {"Authorization": f"Bearer {token}"} if token else None
+
+        if not server.get("enabled", True):
+            print(f"\n{name}: disabled in config.toml — skipped")
+            continue
+
+        server = app._expand_paths(server)
+        target = server.get("url") or " ".join(server.get("command") or [])
         try:
-            async with MCPClient(transport="http", url=url, headers=headers) as client:
+            client = (
+                MCPClient(
+                    transport="http", url=server["url"], headers=override_headers
+                )
+                if override_headers
+                else app.build_client(server, name)
+            )
+            async with client:
                 tools = await client.list_tools()
-                print(f"\n{name}: {url} — {len(tools)} tool(s)")
+                print(f"\n{name}: {target} — {len(tools)} tool(s)")
                 for tool in tools:
                     print(f"  - {tool.name}: {tool.description}")
         except BaseException as e:
-            print(f"\n{name}: {url} — FAILED ({type(e).__name__}: {e})")
+            print(f"\n{name}: {target} — FAILED ({type(e).__name__}: {e})")
 
 
 if __name__ == "__main__":
