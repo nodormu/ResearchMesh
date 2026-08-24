@@ -156,6 +156,79 @@ def check_compiles() -> None:
     check("all files compile", result.returncode == 0, result.stderr.strip()[:300])
 
 
+def check_clear_and_diagnostics() -> None:
+    """`/clear`, and telling the two persistent 400s apart.
+
+    An unanswered tool_use block and a conversation past the context window
+    both leave every later turn failing identically, with no way back short of
+    killing the app. The orphan detector is what separates them, so it is
+    checked against a history that is deliberately poisoned — the condition
+    `_resolve_pending_tool_uses` exists to prevent, constructed here on purpose
+    because a healthy session never produces one.
+    """
+    print("/clear and diagnostics")
+    from core.chat import Chat, _approx_size, _orphaned_tool_uses
+
+    class FakeBlock:
+        type = "tool_use"
+
+        def __init__(self, block_id):
+            self.id = block_id
+
+    chat = Chat(claude_service=None, clients={})  # type: ignore[arg-type]
+
+    healthy = [
+        {"role": "user", "content": "do a thing"},
+        {"role": "assistant", "content": [FakeBlock("t1")]},
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "done"}
+            ],
+        },
+    ]
+    check("a healthy history has no orphans", _orphaned_tool_uses(healthy) == [])
+
+    poisoned = healthy + [
+        {"role": "assistant", "content": [FakeBlock("t2")]},
+        {"role": "user", "content": "and another thing"},
+    ]
+    check(
+        "an unanswered tool_use is detected",
+        _orphaned_tool_uses(poisoned) == ["t2"],
+        str(_orphaned_tool_uses(poisoned)),
+    )
+
+    count, chars = _approx_size(poisoned)
+    check("size report counts every message", count == len(poisoned), str(count))
+    check("size report counts characters", chars > 0, str(chars))
+
+    chat.messages = list(poisoned)  # type: ignore[arg-type]
+    report = chat.clear()
+    check("clear() empties the conversation", chat.messages == [])
+    check("clear() reports the message count", "5 messages" in report, report)
+    check(
+        "clear() names the unanswered block as the cause",
+        "unanswered tool_use" in report,
+        report,
+    )
+    check("clear() is safe on an empty conversation", "0 messages" in chat.clear())
+
+    # The diagnostic runs on an already-failing path; an exception here would
+    # mask the real error.
+    for label, err in (
+        ("overflow", Exception("prompt is too long: 1200000 tokens > 1000000")),
+        ("orphan", Exception("tool_use ids were found without tool_result")),
+    ):
+        chat.messages = list(poisoned)  # type: ignore[arg-type]
+        try:
+            chat._report_api_failure(err)
+            ok = True
+        except Exception as e:
+            ok, label = False, f"{label}: {e}"
+        check(f"failure report survives a {label} error", ok)
+
+
 def main() -> int:
     os.chdir(ROOT)
     sys.path.insert(0, str(ROOT))
@@ -165,6 +238,7 @@ def main() -> int:
         check_tool_registry,
         check_docs_match_code,
         check_mcp_server,
+        check_clear_and_diagnostics,
     ):
         step()
         print()

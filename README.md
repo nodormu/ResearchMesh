@@ -73,7 +73,14 @@ python main.py
 ```
 
 Then just type. **`/think <message>`** gives Claude longer to reason on hard problems;
-**Ctrl-C** exits and shuts everything down cleanly.
+**`/clear`** drops the conversation without restarting the app; **Ctrl-C** exits and
+shuts everything down cleanly.
+
+**If it starts returning 400s and won't stop, run `/clear`.** Two failures persist for
+the life of the process — an unanswered `tool_use` block, and a conversation past the
+context window — and both make every later turn fail the same way. The error report
+names which one you hit. `/clear` recovers from either while keeping the browser page,
+the kernel, your MCP connections and `/memories`.
 
 **MCP servers are optional** — all 18 local tools work without any of them.
 

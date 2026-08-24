@@ -22,7 +22,18 @@ class CliApp:
                 if not user_input.strip():
                     continue
 
-                text = user_input
+                text = user_input.strip()
+
+                # `/clear` is the recovery path from a history the API will no
+                # longer accept — an unanswered tool_use block, or a
+                # conversation past the context window. Both persist for the
+                # life of the process, so without this the only way out is
+                # killing the app, taking the browser page, the kernel and
+                # every MCP connection with it.
+                if text in ("/clear", "/reset"):
+                    print(self.agent.clear())
+                    continue
+
                 thinking = False
                 if text.startswith("/think "):
                     text = text[len("/think "):]
