@@ -300,6 +300,11 @@ literal token into anything in the repo.
   `wayland`, the tool refuses up front and tells you why rather than clicking into the void.
   Fix it with an Xorg session or `xvfb-run -s '-screen 0 1280x800x24' python main.py` —
   details under [Full setup detail](#full-setup-detail). Every other tool is unaffected.
+  There's a real, narrower exception if the actual application you need to control is itself
+  an XWayland client (common — many Qt/GTK/Java desktop apps still run this way even on a
+  Wayland desktop): Claude can drive *that one window* directly with plain X11-protocol
+  calls, entirely outside the `computer` tool. See [Full setup
+  detail](#full-setup-detail) for the recipe.
 - If Sonnet gets inconsistent on a complicated multi-tool request, set `model` to an Opus one.
 - Optional packages are imported only when a tool is used, so a missing one breaks just that
   tool and tells you what to install.
@@ -387,6 +392,51 @@ xvfb-run -s '-screen 0 1280x800x24' python main.py
 # 3. XWayland-only setup and you want to try regardless:
 export CLAUDE_COMPUTER_FORCE=1
 ```
+
+**A real exception: an XWayland-backed target application.** The refusal above is about
+`computer`'s own generic approach — `pyautogui`'s screenshot backend needs a real X11 root
+window to grab and a Wayland compositor doesn't expose one, so a *whole-desktop* capture
+genuinely can't be made to work this way, full stop. But if the specific application you're
+trying to control is itself an XWayland client — true for many desktop GUI toolkits that
+haven't been ported to native Wayland (Qt, GTK, Java/Swing, Unity Editor, JetBrains IDEs, and
+more) — it still has a real, addressable X11 window underneath, and Claude can drive *that one
+window* directly with plain X11-protocol tools via `bash`/`python`, bypassing
+`computer`/`pyautogui` entirely:
+
+```bash
+# 1. Confirm the target really is XWayland-backed (a normal X11 window entry, not absent):
+xwininfo -root -tree | grep -i "<window title>"
+
+# 2. Find its window id and raise it:
+wmctrl -l
+wmctrl -i -a 0x<id>
+
+# 3. Screenshot just that window (a whole-screen grab still won't work):
+import -window 0x<id> /tmp/shot.png     # ImageMagick
+
+# 4. Send it genuine XTEST input -- works even without xdotool installed:
+python3 -c "
+from Xlib import X, XK, display
+from Xlib.ext import xtest
+d = display.Display()
+xtest.fake_input(d, X.KeyPress, d.keysym_to_keycode(XK.XK_Escape))
+d.sync()
+xtest.fake_input(d, X.KeyRelease, d.keysym_to_keycode(XK.XK_Escape))
+d.sync()
+"
+```
+
+`xdotool` is the usual convenience wrapper for step 4, but if it isn't installed (and there's
+no sudo to `apt install` it), `python-xlib` calls the exact same XTEST extension directly —
+`Xlib.ext.xtest.fake_input` — so it's a full substitute, not a downgrade. One real gotcha
+worth knowing up front: a mouse click has to land on an actual interactive control (a real
+button, not empty space or a plain label) before a *subsequent* injected key event reliably
+reaches the target app's own event handlers — clicking blank space to "just establish focus"
+does not reliably work the same way. This does **not** make `computer` itself work on
+Wayland — the refusal above still stands, and a full-desktop screenshot genuinely isn't
+possible this way. It's a separate, manual technique for one already-identified XWayland
+window, useful whenever a task needs to drive or inspect one specific already-running GUI
+application from a Wayland session.
 
 The tool reports a fixed logical screen size (`CLAUDE_DISPLAY_SIZE`, default `1280x800`)
 and downscales every screenshot to exactly that, scaling Claude's coordinates back up to

@@ -9,7 +9,7 @@ model = "claude-sonnet-5"
 
 [mcp]
 # Set enabled = false to skip every MCP server and run with local tools only.
-enabled = false
+enabled = true
 
 # MCP servers to connect to. Every reachable/launchable one connects and its
 # tools are merged into the single list Claude sees; one that fails prints a
@@ -54,7 +54,8 @@ enabled = false
 servers = [
 #  { name = "n8n",    url = "http://192.168.2.12:5678/mcp-server/http", token_env = "N8N_MCP_TOKEN" }, # works
 #  { name = "alpaca", url = "http://192.168.2.12:8000/mcp" }, # works https://github.com/alpacahq/alpaca-mcp-server
-#  { name = "unity", url = "http://127.0.0.1:8080/mcp" }, # works 
+  { name = "unity", command = ["/home/$USER/.unity/relay/relay_linux", "--mcp", "--project-path", "/run/media/invent/POD2/unity-projects/Burger_Order_Match_Stack"] },
+#  { name = "vs-code", url = "http://127.0.0.1:3000/mcp" }, # works
 #  { name = "blender", url = "http://127.0.0.1:8033/" }, # works https://projects.blender.org/lab/blender_mcp/src/branch/main/mcp
 #  { name = "epic-official-mcp", url = "http://127.0.0.1:8000/mcp" }, # works, uses epic_official_mcp.md
   # ^ Epic's own official Unreal MCP plugin, served by the running editor —
@@ -64,7 +65,7 @@ servers = [
   #   tool list, and which ones appear depends on the project's enabled
   #   plugins — so the set grows as you enable more (see the NEW markers in
   #   epic_official_mcp.md).
-#  { name = "unreal", command = ["node", "/run/media/$USER/POD2/unreal-mcp-additional-tools/dist/bin.js", "--project-path", "/run/media/$USER/POD2/Unreal-Engine-zip-deploys/Unreal-Projects/5.8.1-Projects/Test_MCP_Project/Test_MCP_Project.uproject", "--engine-path", "/run/media/$USER/POD2/Unreal-Engine-zip-deploys/Linux_Unreal_Engine_5.8.1"], env = {DOTNET_ROOT = "/run/media/$USER/POD2/Unreal-Engine-zip-deploys/Linux_Unreal_Engine_5.8.1/Engine/Binaries/ThirdParty/DotNet/10.0/linux-x64",DOTNET_ROOT_X64 = "/run/media/$USER/POD2/Unreal-Engine-zip-deploys/Linux_Unreal_Engine_5.8.1/Engine/Binaries/ThirdParty/DotNet/10.0/linux-x64"}},
+  #{ name = "unreal", command = ["node", "/run/media/$USER/POD2/unreal-mcp-additional-tools/dist/bin.js", "--project-path", "/run/media/$USER/POD2/Unreal-Engine-zip-deploys/Unreal-Projects/5.8.1-Projects/Test_MCP_Project/Test_MCP_Project.uproject", "--engine-path", "/run/media/$USER/POD2/Unreal-Engine-zip-deploys/Linux_Unreal_Engine_5.8.1"], env = {DOTNET_ROOT = "/run/media/$USER/POD2/Unreal-Engine-zip-deploys/Linux_Unreal_Engine_5.8.1/Engine/Binaries/ThirdParty/DotNet/10.0/linux-x64",DOTNET_ROOT_X64 = "/run/media/$USER/POD2/Unreal-Engine-zip-deploys/Linux_Unreal_Engine_5.8.1/Engine/Binaries/ThirdParty/DotNet/10.0/linux-x64"}},
   # ^ works, uses unreal_management.md — this is nodormu/unreal-mcp-additional-tools
   #   (https://github.com/nodormu/unreal-mcp-additional-tools), forked from
   #   sam-david/unreal-mcp and deduplicated against Epic's official server so the two
