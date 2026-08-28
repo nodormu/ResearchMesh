@@ -76,6 +76,22 @@ def _parse_args() -> argparse.Namespace:
         "of an SSE stream.",
     )
     parser.add_argument(
+        "--ssl-certfile",
+        metavar="PATH",
+        help="streamable-http only. PEM certificate to serve TLS with, turning "
+        "the endpoint into https://. Give the full chain (leaf first, then any "
+        "intermediates) if the issuer is a company CA or a public one; clients "
+        "verify against their own OS trust store, so nothing is configured on "
+        "this side for that. Requires --ssl-keyfile.",
+    )
+    parser.add_argument(
+        "--ssl-keyfile",
+        metavar="PATH",
+        help="streamable-http only. Private key for --ssl-certfile. Keep it "
+        "readable only by the user this runs as; it is a path, never the key "
+        "itself, so it stays out of `ps` like the bearer token does.",
+    )
+    parser.add_argument(
         "--token-env",
         default=DEFAULT_TOKEN_ENV,
         metavar="VAR",
@@ -408,11 +424,34 @@ async def _serve_http(args: argparse.Namespace) -> None:
         routes=[Mount(args.path, app=endpoint)], lifespan=lifespan
     )
 
+    # Both or neither: uvicorn ignores a lone --ssl-certfile and would serve
+    # plain HTTP anyway, which is the one failure worth refusing to make — the
+    # operator asked for TLS and every client would still connect happily.
+    if bool(args.ssl_certfile) != bool(args.ssl_keyfile):
+        raise SystemExit(
+            f"[{SERVER_NAME}] --ssl-certfile and --ssl-keyfile must be given "
+            "together (uvicorn silently serves plain HTTP with only one)"
+        )
+    tls = bool(args.ssl_certfile)
+    for label, path in (("--ssl-certfile", args.ssl_certfile), ("--ssl-keyfile", args.ssl_keyfile)):
+        if path and not os.path.isfile(path):
+            raise SystemExit(f"[{SERVER_NAME}] {label}: no such file: {path}")
+
     local_only = args.host in ("127.0.0.1", "localhost", "::1")
+    scheme = "https" if tls else "http"
     print(
-        f"[{SERVER_NAME}] listening on http://{args.host}:{args.port}{args.path}"
+        f"[{SERVER_NAME}] listening on {scheme}://{args.host}:{args.port}{args.path}"
         + ("" if local_only else "  (reachable from your network)")
     )
+    if not tls and not local_only:
+        # A worker on a company network is the case this matters for: the
+        # bearer token and every delegated task and result cross the wire in
+        # the clear. Said once here rather than refusing, matching the
+        # unauthenticated-bind posture below.
+        print(
+            f"[{SERVER_NAME}] no TLS — traffic is plaintext. Pass "
+            "--ssl-certfile/--ssl-keyfile to serve https instead."
+        )
     if token:
         print(
             f"[{SERVER_NAME}] auth: bearer token required "
@@ -435,7 +474,12 @@ async def _serve_http(args: argparse.Namespace) -> None:
             )
         )
     config = uvicorn.Config(
-        http_app, host=args.host, port=args.port, log_level="warning"
+        http_app,
+        host=args.host,
+        port=args.port,
+        log_level="warning",
+        ssl_certfile=args.ssl_certfile,
+        ssl_keyfile=args.ssl_keyfile,
     )
     await uvicorn.Server(config).serve()
 

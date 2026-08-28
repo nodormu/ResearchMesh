@@ -239,6 +239,27 @@ can reach the port has unrestricted shell and desktop control of the machine. Th
 read from the environment, never passed as an argument, so it stays out of `ps` and shell
 history. `--token-env VAR` renames the variable.
 
+**TLS is a pair of paths, not a mode.** Without them the endpoint is plain HTTP — the bearer
+token and every task and result cross the network in the clear, which is called out at startup
+on a non-loopback bind:
+
+```bash
+python mcp_server.py --transport streamable-http --host 0.0.0.0 \
+    --ssl-certfile /etc/ssl/certs/worker-fullchain.pem \
+    --ssl-keyfile  /etc/ssl/private/worker.key
+```
+
+The startup line then says `https://`. Give `--ssl-certfile` the **full chain** — leaf first,
+then intermediates — which is what a company CA or a public issuer hands you; a leaf-only file
+verifies on the box that has the intermediate cached and fails everywhere else. The two must be
+given together (uvicorn quietly serves plain HTTP with only one, so this refuses instead), and
+both paths are checked to exist before the port opens.
+
+Nothing is configured on the client side to match: the URL becomes `https://…` and verification
+goes through the connecting machine's own OS trust store, so a company CA already rolled out to
+that machine is trusted, as is any public certificate. `SSL_CERT_FILE=/path/ca.pem` overrides
+that per process if you'd rather not install a CA system-wide.
+
 Both transports are the same server object — no separate build, no high-level-server rewrite. Under HTTP
 the stdout guard is skipped (fd 1 isn't the wire there) so the app's messages become ordinary
 service logs, line-buffered so a redirected log fills in live rather than on exit. Running the
