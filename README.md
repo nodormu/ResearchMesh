@@ -158,6 +158,7 @@ those you edit by hand.
 | `CLAUDE_MEMORY_DIR` | Where `memory` stores `/memories` (default `./memories`) |
 | `CLAUDE_DISPLAY_SIZE` | Logical screen size `computer` reports, e.g. `1280x800` |
 | `CLAUDE_COMPUTER_FORCE=1` | Let `computer` try anyway on a Wayland session |
+| `CLAUDE_KERNEL_ENCRYPTION` | `auto` (default) encrypts the `python` kernel's sockets with CurveZMQ and falls back if it can't; `required` fails the tool instead of running unencrypted; `off` skips it |
 
 ## MCP, in both directions
 
@@ -459,7 +460,7 @@ Claude, not a place for your project files — and it persists until you delete 
 
 | Tool | Needs |
 |---|---|
-| `python` | `jupyter_client`, `ipykernel` |
+| `python` | `jupyter_client>=8.9.1`, `ipykernel>=7` — older versions work, but unencrypted (see below) |
 | `interactive_run` | `pexpect` |
 | `config_edit` | `ruamel.yaml` (YAML), `tomlkit` (TOML), `jsonpath-ng` (`$…` queries); JSON needs nothing |
 | `sql_query` | `duckdb` |
@@ -468,6 +469,17 @@ Claude, not a place for your project files — and it persists until you delete 
 | `memory` | nothing — standard library only |
 
 To drop a tool entirely, remove its module from `MODULES` in `core/local_tools.py`.
+
+**The `python` kernel's sockets are encrypted.** Everything that tool does — your code, your
+data, the results — travels over ZeroMQ, which by default is plaintext on four loopback TCP
+ports; `ipykernel` says so itself, warning on every start that the link "is susceptible to
+eavesdropping". ResearchMesh has the kernel manager provision a CurveZMQ keypair instead, so
+both ends talk CURVE. That needs `jupyter_client>=8.9.1` and `ipykernel>=7` (and a pyzmq built
+with libsodium, which the wheels are); on anything older it falls back to a Unix socket in the
+Jupyter runtime dir, and then to plaintext TCP, printing which and why each time it drops a
+tier. Set `CLAUDE_KERNEL_ENCRYPTION=required` to make an unencrypted kernel a hard error
+rather than a fallback — if you see that error, `pip install -U 'jupyter_client>=8.9.1'
+'ipykernel>=7'` is the fix.
 
 **Environment variables** must be exported for the user account you launch as — `main.py`
 calls `os.getenv()` directly. Put them in `~/.bashrc` for interactive shells, or

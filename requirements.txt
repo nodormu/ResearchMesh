@@ -24,8 +24,16 @@ playwright>=1.40.0       # headless browser tool (core/browser.py)
 # install hint if used. Drop any tool you don't want by removing its module
 # from core/local_tools.py MODULES.
 
-jupyter_client>=8.0      # `python` — stateful IPython kernel (core/kernel.py)
-ipykernel>=6.0           # the kernel that jupyter_client launches
+# 8.9.1 is a soft floor, not a hard one: it is where KernelManager grew
+# `transport_encryption` (8.9.0 shipped it but broke restart, which core/kernel.py
+# uses), so it is what buys CurveZMQ-encrypted sockets instead of plaintext on
+# four loopback ports. Below it the tool still runs — _start_manager() falls back
+# to IPC — but the traffic is unencrypted.
+jupyter_client>=8.9.1    # `python` — stateful IPython kernel (core/kernel.py)
+# 7.x for the kernel half of that: the curve keys in the connection file, and the
+# kernelspec metadata declaring support that jupyter_client checks before it
+# provisions them.
+ipykernel>=7.0           # the kernel that jupyter_client launches
 pexpect>=4.9             # `interactive_run` — commands that prompt (core/processes.py)
 ruamel.yaml>=0.18        # `config_edit` — YAML round-trip, comments preserved
 tomlkit>=0.12            # `config_edit` — TOML round-trip, comments preserved
