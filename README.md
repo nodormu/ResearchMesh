@@ -3,6 +3,7 @@
 > *Unofficial, community-built client — not affiliated with or endorsed by Anthropic. "Claude" is a trademark of Anthropic.*
 
                     ┌── /think
+                    ├── /clear
                     │
                     ├── Bash / Linux
                     ├── Filesystem
@@ -80,7 +81,11 @@ shuts everything down cleanly.
 the life of the process — an unanswered `tool_use` block, and a conversation past the
 context window — and both make every later turn fail the same way. The error report
 names which one you hit. `/clear` recovers from either while keeping the browser page,
-the kernel, your MCP connections and `/memories`.
+the kernel, your MCP connections and `/memories`. You still may have to Control-C out
+of the session and start again though, which is why you want to make sure your requests
+to NOT keep the LLM going for long periods. Pre-building memories and telling the 
+LLM to take pauses and provide status updates while writing progress to a task related
+memory file helps tremendously if a 400 error occurs.
 
 **MCP servers are optional** — all 18 local tools work without any of them.
 
@@ -255,10 +260,11 @@ verifies on the box that has the intermediate cached and fails everywhere else. 
 given together (uvicorn quietly serves plain HTTP with only one, so this refuses instead), and
 both paths are checked to exist before the port opens.
 
-Nothing is configured on the client side to match: the URL becomes `https://…` and verification
-goes through the connecting machine's own OS trust store, so a company CA already rolled out to
-that machine is trusted, as is any public certificate. `SSL_CERT_FILE=/path/ca.pem` overrides
-that per process if you'd rather not install a CA system-wide.
+The client does not do any app-specific certificate setup: the URL becomes `https://…` and the
+underlying HTTP client verifies certificates using its normal trust configuration for that runtime.
+A company CA or private certificate therefore works only if that CA is already trusted by the
+client environment, or if `SSL_CERT_FILE=/path/ca.pem` / `SSL_CERT_DIR=/path/to/certs` is set
+for that process.
 
 Both transports are the same server object — no separate build, no high-level-server rewrite. Under HTTP
 the stdout guard is skipped (fd 1 isn't the wire there) so the app's messages become ordinary
@@ -597,17 +603,20 @@ in turn, lists its tools, and reports failures without starting the chat.
 </details>
 
 <details>
-<summary><b>Optional: MCP Inspector</b> — for debugging an MCP server (needs Node)</summary>
+<summary><b>Optional: MCP Inspector</b> — for debugging an MCP server</summary>
 
-This project is **pure Python; Node.js is not a dependency.** For hand-calling the tools your
-MCP endpoint exposes, the [MCP Inspector](https://github.com/modelcontextprotocol/inspector)
-runs on demand with no install step:
+This project is **Python-first**, but the full-feature setup requires Node.js. The repo supports
+Node-based MCP servers in `config.toml` (for example `command = ["node", ...]`), and the browser
+tooling uses Playwright, which is a Node-backed runtime in practice. In other words: if you want
+the full MCP + browser workflow, install Node.js and keep it on PATH.
+
+The [MCP Inspector](https://github.com/modelcontextprotocol/inspector) is optional but also Node-based:
 
 ```bash
 npx @modelcontextprotocol/inspector@latest
 ```
 
-An external debugging aid, nothing in the repo depends on it.
+It is a separate debugging aid, not the core of the project runtime.
 
 </details>
 
