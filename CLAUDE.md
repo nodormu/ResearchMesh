@@ -27,6 +27,8 @@ Check every configured MCP server standalone (connects to each, lists tools, rep
 python mcp_client.py
 ```
 
+This project is Python-first, but the full-feature setup requires Node.js: the repo supports Node-based MCP servers in `config.toml`, and the browser tooling uses Playwright, which is a Node-backed runtime in practice. If you want the full MCP + browser workflow, install Node.js and keep it on `PATH`.
+
 Connect additional stdio MCP servers by passing their scripts as argv: `python main.py path/to/other_server.py`.
 
 One-time setup for the browser tool (headless Chromium via Playwright — `pip` installs the package but not the browser binary or its OS libraries), plus the two system binaries `document_convert` shells out to:
