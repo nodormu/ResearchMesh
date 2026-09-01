@@ -119,8 +119,20 @@ servers = [
 #                   token itself here; this file is committed.
 #   timeout         optional request timeout in seconds (default 30).
 #
-# url = "http://192.168.2.12:8081/v1/embeddings"
-# model = "nomic-embed-text"
-# request_format = "openai"
+# Nothing above is specific to self-hosted compute — it's the same generic
+# OpenAI-compatible /v1/embeddings shape, so a paid provider works with zero
+# code changes too. Voyage AI (the path Anthropic's own docs point to) is one
+# example:
+#
+#   url = "https://api.voyageai.com/v1/embeddings"
+#   model = "voyage-2"                  # or voyage-3.5, voyage-large-2, ...
+#   api_key_env = "VOYAGE_API_KEY"      # set VOYAGE_API_KEY in your shell,
+#                                        # never here — this file is committed
+#
+# The example below instead points at a self-hosted llama.cpp server on the
+# LAN — swap in whatever you actually run:
+url = "http://192.168.2.12:8080/v1/embeddings"
+model = "nomic-embed"
+request_format = "openai"
 # api_key_env = "EMBEDDINGS_API_KEY"
-# timeout = 30
+timeout = 30
