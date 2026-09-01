@@ -41,7 +41,7 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 | `config_edit` | Edit YAML/TOML/JSON **without destroying your comments** |
 | `sql_query` | DuckDB straight against CSV/Parquet/JSON — no import step |
 | `trash` | Recoverable deletes instead of `rm` |
-| `text_embeddings` | Vector embeddings from your own private embedding server — no Voyage AI, no second API bill. Needs `[embeddings]` set in config.toml |
+| `text_embeddings` | Vector embeddings from an HTTP embedding server you configure — self-hosted or a paid API both work. See `[embeddings]` in config.toml for worked examples |
 
 Claude chooses the tools and keeps working until it has an answer.
 
@@ -143,17 +143,12 @@ servers = [
 ]
 
 # Commented out by default — text_embeddings errors with a clear message
-# telling you to set this until you do. There is no Anthropic-hosted
-# embeddings endpoint (the documented path is Voyage AI, a separate paid
-# API), so this points the tool at whatever HTTP embedding server you
-# already run instead — the same private compute an Unreal Engine project's
-# own embedding settings might already use, or any self-hosted server
-# speaking the common OpenAI-compatible /v1/embeddings shape.
+# telling you to set this until you do. See config.toml's own [embeddings]
+# comments for the full write-up and two worked examples (a self-hosted
+# server and a paid API) — not duplicated here so this stays in sync with
+# the one copy that matters.
 # [embeddings]
-# url = "http://192.168.2.12:8081/v1/embeddings"
-# model = "nomic-embed-text"          # optional, most single-model servers ignore it
-# request_format = "openai"           # or "simple" — see config.toml's own comments
-# api_key_env = "EMBEDDINGS_API_KEY"  # optional bearer token, same pattern as token_env
+# url = "..."
 # timeout = 30
 ```
 
