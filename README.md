@@ -25,7 +25,7 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 
 ## What it can do
 
-**18 local tools**, plus whatever your MCP servers expose:
+**19 local tools**, plus whatever your MCP servers expose:
 
 | Tool | For |
 |---|---|
@@ -41,6 +41,7 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 | `config_edit` | Edit YAML/TOML/JSON **without destroying your comments** |
 | `sql_query` | DuckDB straight against CSV/Parquet/JSON — no import step |
 | `trash` | Recoverable deletes instead of `rm` |
+| `text_embeddings` | Vector embeddings from your own private embedding server — no Voyage AI, no second API bill. Needs `[embeddings]` set in config.toml |
 
 Claude chooses the tools and keeps working until it has an answer.
 
@@ -50,7 +51,7 @@ You need **Linux**, **Python 3.11+**, and an Anthropic **API key** — this is a
 so a Claude subscription won't work.
 
 **MCP servers are optional.** The `[mcp]` block in `config.toml` ships with
-`enabled = false` and every server commented out, so a fresh clone runs on the 18
+`enabled = false` and every server commented out, so a fresh clone runs on the 19
 local tools alone. The commented entries are kept as worked examples of both entry
 shapes — the addresses and paths in them are machine-specific, so replace them with
 your own before uncommenting and setting `enabled = true`.
@@ -87,7 +88,7 @@ to NOT keep the LLM going for long periods. Pre-building memories and telling th
 LLM to take pauses and provide status updates while writing progress to a task related
 memory file helps tremendously if a 400 error occurs.
 
-**MCP servers are optional** — all 18 local tools work without any of them.
+**MCP servers are optional** — all 19 local tools work without any of them.
 
 ## Try it
 
@@ -140,6 +141,20 @@ servers = [
   { name = "alpaca", url = "http://192.168.2.12:8000/mcp" },
   { name = "unreal", command = ["node", "$HOME/unreal-mcp/dist/bin.js"] },
 ]
+
+# Commented out by default — text_embeddings errors with a clear message
+# telling you to set this until you do. There is no Anthropic-hosted
+# embeddings endpoint (the documented path is Voyage AI, a separate paid
+# API), so this points the tool at whatever HTTP embedding server you
+# already run instead — the same private compute an Unreal Engine project's
+# own embedding settings might already use, or any self-hosted server
+# speaking the common OpenAI-compatible /v1/embeddings shape.
+# [embeddings]
+# url = "http://192.168.2.12:8081/v1/embeddings"
+# model = "nomic-embed-text"          # optional, most single-model servers ignore it
+# request_format = "openai"           # or "simple" — see config.toml's own comments
+# api_key_env = "EMBEDDINGS_API_KEY"  # optional bearer token, same pattern as token_env
+# timeout = 30
 ```
 
 A server that's unreachable (http) or fails to launch (stdio) prints a warning and is
@@ -157,6 +172,7 @@ those you edit by hand.
 |---|---|
 | `ANTHROPIC_API_KEY` | Required |
 | *(per server)* | Whatever each `token_env` names, e.g. `N8N_MCP_TOKEN` |
+| *(embeddings server)* | Whatever `[embeddings].api_key_env` names, if your server needs auth |
 | `RESEARCHMESH_MCP_TOKEN` | Bearer token clients must present to `mcp_server.py --transport streamable-http`; unset = no auth |
 | `CLAUDE_MODEL` | Override the model |
 | `CLAUDE_SHOW_USAGE=1` | Print token and prompt-cache counts per request |
@@ -174,7 +190,7 @@ both, or neither:
    Claude Code  ──delegate──▶  ResearchMesh  ──▶  n8n / Unreal / Unity / …
    (any MCP client)            (server AND client)     (its own MCP servers)
         │                            │                          │
-     mcp_server.py            18 local tools           [mcp] in config.toml
+     mcp_server.py            19 local tools           [mcp] in config.toml
 ```
 
 **As a client**, it connects out to MCP servers and merges their tools with its own — that's
@@ -494,6 +510,7 @@ Claude, not a place for your project files — and it persists until you delete 
 | `trash` | `send2trash` |
 | `computer` | `pyautogui`, `pillow` — **plus `python3-tk` and `scrot` from apt, and an X11 display** (see below) |
 | `memory` | nothing — standard library only |
+| `text_embeddings` | `httpx` — already pulled in by `anthropic`, so this is normally a no-op install |
 
 To drop a tool entirely, remove its module from `MODULES` in `core/local_tools.py`.
 
@@ -580,6 +597,7 @@ core/
   config_edit.py                 comment-preserving YAML/TOML/JSON edits
   data.py                        DuckDB queries
   files.py                       recoverable deletes
+  text_embeddings.py             embeddings from your own private HTTP endpoint
   output.py                      shared output trimming + image results
   cli.py                         prompt_toolkit REPL
 ```

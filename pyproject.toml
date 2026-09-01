@@ -23,6 +23,8 @@ dependencies = [
     "send2trash>=1.8",
     "pyautogui>=0.9.54",
     "pillow>=10.0",
+    "httpx>=0.24",             # `text_embeddings` — already guaranteed by `anthropic`,
+                               # listed here for the direct import in core/text_embeddings.py
 ]
 
 # Ruff is NOT a dependency of this project and nothing runs it automatically —
