@@ -25,7 +25,7 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 
 ## What it can do
 
-**19 local tools**, plus whatever your MCP servers expose:
+**20 local tools**, plus whatever your MCP servers expose:
 
 | Tool | For |
 |---|---|
@@ -42,6 +42,7 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 | `sql_query` | DuckDB straight against CSV/Parquet/JSON — no import step |
 | `trash` | Recoverable deletes instead of `rm` |
 | `text_embeddings` | Vector embeddings from an HTTP embedding server you configure — self-hosted or a paid API both work. See `[embeddings]` in config.toml for worked examples |
+| `vision_query` | Ask a question about an image via a vision-capable chat server you configure — self-hosted or a paid API both work. See `[vision]` in config.toml for worked examples |
 
 Claude chooses the tools and keeps working until it has an answer.
 
@@ -51,7 +52,7 @@ You need **Linux**, **Python 3.11+**, and an Anthropic **API key** — this is a
 so a Claude subscription won't work.
 
 **MCP servers are optional.** The `[mcp]` block in `config.toml` ships with
-`enabled = false` and every server commented out, so a fresh clone runs on the 19
+`enabled = false` and every server commented out, so a fresh clone runs on the 20
 local tools alone. The commented entries are kept as worked examples of both entry
 shapes — the addresses and paths in them are machine-specific, so replace them with
 your own before uncommenting and setting `enabled = true`.
@@ -88,7 +89,7 @@ to NOT keep the LLM going for long periods. Pre-building memories and telling th
 LLM to take pauses and provide status updates while writing progress to a task related
 memory file helps tremendously if a 400 error occurs.
 
-**MCP servers are optional** — all 19 local tools work without any of them.
+**MCP servers are optional** — all 20 local tools work without any of them.
 
 ## Try it
 
@@ -185,7 +186,7 @@ both, or neither:
    Claude Code  ──delegate──▶  ResearchMesh  ──▶  n8n / Unreal / Unity / …
    (any MCP client)            (server AND client)     (its own MCP servers)
         │                            │                          │
-     mcp_server.py            19 local tools           [mcp] in config.toml
+     mcp_server.py            20 local tools           [mcp] in config.toml
 ```
 
 **As a client**, it connects out to MCP servers and merges their tools with its own — that's
@@ -506,6 +507,7 @@ Claude, not a place for your project files — and it persists until you delete 
 | `computer` | `pyautogui`, `pillow` — **plus `python3-tk` and `scrot` from apt, and an X11 display** (see below) |
 | `memory` | nothing — standard library only |
 | `text_embeddings` | `httpx` — already pulled in by `anthropic`, so this is normally a no-op install |
+| `vision_query` | `httpx` — same as `text_embeddings`, normally a no-op install |
 
 To drop a tool entirely, remove its module from `MODULES` in `core/local_tools.py`.
 
@@ -593,6 +595,7 @@ core/
   data.py                        DuckDB queries
   files.py                       recoverable deletes
   text_embeddings.py             embeddings from your own private HTTP endpoint
+  vision.py                      vision-capable image queries against your own private endpoint
   output.py                      shared output trimming + image results
   cli.py                         prompt_toolkit REPL
 ```
