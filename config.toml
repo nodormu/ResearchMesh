@@ -54,6 +54,43 @@ enabled = false
 servers = [
 #  { name = "n8n",    url = "http://192.168.2.12:5678/mcp-server/http", token_env = "N8N_MCP_TOKEN" }, # works
 #  { name = "alpaca", url = "http://192.168.2.12:8000/mcp" }, # works https://github.com/alpacahq/alpaca-mcp-server
+#  { name = "scribus", url = "http://127.0.0.1:8765/mcp" },
+  # ^ CHANGED 2026-09-02: switched from a `command=[...]` stdio-spawned
+  #   subprocess to a plain HTTP url, matching the n8n/alpaca pattern above.
+  #   User runs the server themselves in their own terminal (so its logs are
+  #   directly visible, not buried in whatever wraps this client's stdout):
+  #     /home/$USER/scribus-venv/bin/scribus-mcp --http 127.0.0.1:8765
+  #   `/mcp` is FastMCP's fixed default mount path for streamable-http —
+  #   confirmed via `FastMCP(...).settings.streamable_http_path`, not
+  #   guessed. Leave that terminal running; ResearchMesh just connects to
+  #   the port, it doesn't own the process anymore. Restart ResearchMesh
+  #   after editing this line, same as any MCP config change.
+  #   Reasoning for the switch: this MCP server has TWO ways to reach real
+  #   Scribus — headless (spawns a fresh `scribus -g -py <script>` per call)
+  #   and interactive (a bridge.spy script loaded into an already-open GUI
+  #   Scribus via Script > Execute Script, talking over a local TCP loopback
+  #   the bridge opens). `mode="auto"` silently prefers interactive but
+  #   FALLS BACK to headless with no warning if the bridge isn't reachable —
+  #   and a headless spawn colliding with an already-open GUI Flatpak
+  #   instance was the actual root cause of a crash-on-every-query loop
+  #   (full root-cause chain in scribus_mcp_setup.md memory). Running the
+  #   server via `--http` in its own terminal doesn't fix that by itself —
+  #   it's orthogonal — but it makes the server's own stdout/stderr directly
+  #   visible in real time instead of wrapped by config.toml's stdio-spawn
+  #   plumbing, which is what made the "silent auto-fallback" so hard to
+  #   see happening in the first place.
+  #   scribus-mcp still wraps https://pypi.org/project/scribus-mcp/ (the
+  #   Scribus 1.7 Scripter API; this host runs Scribus 1.6.5 via Flatpak
+  #   net.scribus.Scribus — everything works except a handful of 1.7+-only
+  #   tools like create_qr_code_block, which report a clean structured
+  #   error instead of crashing). Still lives in its OWN venv
+  #   (/home/$USER/scribus-venv, mcp==1.29.1 pinned), NOT tif-env — see
+  #   scribus_mcp_setup.md for the mcp==2.0.0 FastMCP-import conflict that
+  #   forced the separate venv. SCRIBUS_BIN / XDG_RUNTIME_DIR /
+  #   SCRIBUS_MCP_USE_XVFB env vars that used to live in this entry's `env`
+  #   table now need to be set in the shell that launches `scribus-mcp
+  #   --http` by hand (or exported in that terminal / a wrapper script) —
+  #   they no longer come from config.toml.
 #  { name = "unity", command = ["/home/$USER/.unity/relay/relay_linux", "--mcp", "--project-path", "/run/media/invent/POD2/unity-projects/Burger_Order_Match_Stack"] },
 #  { name = "vs-code", url = "http://127.0.0.1:3000/mcp" }, # works
 #  { name = "blender", url = "http://127.0.0.1:8033/" }, # works https://projects.blender.org/lab/blender_mcp/src/branch/main/mcp
@@ -131,8 +168,8 @@ servers = [
 #
 # The example below instead points at a self-hosted llama.cpp server on the
 # LAN — swap in whatever you actually run:
-url = "http://192.168.2.12:8080/v1/embeddings"
-model = "nomic-embed"
-request_format = "openai"
+# url = "http://192.168.2.12:8080/v1/embeddings"
+# model = "nomic-embed"
+# request_format = "openai"
 # api_key_env = "EMBEDDINGS_API_KEY"
-timeout = 30
+# timeout = 30
