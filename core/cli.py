@@ -1,13 +1,26 @@
+import asyncio
+import json
+
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.styles import Style
 
+from core import speak
 from core.chat import Chat
 
 
 class CliApp:
     def __init__(self, agent: Chat):
         self.agent = agent
+
+        # Phase 1 of the REPL-level voice work (see speak_listen_tool_
+        # integration_plan.md in /memories) — the dictation keybinding is a
+        # separate, later step, deliberately not done in this same pass.
+        # Off by default: this only controls whether MY reply also gets
+        # spoken via the `speak` tool's own local `_run` helper; it has no
+        # bearing on whether `speak`/`listen` are reachable as Claude-invoked
+        # tools at all (that's config.toml's own `[speak].enabled`).
+        self.auto_speak = False
 
         self.history = InMemoryHistory()
         self.session: PromptSession[str] = PromptSession(
@@ -34,6 +47,24 @@ class CliApp:
                     print(self.agent.clear())
                     continue
 
+                # Toggle for whether my reply also gets spoken aloud, on top
+                # of always being printed as text (never a replacement for
+                # it — see the "dual input-output modality without losing
+                # context" reasoning in speak_listen_tool_integration_plan.md
+                # in /memories). Reuses speak.py's own `_run` rather than
+                # re-implementing synthesis/playback here.
+                if text.startswith("/voice"):
+                    arg = text[len("/voice"):].strip().lower()
+                    if arg in ("on", "true", "1"):
+                        self.auto_speak = True
+                    elif arg in ("off", "false", "0"):
+                        self.auto_speak = False
+                    elif arg:
+                        print(f"[voice: unrecognized arg {arg!r} — use /voice on|off]")
+                        continue
+                    print(f"[voice: {'on' if self.auto_speak else 'off'}]")
+                    continue
+
                 thinking = False
                 if text.startswith("/think "):
                     text = text[len("/think "):]
@@ -41,6 +72,19 @@ class CliApp:
 
                 response = await self.agent.run(text, thinking=thinking)
                 print(f"\nResponse:\n{response}")
+
+                if self.auto_speak and response:
+                    # Off the event loop thread, same as every other local
+                    # tool call — speak.py's _run does blocking subprocess
+                    # I/O (piper synthesis, then paplay playback).
+                    result = json.loads(
+                        await asyncio.to_thread(speak._run, {"text": response})
+                    )
+                    if result.get("status") != "ok":
+                        print(
+                            f"[voice: {result.get('status')} — "
+                            f"{result.get('reason', result.get('error', ''))}]"
+                        )
 
             except KeyboardInterrupt:
                 break
