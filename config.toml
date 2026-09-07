@@ -168,11 +168,11 @@ servers = [
 #
 # The example below instead points at a self-hosted llama.cpp server on the
 # LAN — swap in whatever you actually run:
-# url = "http://192.168.2.12:8080/v1/embeddings"
-# model = "nomic-embed"
-# request_format = "openai"
+ url = "http://192.168.2.12:8080/v1/embeddings"
+ model = "nomic-embed"
+ request_format = "openai"
 # api_key_env = "EMBEDDINGS_API_KEY"
-# timeout = 60
+ timeout = 60
 
 [vision]
 # Same self-hosting motivation as [embeddings] above, for a different
@@ -229,8 +229,102 @@ servers = [
 # [embeddings] above already uses, now also serving a vision-capable model
 # alongside the embedding one (llama.cpp's own router/--models-preset mode
 # runs both behind one port) — swap in whatever you actually run:
-# url = "http://192.168.2.12:8080/v1/chat/completions"
-# model = "glm-4.6v-flash"
-# max_tokens = 4000
-# timeout = 180
+ url = "http://192.168.2.12:8080/v1/chat/completions"
+ model = "glm-4.6v-flash"
+ max_tokens = 4000
+ timeout = 180
 # api_key_env = "VISION_API_KEY"
+
+[speak]
+# Local text-to-speech via Piper (github.com/rhasspy/piper — the PyPI
+# package is `piper-tts`, NOT `sudo apt install piper`, which installs an
+# unrelated GTK app for configuring gaming mice, same name by coincidence).
+# Same self-hosting motivation as [vision]/[embeddings]: keeps synthesized
+# speech entirely local, no cloud TTS API involved.
+#
+# Like everything else in this file, read fresh on every call — editing
+# this block and calling `speak` again picks it up with no restart.
+#
+#   enabled       true/false, default true. A hard off-switch, independent
+#                 of whether voice_model below is actually set up — e.g.
+#                 mute speech output for a while without losing/unsetting
+#                 the voice_model path. Checked BEFORE voice_model, so a
+#                 disabled tool never touches the filesystem or spawns a
+#                 subprocess at all.
+#   voice_model   path to a Piper .onnx voice file. Required — the tool is
+#                 still declared to Claude either way, but returns a
+#                 not_configured status telling you to set this until you
+#                 do. A matching <path>.json config file must sit next to
+#                 it (Piper's own convention, not something we control).
+#   sink          PipeWire sink name to play through (`pactl list sinks
+#                 short` to find it). Falls back to the system default
+#                 sink if unset.
+#   timeout       subprocess timeout in seconds, for synthesis AND playback
+#                 each (default 30 if unset here).
+#
+# ⚠️ FIRST-TIME SETUP: `voice_model`/`sink` below are hardware-specific —
+# `sink` in particular is a PipeWire name captured on the machine this repo
+# was built on (a "Razer USB Sound Card") and will not match your hardware
+# if you cloned this project. Don't hand-guess it: leave `enabled = false`
+# for now, start a normal CLI session, and just ask Claude directly — e.g.
+# "list my PipeWire sinks and fill in [speak] in config.toml for me."
+# Claude already has full bash access and can run `pactl list sinks short`,
+# confirm which one is your target speaker/headset, and edit this file's
+# values (via the config_edit tool, so these comments survive) — then flip
+# `enabled` to true yourself once it's filled in correctly.
+#
+# ⚠️ TESTING STATE, NOT THE INTENDED SHIPPED DEFAULT: `enabled` is live
+# `true` below so active development/testing can continue without a
+# per-call override. The intended default for a real commit is `false` —
+# flip this back before committing, per the explicit decision made while
+# building this tool (see speak_listen_tool_integration_plan.md in
+# /memories for the reasoning).
+enabled = true
+voice_model = "/home/invent/models/piper_voices/en_US-lessac-medium.onnx"
+sink = "alsa_output.usb-Razer_Razer_USB_Sound_Card_00000000-00.analog-stereo"
+# timeout = 30
+
+[listen]
+# Local speech-to-text via faster-whisper (CTranslate2, CPU-only on this
+# machine — NOT ROCm, see camera_mic_hardware_testing_plan.md's GPU
+# investigation for why that's closed for now). Same self-hosting
+# motivation as [speak]/[vision]/[embeddings]. NOTE: core/listen.py doesn't
+# exist yet as of this block being added — this section is here ready and
+# waiting so no further config editing is needed once it's written.
+#
+#   enabled       true/false. Same hard off-switch shape as [speak].enabled,
+#                 checked before `device`, so a disabled tool never opens
+#                 the microphone at all.
+#   device        PipeWire source name to record from (`pactl list sources
+#                 short` to find it). Required — the tool is still declared
+#                 to Claude either way, but returns a not_configured status
+#                 until this is set.
+#   model_size    faster-whisper model size (tiny/base/small/medium/
+#                 large-v3, ...). Default "base" if unset — proven this
+#                 session to correctly transcribe real, natural speech on
+#                 this CPU.
+#   default_duration_seconds   how long to record if the caller doesn't
+#                 specify duration_seconds (default 8 if unset here).
+#   max_duration_seconds   safety cap on duration_seconds however it was
+#                 supplied (default 30 if unset here).
+#
+# ⚠️ FIRST-TIME SETUP: `device` below is a hardware-specific PipeWire name
+# captured on the machine this repo was built on (a "Razer USB Sound Card")
+# and will not match your hardware if you cloned this project. Same advice
+# as [speak] above: don't hand-guess it — leave `enabled = false` for now,
+# start a normal CLI session, and ask Claude directly — e.g. "list my
+# PipeWire sources and fill in [listen] in config.toml for me." Claude can
+# run `pactl list sources short`, confirm which one is your target
+# mic/headset, and edit this file's values (via config_edit) — then flip
+# `enabled` to true yourself once it's filled in correctly.
+#
+# ⚠️ TESTING STATE, NOT THE INTENDED SHIPPED DEFAULT: `enabled` is live
+# `true` below so active development/testing can continue. The intended
+# default for a real commit is `false` — flip this back before committing,
+# per the explicit decision made while building this tool (see
+# speak_listen_tool_integration_plan.md in /memories for the reasoning).
+enabled = true
+device = "alsa_input.usb-Razer_Razer_USB_Sound_Card_00000000-00.analog-stereo"
+model_size = "base"
+default_duration_seconds = 8
+max_duration_seconds = 30

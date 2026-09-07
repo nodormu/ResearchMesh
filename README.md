@@ -25,7 +25,7 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 
 ## What it can do
 
-**20 local tools**, plus whatever your MCP servers expose:
+**22 local tools**, plus whatever your MCP servers expose:
 
 | Tool | For |
 |---|---|
@@ -43,6 +43,7 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 | `trash` | Recoverable deletes instead of `rm` |
 | `text_embeddings` | Vector embeddings from an HTTP embedding server you configure — self-hosted or a paid API both work. See `[embeddings]` in config.toml for worked examples |
 | `vision_query` | Ask a question about an image via a vision-capable chat server you configure — self-hosted or a paid API both work. See `[vision]` in config.toml for worked examples |
+| `speak` · `listen` | Local text-to-speech (Piper) and speech-to-text (faster-whisper) through your own speaker/mic — no cloud audio API. Disabled by default; see `[speak]`/`[listen]` in config.toml, including first-time device setup |
 
 Claude chooses the tools and keeps working until it has an answer.
 
@@ -89,7 +90,7 @@ to NOT keep the LLM going for long periods. Pre-building memories and telling th
 LLM to take pauses and provide status updates while writing progress to a task related
 memory file helps tremendously if a 400 error occurs.
 
-**MCP servers are optional** — all 20 local tools work without any of them.
+**MCP servers are optional** — all 22 local tools work without any of them.
 
 ## Try it
 
@@ -186,7 +187,7 @@ both, or neither:
    Claude Code  ──delegate──▶  ResearchMesh  ──▶  n8n / Unreal / Unity / …
    (any MCP client)            (server AND client)     (its own MCP servers)
         │                            │                          │
-     mcp_server.py            20 local tools           [mcp] in config.toml
+     mcp_server.py            22 local tools           [mcp] in config.toml
 ```
 
 **As a client**, it connects out to MCP servers and merges their tools with its own — that's
