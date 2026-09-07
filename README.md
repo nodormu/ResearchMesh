@@ -4,6 +4,8 @@
 
                     ┌── /think
                     ├── /clear
+                    ├── /voice
+                    ├── /listen
                     │
                     ├── Bash / Linux
                     ├── Filesystem
@@ -78,7 +80,15 @@ python main.py
 
 Then just type. **`/think <message>`** gives Claude longer to reason on hard problems;
 **`/clear`** drops the conversation without restarting the app; **Ctrl-C** exits and
-shuts everything down cleanly.
+shuts everything down cleanly. **`/voice [on|off]`** toggles whether Claude's replies
+also get spoken aloud through your speaker (via the `speak` tool, local Piper TTS);
+**`/listen [N]`** records `N` seconds from your mic (or `[listen].default_duration_seconds`
+if omitted), transcribes it locally (faster-whisper), and auto-submits the transcript as
+your next turn the moment transcription finishes — no separate Enter press needed, and
+this happens regardless of whether `/voice` is on or off. Both require `[speak]`/`[listen]`
+set up in `config.toml` first (see the tools table above and that file's own inline setup
+comments) — without that, `/voice` still toggles but has nothing to speak, and `/listen`
+reports a clear `not_configured`/`disabled` message instead of trying to open the mic.
 
 **If it starts returning 400s and won't stop, run `/clear`.** Two failures persist for
 the life of the process — an unanswered `tool_use` block, and a conversation past the
