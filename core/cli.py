@@ -21,28 +21,48 @@ class CliApp:
         # config.toml's own `[speak].enabled`).
         self.auto_speak = False
 
-        # Phase 2 of the REPL-level voice work: `/listen` (see below)
-        # transcribes speech and stages it here rather than auto-submitting
-        # it — the NEXT prompt_async call opens pre-filled with this text
-        # (via its own `default=` param) so there's a review/edit step
-        # before it's actually sent. Reset to "" the instant it's consumed,
-        # whether kept, edited, or ignored, so it never leaks into a later
-        # turn.
-        self._next_default = ""
-
         self.history = InMemoryHistory()
         self.session: PromptSession[str] = PromptSession(
             history=self.history,
             style=Style.from_dict({"prompt": "#aaaaaa"}),
         )
 
+    async def _submit(self, text: str):
+        """Send `text` to the agent as one turn, print the reply, and
+        speak it if `/voice` (auto_speak) is on. Shared by both a normal
+        typed Enter-submit and a completed `/listen` dictation — this is
+        what makes dictation auto-submit independent of the auto_speak
+        flag: auto_speak only ever gates whether MY reply gets spoken,
+        never whether YOUR input gets sent, regardless of which path
+        (typed or dictated) produced that input. See speak_listen_tool_
+        integration_plan.md in /memories for the auto-submit-on-dictation
+        design decision (a deliberate pivot away from the earlier
+        stage-and-review design)."""
+        thinking = False
+        if text.startswith("/think "):
+            text = text[len("/think "):]
+            thinking = True
+
+        response = await self.agent.run(text, thinking=thinking)
+        print(f"\nResponse:\n{response}")
+
+        if self.auto_speak and response:
+            # Off the event loop thread, same as every other local tool
+            # call — speak.py's _run does blocking subprocess I/O (piper
+            # synthesis, then paplay playback).
+            result = json.loads(
+                await asyncio.to_thread(speak._run, {"text": response})
+            )
+            if result.get("status") != "ok":
+                print(
+                    f"[voice: {result.get('status')} — "
+                    f"{result.get('reason', result.get('error', ''))}]"
+                )
+
     async def run(self):
         while True:
             try:
-                user_input = await self.session.prompt_async(
-                    "> ", default=self._next_default
-                )
-                self._next_default = ""
+                user_input = await self.session.prompt_async("> ")
                 if not user_input.strip():
                     continue
 
@@ -77,10 +97,16 @@ class CliApp:
                     continue
 
                 # Dictation: record+transcribe via listen.py's own `_run`
-                # (same shared-helper reuse as `/voice` above), then STAGE
-                # the transcript as the next prompt's pre-filled text rather
-                # than sending it immediately — you review/edit it like any
-                # normal typed input, then press Enter yourself. Optional
+                # (same shared-helper reuse as `/voice` above), then AUTO-
+                # SUBMIT the transcript as a turn the instant STT completes
+                # — via the same `_submit` path a normal typed Enter uses,
+                # so this happens regardless of whether `/voice` (auto_speak)
+                # is on or off; that flag only affects whether the REPLY
+                # gets spoken, never whether dictated input gets sent. NOTE:
+                # this is a deliberate pivot away from this command's
+                # earlier "stage as next prompt's pre-fill for manual
+                # review/edit" behavior — see speak_listen_tool_integration_
+                # plan.md in /memories for that history. Optional
                 # `/listen <N>` overrides [listen]'s configured duration for
                 # just this one call.
                 if text.startswith("/listen"):
@@ -102,7 +128,7 @@ class CliApp:
                     if result.get("status") == "ok":
                         transcript = result["transcript"]
                         print(f"[dictated: {transcript!r}]")
-                        self._next_default = transcript
+                        await self._submit(transcript)
                     else:
                         print(
                             f"[listen: {result.get('status')} — "
@@ -110,26 +136,7 @@ class CliApp:
                         )
                     continue
 
-                thinking = False
-                if text.startswith("/think "):
-                    text = text[len("/think "):]
-                    thinking = True
-
-                response = await self.agent.run(text, thinking=thinking)
-                print(f"\nResponse:\n{response}")
-
-                if self.auto_speak and response:
-                    # Off the event loop thread, same as every other local
-                    # tool call — speak.py's _run does blocking subprocess
-                    # I/O (piper synthesis, then paplay playback).
-                    result = json.loads(
-                        await asyncio.to_thread(speak._run, {"text": response})
-                    )
-                    if result.get("status") != "ok":
-                        print(
-                            f"[voice: {result.get('status')} — "
-                            f"{result.get('reason', result.get('error', ''))}]"
-                        )
+                await self._submit(text)
 
             except KeyboardInterrupt:
                 break
