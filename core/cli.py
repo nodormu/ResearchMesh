@@ -5,7 +5,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.styles import Style
 
-from core import speak
+from core import listen, speak
 from core.chat import Chat
 
 
@@ -14,13 +14,21 @@ class CliApp:
         self.agent = agent
 
         # Phase 1 of the REPL-level voice work (see speak_listen_tool_
-        # integration_plan.md in /memories) — the dictation keybinding is a
-        # separate, later step, deliberately not done in this same pass.
-        # Off by default: this only controls whether MY reply also gets
-        # spoken via the `speak` tool's own local `_run` helper; it has no
-        # bearing on whether `speak`/`listen` are reachable as Claude-invoked
-        # tools at all (that's config.toml's own `[speak].enabled`).
+        # integration_plan.md in /memories). Off by default: this only
+        # controls whether MY reply also gets spoken via the `speak` tool's
+        # own local `_run` helper; it has no bearing on whether `speak`/
+        # `listen` are reachable as Claude-invoked tools at all (that's
+        # config.toml's own `[speak].enabled`).
         self.auto_speak = False
+
+        # Phase 2 of the REPL-level voice work: `/listen` (see below)
+        # transcribes speech and stages it here rather than auto-submitting
+        # it — the NEXT prompt_async call opens pre-filled with this text
+        # (via its own `default=` param) so there's a review/edit step
+        # before it's actually sent. Reset to "" the instant it's consumed,
+        # whether kept, edited, or ignored, so it never leaks into a later
+        # turn.
+        self._next_default = ""
 
         self.history = InMemoryHistory()
         self.session: PromptSession[str] = PromptSession(
@@ -31,7 +39,10 @@ class CliApp:
     async def run(self):
         while True:
             try:
-                user_input = await self.session.prompt_async("> ")
+                user_input = await self.session.prompt_async(
+                    "> ", default=self._next_default
+                )
+                self._next_default = ""
                 if not user_input.strip():
                     continue
 
@@ -63,6 +74,40 @@ class CliApp:
                         print(f"[voice: unrecognized arg {arg!r} — use /voice on|off]")
                         continue
                     print(f"[voice: {'on' if self.auto_speak else 'off'}]")
+                    continue
+
+                # Dictation: record+transcribe via listen.py's own `_run`
+                # (same shared-helper reuse as `/voice` above), then STAGE
+                # the transcript as the next prompt's pre-filled text rather
+                # than sending it immediately — you review/edit it like any
+                # normal typed input, then press Enter yourself. Optional
+                # `/listen <N>` overrides [listen]'s configured duration for
+                # just this one call.
+                if text.startswith("/listen"):
+                    arg = text[len("/listen"):].strip()
+                    tool_input = {}
+                    if arg:
+                        try:
+                            tool_input["duration_seconds"] = int(arg)
+                        except ValueError:
+                            print(
+                                f"[listen: bad duration {arg!r} — expected "
+                                "an integer number of seconds]"
+                            )
+                            continue
+                    print("[listening... speak now]")
+                    result = json.loads(
+                        await asyncio.to_thread(listen._run, tool_input)
+                    )
+                    if result.get("status") == "ok":
+                        transcript = result["transcript"]
+                        print(f"[dictated: {transcript!r}]")
+                        self._next_default = transcript
+                    else:
+                        print(
+                            f"[listen: {result.get('status')} — "
+                            f"{result.get('reason', result.get('error', ''))}]"
+                        )
                     continue
 
                 thinking = False
