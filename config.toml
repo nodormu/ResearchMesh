@@ -168,11 +168,11 @@ servers = [
 #
 # The example below instead points at a self-hosted llama.cpp server on the
 # LAN — swap in whatever you actually run:
- url = "http://192.168.2.12:8080/v1/embeddings"
- model = "nomic-embed"
- request_format = "openai"
+# url = "http://192.168.2.12:8080/v1/embeddings"
+# model = "nomic-embed"
+# request_format = "openai"
 # api_key_env = "EMBEDDINGS_API_KEY"
- timeout = 60
+# timeout = 60
 
 [vision]
 # Same self-hosting motivation as [embeddings] above, for a different
@@ -229,10 +229,10 @@ servers = [
 # [embeddings] above already uses, now also serving a vision-capable model
 # alongside the embedding one (llama.cpp's own router/--models-preset mode
 # runs both behind one port) — swap in whatever you actually run:
- url = "http://192.168.2.12:8080/v1/chat/completions"
- model = "glm-4.6v-flash"
- max_tokens = 4000
- timeout = 180
+# url = "http://192.168.2.12:8080/v1/chat/completions"
+# model = "glm-4.6v-flash"
+# max_tokens = 4000
+# timeout = 180
 # api_key_env = "VISION_API_KEY"
 
 [speak]
@@ -279,11 +279,11 @@ servers = [
 # flip this back before committing, per the explicit decision made while
 # building this tool (see speak_listen_tool_integration_plan.md in
 # /memories for the reasoning).
-enabled = true
-voice_model = "/home/invent/models/piper_voices/en_US-lessac-medium.onnx"
-sink = "alsa_output.usb-Razer_Razer_USB_Sound_Card_00000000-00.analog-stereo"
+# enabled = true
+# voice_model = "/home/invent/models/piper_voices/en_US-lessac-medium.onnx"
+# sink = "alsa_output.usb-Razer_Razer_USB_Sound_Card_00000000-00.analog-stereo"
 # timeout = 30
-timeout = 120
+# timeout = 120
 
 [listen]
 # Local speech-to-text via faster-whisper (CTranslate2, CPU-only on this
@@ -324,8 +324,8 @@ timeout = 120
 # default for a real commit is `false` — flip this back before committing,
 # per the explicit decision made while building this tool (see
 # speak_listen_tool_integration_plan.md in /memories for the reasoning).
-enabled = true
-device = "alsa_input.usb-Razer_Razer_USB_Sound_Card_00000000-00.analog-stereo"
-model_size = "base"
-default_duration_seconds = 8
-max_duration_seconds = 30
+# enabled = true
+# device = "alsa_input.usb-Razer_Razer_USB_Sound_Card_00000000-00.analog-stereo"
+# model_size = "base"
+# default_duration_seconds = 8
+# max_duration_seconds = 30
