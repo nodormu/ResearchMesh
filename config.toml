@@ -282,7 +282,6 @@ servers = [
 # enabled = true
 # voice_model = "/home/invent/models/piper_voices/en_US-lessac-medium.onnx"
 # sink = "alsa_output.usb-Razer_Razer_USB_Sound_Card_00000000-00.analog-stereo"
-# timeout = 30
 # timeout = 120
 
 [listen]
