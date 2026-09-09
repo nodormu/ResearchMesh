@@ -14,7 +14,11 @@ Actions:
                    convenience message, on an open output handle. Channel
                    messages: note_on, note_off, control_change,
                    program_change, pitchwheel, aftertouch (channel
-                   pressure), polytouch (poly key pressure). System Common:
+                   pressure), polytouch (poly key pressure), and
+                   channel_mode (a typed wrapper around Control Change's
+                   own controller numbers 120-127 — see the inline
+                   comment in `_build_message` for the full command list).
+                   System Common:
                    quarter_frame, songpos, song_select, tune_request.
                    System Real-Time: clock, start, stop, continue,
                    active_sensing, reset. System Exclusive: sysex
@@ -24,8 +28,14 @@ Actions:
                    Message), mmc (MIDI Machine Control transport commands),
                    msc (MIDI Show Control General Category commands),
                    gm_system (General MIDI System On/Off), device_inquiry
-                   (Identity Request/Reply), and device_control (Master
-                   Volume/Balance) — see each one's own inline comment in
+                   (Identity Request/Reply), device_control (Master
+                   Volume/Balance), midi_tuning (Bulk Tuning Dump Request/
+                   Reply, Single Note Tuning Change), notation (Bar
+                   Marker, Time Signature Immediate/Delayed), and
+                   mtc_cueing (MTC Real-Time Cueing Set-Up messages), and
+                   mtc_cueing_nrt (the fuller Non-Real-Time Cueing
+                   Set-Up messages, incl. Delete variants and 5 Special
+                   sub-types) — see each one's own inline comment in
                    `_build_message` further down in this file for full
                    field details. Two more typed convenience types, rpn
                    and nrpn (Registered/Non-Registered Parameter Numbers),
@@ -793,6 +803,129 @@ def _encode_msc_time(
     return (hr_byte, minutes, seconds, frames, fractional_frames)
 
 
+def _encode_tuning_frequency(entry: dict) -> tuple:
+    """Encode ONE MIDI Tuning frequency entry as the 3-byte format shared
+    by both the Bulk Tuning Dump and Single Note Tuning Change messages
+    (primary spec's "Frequency Data Format" section): byte 1 = nearest
+    equal-tempered semitone BELOW the frequency (0-127), bytes 2-3 = a
+    14-bit fraction of 100 cents ABOVE that semitone, MSB byte then LSB
+    byte (confirmed via the byte-layout diagram `0xxxxxxx 0abcdefg
+    0hijklmn` — 'a' is the fraction's most-significant bit, 'n' the
+    least — this is MSB-then-LSB wire order, NOT the LSB-first convention
+    used elsewhere in this file for e.g. RPN/MSC 14-bit fields; verified
+    by hand-computing all 4 of the spec's own worked examples before
+    writing this function, not assumed from the other fields' convention).
+
+    Accepts EITHER `{"semitone": int 0-127, "cents": float 0-100
+    exclusive}` (the tool computes the 14-bit fraction internally: 100
+    cents = the full 14-bit range, per the spec's own stated resolution
+    "100 cents / 2**14 = .0061 cents") OR `{"no_change": True}` for the
+    spec's reserved (7F,7F,7F) sentinel meaning "make no change to this
+    key's stored tuning" — deliberately NOT accepting a target frequency
+    in Hz directly, to avoid introducing floating-point equal-temperament
+    conversion as a NEW source of rounding/precision bugs on top of an
+    already spec-precise encoding; semitone+cents mirrors the spec's own
+    conceptual model exactly and is directly hand-verifiable against its
+    worked examples (which is exactly how this function was verified).
+    """
+    if entry.get("no_change"):
+        return (0x7F, 0x7F, 0x7F)
+    semitone = entry.get("semitone")
+    cents = entry.get("cents")
+    if semitone is None:
+        raise KeyError("'semitone' (or 'no_change': true)")
+    if cents is None:
+        raise KeyError("'cents' (or 'no_change': true)")
+    if not (0 <= semitone <= 127):
+        raise ValueError(f"'semitone' must be 0-127, got {semitone!r}")
+    if not (0 <= cents < 100):
+        raise ValueError(f"'cents' must be 0 <= cents < 100, got {cents!r}")
+    frac14 = round(cents / 100.0 * 16384)
+    frac14 = min(frac14, 16383)  # guard the round()-to-16384 edge at cents just under 100
+    return (semitone, (frac14 >> 7) & 0x7F, frac14 & 0x7F)
+
+
+def _encode_time_signature_pair(numerator: int, denominator: int) -> tuple:
+    """Encode ONE (numerator, denominator) pair as the 2-byte `nn dd`
+    format Notation Information's Time Signature messages use — shared by
+    the primary pair and each additional compound-signature pair.
+    `denominator` is accepted as the ACTUAL value (2, 4, 8, 16, ...), NOT
+    the spec's own "negative power of 2" exponent — mirrors mido's own
+    EXISTING `time_signature` MetaMessage field (already used elsewhere in
+    this file for .mid files), confirmed live by constructing one and
+    checking its encoded bytes (`denominator=4` produces byte value `2` =
+    log2(4)) before writing this function, so a caller who already knows
+    how to build a .mid time_signature meta event recognizes the same
+    convention here.
+    """
+    if not (0 <= numerator <= 127):
+        raise ValueError(f"'numerator' must be 0-127, got {numerator!r}")
+    if denominator < 1 or (denominator & (denominator - 1)) != 0:
+        raise ValueError(
+            f"'denominator' must be a positive power of 2 (1, 2, 4, 8, "
+            f"...), got {denominator!r}"
+        )
+    exponent = denominator.bit_length() - 1
+    if not (0 <= exponent <= 127):
+        raise ValueError(
+            f"'denominator' {denominator!r} is out of representable range"
+        )
+    return (numerator, exponent)
+
+
+def _encode_mtc_cueing_time(
+    hours: int, minutes: int, seconds: int, frames: int,
+    fractional_frames: int, frame_rate: str,
+) -> tuple:
+    """MTC (Non-Real-Time) Cueing's plain 5-byte time field (hr mn sc fr
+    ff) — deliberately NOT reusing `_encode_msc_time` despite that
+    function numerically producing the same bytes today for equivalent
+    inputs: `_encode_msc_time`'s own docstring is explicit that it encodes
+    MSC's OWN more-elaborate bit layout (extra colour-frame/sign/status
+    flag bits, just hardcoded to safe defaults) — reusing it here would
+    be semantically misleading for a future reader even though the output
+    happens to coincide. This is MTC Cueing's own plain encoding: only the
+    hour byte is shared (via `_encode_smpte_hour_byte`, the same one
+    `mtc_full`/MMC-locate/MSC all already use), minutes/seconds/frames/
+    fractional_frames have no extra bits at all.
+    """
+    if not (0 <= minutes <= 59):
+        raise ValueError(f"'minutes' must be 0-59, got {minutes!r}")
+    if not (0 <= seconds <= 59):
+        raise ValueError(f"'seconds' must be 0-59, got {seconds!r}")
+    if not (0 <= frames <= 29):
+        raise ValueError(f"'frames' must be 0-29, got {frames!r}")
+    if not (0 <= fractional_frames <= 99):
+        raise ValueError(
+            f"'fractional_frames' must be 0-99, got {fractional_frames!r}"
+        )
+    hr_byte = _encode_smpte_hour_byte(hours, frame_rate)
+    return (hr_byte, minutes, seconds, frames, fractional_frames)
+
+
+def _nibblize(raw_bytes) -> tuple:
+    """Nibblize a list of raw 8-bit bytes into MIDI-safe 7-bit values, LS
+    nibble first per byte — the encoding MTC Cueing's "additional info"
+    field uses to embed an arbitrary MIDI message inside a Cueing Set-Up
+    message (per the separate MTC spec's own "Additional Information"
+    section). Verified against the spec's own worked example before
+    writing any message-building code around it: `0x91 0x46 0x7F` (a real
+    Note On status byte with its high bit set, plus 2 data bytes) nibblizes
+    to `01 09 06 04 0F 07` — confirmed byte-for-byte via this exact
+    function before it was ever wired into `_build_message`.
+    """
+    out: list = []
+    for b in raw_bytes:
+        if not (0 <= b <= 255):
+            raise ValueError(
+                f"additional-info bytes must each be 0-255 (a full "
+                f"8-bit MIDI byte, pre-nibblization), got {b!r}"
+            )
+        out.append(b & 0x0F)
+        out.append((b >> 4) & 0x0F)
+    return tuple(out)
+
+
 def _build_message(message: dict) -> "mido.Message":
     """Build a channel/system/sysex mido.Message from a tool-supplied dict.
 
@@ -1392,13 +1525,654 @@ def _build_message(message: dict) -> "mido.Message":
             ),
             time=time,
         )
+    if msg_type == "channel_mode":
+        # Channel Mode Messages — reuse the ORDINARY Control Change status
+        # byte (BnH), with controller numbers 120-127 reserved for mode/
+        # reset semantics instead of tone-shaping (confirmed against the
+        # primary spec's "Channel Mode Messages" chapter and Table IV).
+        # Technically already sendable today via raw 'control_change'
+        # (nothing stops 'control_change' with controller=124) — this
+        # typed wrapper adds named commands + validation + the extra
+        # sub-fields a couple of these actually need, rather than making
+        # the caller remember magic controller numbers and value-byte
+        # conventions by hand.
+        #   120 All Sound Off            value=0 always
+        #   121 Reset All Controllers    value=0 always
+        #   122 Local Control            value: 0=Off, 127=On
+        #   123 All Notes Off            value=0 always
+        #   124 Omni Mode Off            value=0 always
+        #   125 Omni Mode On             value=0 always
+        #   126 Mono Mode On (Poly Off)  value=M, number of channels
+        #                                (0-16; 0 is the spec's own
+        #                                special case meaning "voices
+        #                                equal the receiver's own channel
+        #                                count")
+        #   127 Poly Mode On (Mono Off)  value=0 always
+        # NOTE (from the spec's own Appendix, "Additional Explanations and
+        # Application Notes" — read during this tool's spec survey):
+        # commands 125-127 (Omni On/Mono On/Poly On) ALSO trigger an
+        # implicit All Notes Off on a compliant receiver — a caller
+        # switching modes should not be surprised that notes get cut.
+        _CHANNEL_MODE_COMMANDS = {
+            "all_sound_off": 120, "reset_all_controllers": 121,
+            "local_control": 122, "all_notes_off": 123, "omni_off": 124,
+            "omni_on": 125, "mono_on": 126, "poly_on": 127,
+        }
+        command = message.get("command")
+        if command is None:
+            raise KeyError("'command'")
+        if command not in _CHANNEL_MODE_COMMANDS:
+            raise ValueError(
+                f"'command' must be one of "
+                f"{sorted(_CHANNEL_MODE_COMMANDS)} for 'channel_mode', "
+                f"got {command!r}"
+            )
+        control = _CHANNEL_MODE_COMMANDS[command]
+
+        if command == "local_control":
+            on = message.get("on")
+            if on is None:
+                raise KeyError("'on' (required for 'local_control')")
+            mode_value = 127 if on else 0
+        elif command == "mono_on":
+            channel_count = message.get("channel_count")
+            if channel_count is None:
+                raise KeyError("'channel_count' (required for 'mono_on')")
+            if not (0 <= channel_count <= 16):
+                raise ValueError(
+                    f"'channel_count' must be 0-16, got {channel_count!r}"
+                )
+            mode_value = channel_count
+        else:
+            mode_value = 0
+
+        return mido.Message(
+            "control_change", channel=channel, control=control,
+            value=mode_value, time=time,
+        )
+    if msg_type == "midi_tuning":
+        # MIDI Tuning — a Universal SysEx family, sub-ID#1 = 08, covering
+        # 3 message shapes under one 'command' sub-field (same "one type,
+        # several named commands" pattern as mmc/msc/gm_system/
+        # device_inquiry/device_control above). Confirmed against the
+        # primary spec's "MIDI Tuning" section, WITH the exact byte
+        # layouts re-verified via a rendered page image (not just
+        # `pdftotext`) before writing this — see the note below about a
+        # genuine discrepancy that turned up doing that.
+        #   bulk_dump_request (Non-Real Time, 0x7E):
+        #     F0 7E <device_id> 08 00 tt F7
+        #   bulk_dump_reply   (Non-Real Time, 0x7E):
+        #     F0 7E <device_id> 08 01 tt <16 ASCII name bytes>
+        #       <3 bytes>x128 (one per MIDI key, note 0 first) chksum F7
+        #   note_change       (REAL Time, 0x7F — unlike the other two):
+        #     F0 7F <device_id> 08 02 tt ll [kk xx yy zz]x ll F7
+        # ⚠️ SPEC DISCREPANCY, worth recording plainly: the primary spec's
+        # own printed text for bulk_dump_reply's checksum says "XOR of 7E
+        # <device ID> 01 tt <388 bytes>" — TWO separate problems with
+        # this, both visually re-verified against a rendered page image to
+        # rule out a text-extraction error (it's genuinely printed this
+        # way in the original 1996 document):
+        #   1. It OMITS the 0x08 sub-ID#1 byte entirely from its own list
+        #      (jumps straight from "<device ID>" to "01"), even though
+        #      0x08 is unambiguously part of the actual wire message per
+        #      the format line right above it ("F0 7E <device ID> 08 01
+        #      tt ..."). A caught-live bug during this implementation:
+        #      an early draft of this exact function reproduced that
+        #      omission in the PAYLOAD itself (not just miscounting a
+        #      byte total) — the byte-exact verification pass below is
+        #      what caught it.
+        #   2. Its own byte-count, <388 bytes>, doesn't match the
+        #      message's documented structure either way: 16 (name) + 384
+        #      (128 notes x 3 bytes) = 400 data bytes, not 388, and adding
+        #      the missing 0x08 byte back in still doesn't reconcile it
+        #      (400 vs 388 is a 12-byte gap, not the 1 byte 0x08 alone
+        #      would explain).
+        # Both point the same direction: this is a transcription slip in
+        # the original document, not a deliberate design choice. This
+        # implementation computes the checksum as the XOR of EVERY byte
+        # actually transmitted between F0 and chksum (7E, device_id, 08,
+        # 01, tt, all 16 name bytes, all 384 frequency bytes — 405 bytes
+        # total), matching the same "checksum covers everything that came
+        # before it" convention Sample Dump's and File Dump's checksums
+        # both already use elsewhere in this same document — the
+        # internally-consistent interpretation, not a guess.
+        _MIDI_TUNING_COMMANDS = {"bulk_dump_request", "bulk_dump_reply", "note_change"}
+        command = message.get("command")
+        if command is None:
+            raise KeyError("'command'")
+        if command not in _MIDI_TUNING_COMMANDS:
+            raise ValueError(
+                f"'command' must be one of "
+                f"{sorted(_MIDI_TUNING_COMMANDS)} for 'midi_tuning', got "
+                f"{command!r}"
+            )
+        device_id = message.get("device_id", 0x7F)
+        if not (0 <= device_id <= 127):
+            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
+        tuning_program = message.get("tuning_program")
+        if tuning_program is None:
+            raise KeyError("'tuning_program'")
+        if not (0 <= tuning_program <= 127):
+            raise ValueError(
+                f"'tuning_program' must be 0-127, got {tuning_program!r}"
+            )
+
+        if command == "bulk_dump_request":
+            return mido.Message(
+                "sysex",
+                data=(0x7E, device_id, 0x08, 0x00, tuning_program),
+                time=time,
+            )
+
+        if command == "bulk_dump_reply":
+            tuning_name = message.get("tuning_name", "")
+            if len(tuning_name) > 16:
+                raise ValueError(
+                    "'tuning_name' must be at most 16 characters, got "
+                    f"{len(tuning_name)} ({tuning_name!r})"
+                )
+            name_bytes = tuple(ord(c) for c in tuning_name.ljust(16))
+            for c, b in zip(tuning_name.ljust(16), name_bytes):
+                if not (0 <= b <= 127):
+                    raise ValueError(
+                        f"'tuning_name' must be 7-bit ASCII, got "
+                        f"non-ASCII character {c!r}"
+                    )
+            notes = message.get("notes")
+            if notes is None:
+                raise KeyError("'notes' (required for 'bulk_dump_reply')")
+            if len(notes) != 128:
+                raise ValueError(
+                    "'notes' must have exactly 128 entries (one per MIDI "
+                    f"key number), got {len(notes)}"
+                )
+            freq_bytes: tuple = ()
+            for i, note_entry in enumerate(notes):
+                try:
+                    freq_bytes += _encode_tuning_frequency(note_entry)
+                except KeyError as e:
+                    raise KeyError(f"'notes'[{i}]: {e}") from e
+                except ValueError as e:
+                    raise ValueError(f"'notes'[{i}]: {e}") from e
+            payload_before_checksum = (
+                0x7E, device_id, 0x08, 0x01, tuning_program,
+            ) + name_bytes + freq_bytes
+            checksum = 0
+            for b in payload_before_checksum:
+                checksum ^= b
+            return mido.Message(
+                "sysex",
+                data=payload_before_checksum + (checksum,),
+                time=time,
+            )
+
+        # command == "note_change"
+        changes = message.get("changes")
+        if not changes:
+            raise KeyError(
+                "'changes' (required, non-empty, for 'note_change')"
+            )
+        if not (1 <= len(changes) <= 127):
+            raise ValueError(
+                f"'changes' must have 1-127 entries, got {len(changes)}"
+            )
+        change_bytes: tuple = ()
+        for i, change_entry in enumerate(changes):
+            key = change_entry.get("key")
+            if key is None:
+                raise KeyError(f"'changes'[{i}]: 'key'")
+            if not (0 <= key <= 127):
+                raise ValueError(
+                    f"'changes'[{i}]: 'key' must be 0-127, got {key!r}"
+                )
+            try:
+                freq = _encode_tuning_frequency(change_entry)
+            except KeyError as e:
+                raise KeyError(f"'changes'[{i}]: {e}") from e
+            except ValueError as e:
+                raise ValueError(f"'changes'[{i}]: {e}") from e
+            change_bytes += (key,) + freq
+        return mido.Message(
+            "sysex",
+            data=(
+                0x7F, device_id, 0x08, 0x02, tuning_program, len(changes),
+            ) + change_bytes,
+            time=time,
+        )
+    if msg_type == "notation":
+        # Notation Information — a Universal Real Time SysEx family,
+        # sub-ID#1 = 03, covering 3 message shapes under one 'command'
+        # sub-field (same pattern as mmc/msc/gm_system/device_inquiry/
+        # device_control/channel_mode/midi_tuning above). Confirmed
+        # against the primary spec's "Notation Information" section, with
+        # the Time Signature wire format RE-VERIFIED via a rendered page
+        # image — see the discrepancy note below.
+        #   bar_marker: F0 7F <device_id> 03 01 aa aa F7
+        #     aa aa = a SIGNED 14-bit bar number, LSB then MSB, encoded as
+        #     ordinary two's-complement (Python's `n & 0x3FFF` produces
+        #     the correct raw bit pattern for negative n directly — hand-
+        #     verified against all 4 of the spec's own named sentinel
+        #     values before writing this: -8192="not running", 0="last
+        #     count-in bar", 1..8190="song bar numbers", 8191="running,
+        #     bar number unknown").
+        #   time_signature_immediate/_delayed:
+        #     F0 7F <device_id> 03 <02|42> ln nn dd cc bb [nn dd...] F7
+        # ⚠️ SPEC DISCREPANCY, worth recording plainly (a second one found
+        # in this same document, after MIDI Tuning's checksum issue): the
+        # primary spec's own compact wire-format line for BOTH Time
+        # Signature variants prints an extra, spurious 'bb' token
+        # ("...ln nn dd bb cc bb [nn dd...]") that does not match the
+        # properly-aligned field-by-field definition list directly below
+        # it (which lists exactly 5 distinct fields: ln, nn, dd, cc, bb —
+        # no duplicate). Visually re-verified against a rendered page
+        # image to rule out a text-extraction error — it's genuinely
+        # printed that way in the original 1996 document. Independently
+        # cross-checked against `mido`'s OWN existing `time_signature`
+        # MetaMessage encoding (already used elsewhere in this file for
+        # .mid files) by constructing one and inspecting its actual
+        # encoded bytes — mido encodes as nn, dd(as a power-of-2
+        # exponent), cc, bb, with NO duplicate byte, matching the properly
+        # -aligned field list here, not the glitched wire-format line.
+        # This implementation uses the doubly-confirmed 5-byte-plus-
+        # compound-pairs layout (ln nn dd cc bb [nn dd...]), not literally
+        # replicating the spec's own typo'd summary line.
+        # `denominator` is accepted as the ACTUAL value (2/4/8/16/...),
+        # not the exponent — mirrors mido's own field convention exactly,
+        # see `_encode_time_signature_pair`'s own docstring.
+        _NOTATION_COMMANDS = {
+            "bar_marker", "time_signature_immediate", "time_signature_delayed",
+        }
+        command = message.get("command")
+        if command is None:
+            raise KeyError("'command'")
+        if command not in _NOTATION_COMMANDS:
+            raise ValueError(
+                f"'command' must be one of {sorted(_NOTATION_COMMANDS)} "
+                f"for 'notation', got {command!r}"
+            )
+        device_id = message.get("device_id", 0x7F)
+        if not (0 <= device_id <= 127):
+            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
+
+        if command == "bar_marker":
+            bar_number = message.get("bar_number")
+            if bar_number is None:
+                raise KeyError("'bar_number' (required for 'bar_marker')")
+            if not (-8192 <= bar_number <= 8191):
+                raise ValueError(
+                    f"'bar_number' must be -8192 to 8191, got {bar_number!r}"
+                )
+            raw14 = bar_number & 0x3FFF
+            return mido.Message(
+                "sysex",
+                data=(
+                    0x7F, device_id, 0x03, 0x01,
+                    raw14 & 0x7F, (raw14 >> 7) & 0x7F,
+                ),
+                time=time,
+            )
+
+        # time_signature_immediate / time_signature_delayed
+        numerator = message.get("numerator")
+        denominator = message.get("denominator")
+        clocks_per_click = message.get("clocks_per_click")
+        notated_32nd_notes_per_beat = message.get("notated_32nd_notes_per_beat")
+        if numerator is None:
+            raise KeyError("'numerator'")
+        if denominator is None:
+            raise KeyError("'denominator'")
+        if clocks_per_click is None:
+            raise KeyError("'clocks_per_click'")
+        if notated_32nd_notes_per_beat is None:
+            raise KeyError("'notated_32nd_notes_per_beat'")
+        if not (0 <= clocks_per_click <= 127):
+            raise ValueError(
+                f"'clocks_per_click' must be 0-127, got {clocks_per_click!r}"
+            )
+        if not (0 <= notated_32nd_notes_per_beat <= 127):
+            raise ValueError(
+                "'notated_32nd_notes_per_beat' must be 0-127, got "
+                f"{notated_32nd_notes_per_beat!r}"
+            )
+        try:
+            nn, dd = _encode_time_signature_pair(numerator, denominator)
+        except ValueError as e:
+            raise ValueError(f"primary time signature: {e}") from e
+
+        compound = message.get("compound", [])
+        compound_bytes: tuple = ()
+        for i, pair in enumerate(compound):
+            c_numerator = pair.get("numerator")
+            c_denominator = pair.get("denominator")
+            if c_numerator is None:
+                raise KeyError(f"'compound'[{i}]: 'numerator'")
+            if c_denominator is None:
+                raise KeyError(f"'compound'[{i}]: 'denominator'")
+            try:
+                c_nn, c_dd = _encode_time_signature_pair(
+                    c_numerator, c_denominator
+                )
+            except ValueError as e:
+                raise ValueError(f"'compound'[{i}]: {e}") from e
+            compound_bytes += (c_nn, c_dd)
+
+        sub_id2 = 0x02 if command == "time_signature_immediate" else 0x42
+        data_len = 4 + len(compound_bytes)
+        return mido.Message(
+            "sysex",
+            data=(
+                0x7F, device_id, 0x03, sub_id2, data_len,
+                nn, dd, clocks_per_click, notated_32nd_notes_per_beat,
+            ) + compound_bytes,
+            time=time,
+        )
+    if msg_type == "mtc_cueing":
+        # MTC (Real Time) Cueing — a Universal Real Time SysEx family,
+        # sub-ID#1 = 05, from the SEPARATE MTC Detailed Specification
+        # (RP-004/RP-008) rather than the primary MIDI 1.0 spec — this is
+        # the smaller Real-Time subset of the fuller Non-Real-Time MTC
+        # Cueing Set-Up message family (which also has Delete-variant
+        # commands and extra Special sub-types not present here; NOT
+        # implemented — see the "Explicitly deferred" notes elsewhere in
+        # this project's memory). Wire format:
+        #   F0 7F <device_id> 05 <sub-id#2> sl sm <additional info> F7
+        # `sl sm` = a 14-bit Event Number, LSB then MSB (spec's own words:
+        # "sl is the 7 LS bits, and sm is the 7 MS bits") — same LSB-first
+        # convention as RPN/NRPN's parameter numbers elsewhere in this
+        # file, unlike MIDI Tuning's MSB-first frequency fields (verified
+        # per-field rather than assumed, same discipline throughout this
+        # whole tool).
+        # `<additional info>` is a NIBBLIZED MIDI data stream (see
+        # `_nibblize` above) for every with-info command except
+        # `event_name`, where it's nibblized ASCII instead.
+        _MTC_CUEING_COMMANDS = {
+            "special_system_stop": 0x00, "punch_in": 0x01, "punch_out": 0x02,
+            "event_start": 0x05, "event_stop": 0x06,
+            "event_start_with_info": 0x07, "event_stop_with_info": 0x08,
+            "cue_point": 0x0B, "cue_point_with_info": 0x0C,
+            "event_name": 0x0E,
+        }
+        command = message.get("command")
+        if command is None:
+            raise KeyError("'command'")
+        if command not in _MTC_CUEING_COMMANDS:
+            raise ValueError(
+                f"'command' must be one of "
+                f"{sorted(_MTC_CUEING_COMMANDS)} for 'mtc_cueing', got "
+                f"{command!r}"
+            )
+        sub_id2 = _MTC_CUEING_COMMANDS[command]
+        device_id = message.get("device_id", 0x7F)
+        if not (0 <= device_id <= 127):
+            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
+
+        if command == "special_system_stop":
+            # Fixed Event Number = 04 00 (sl=0x04, sm=0x00) per the spec —
+            # "All others reserved" for the Special sub-type, so there's
+            # nothing for the caller to actually supply here.
+            return mido.Message(
+                "sysex",
+                data=(0x7F, device_id, 0x05, sub_id2, 0x04, 0x00),
+                time=time,
+            )
+
+        event_number = message.get("event_number")
+        if event_number is None:
+            raise KeyError("'event_number'")
+        if not (0 <= event_number <= 16383):
+            raise ValueError(
+                f"'event_number' must be 0-16383, got {event_number!r}"
+            )
+        sl, sm = event_number & 0x7F, (event_number >> 7) & 0x7F
+
+        if command == "event_name":
+            event_name = message.get("event_name")
+            if event_name is None:
+                raise KeyError("'event_name' (required for 'event_name')")
+            for c in event_name:
+                if ord(c) > 127:
+                    raise ValueError(
+                        f"'event_name' must be 7-bit ASCII, got "
+                        f"non-ASCII character {c!r}"
+                    )
+            info_bytes = _nibblize(ord(c) for c in event_name)
+            return mido.Message(
+                "sysex",
+                data=(0x7F, device_id, 0x05, sub_id2, sl, sm) + info_bytes,
+                time=time,
+            )
+
+        if command in ("event_start_with_info", "event_stop_with_info", "cue_point_with_info"):
+            info_message = message.get("additional_info_message")
+            info_raw_bytes = message.get("additional_info_bytes")
+            if info_message is not None and info_raw_bytes is not None:
+                raise ValueError(
+                    "specify only ONE of 'additional_info_message' or "
+                    "'additional_info_bytes', not both"
+                )
+            if info_message is None and info_raw_bytes is None:
+                raise KeyError(
+                    "'additional_info_message' (or 'additional_info_bytes'"
+                    f") — required for {command!r}"
+                )
+            if info_message is not None:
+                embedded = _build_message(info_message)
+                raw_bytes = embedded.bytes()
+            else:
+                raw_bytes = info_raw_bytes
+            info_bytes = _nibblize(raw_bytes)
+            return mido.Message(
+                "sysex",
+                data=(0x7F, device_id, 0x05, sub_id2, sl, sm) + info_bytes,
+                time=time,
+            )
+
+        # punch_in, punch_out, event_start, event_stop, cue_point — plain
+        # event-number-only commands, no additional info at all.
+        return mido.Message(
+            "sysex",
+            data=(0x7F, device_id, 0x05, sub_id2, sl, sm),
+            time=time,
+        )
+    if msg_type == "mtc_cueing_nrt":
+        # MTC (Non-Real-Time) Cueing — the FULLER Set-Up Message family
+        # from the SEPARATE MTC Detailed Specification (RP-004/RP-008),
+        # Non-Real Time (0x7E), sub-ID#1=04 — a superset of the Real-Time
+        # 'mtc_cueing' type above: adds a full 5-byte time field to every
+        # message (Real-Time drops it entirely — "the time would be as
+        # soon as you receive this"), 4 Delete-variant commands, and 5
+        # distinct "Special" sub-types (Real-Time's Special has only
+        # System Stop, "all others reserved").
+        # Wire format: F0 7E <device_id> 04 <sub-id#2> hr mn sc fr ff sl sm
+        #              <additional info> F7
+        # For the 6 'special_*' commands (sub-id#2=0x00), the Event Number
+        # field (sl sm) is REPURPOSED to hold a fixed "Special Type"
+        # selector (00 00 through 05 00) rather than a real event number —
+        # spec's own words: "the Special Type takes the place of the
+        # Event Number." 4 of the 6 (enable/disable/clear event list,
+        # system stop) have their time field explicitly IGNORED by a
+        # receiver per the spec ("types 01 00 through 04 00 ignore the
+        # event time field") — sent as zeroed time bytes here rather than
+        # exposing meaningless fields the caller would have to fill in for
+        # no purpose. The other 2 (time_code_offset, event_list_request)
+        # DO use the time field meaningfully, so those still take real
+        # hours/minutes/seconds/frames/fractional_frames/frame_rate input.
+        # NOTE: 'special_system_stop' is also a command name in the
+        # SEPARATE 'mtc_cueing' (Real-Time) type above — no actual
+        # conflict since these are two distinct top-level message types
+        # (same "shared field name, different meaning per type" pattern
+        # mmc/msc's own 'command' field already uses elsewhere).
+        _MTC_CUEING_NRT_SPECIAL_TYPES = {
+            "special_time_code_offset": 0x00,
+            "special_enable_event_list": 0x01,
+            "special_disable_event_list": 0x02,
+            "special_clear_event_list": 0x03,
+            "special_system_stop": 0x04,
+            "special_event_list_request": 0x05,
+        }
+        _MTC_CUEING_NRT_PLAIN_COMMANDS = {
+            "punch_in": 0x01, "punch_out": 0x02,
+            "delete_punch_in": 0x03, "delete_punch_out": 0x04,
+            "event_start": 0x05, "event_stop": 0x06,
+            "event_start_with_info": 0x07, "event_stop_with_info": 0x08,
+            "delete_event_start": 0x09, "delete_event_stop": 0x0A,
+            "cue_point": 0x0B, "cue_point_with_info": 0x0C,
+            "delete_cue_point": 0x0D, "event_name": 0x0E,
+        }
+        _all_nrt_commands = (
+            set(_MTC_CUEING_NRT_SPECIAL_TYPES)
+            | set(_MTC_CUEING_NRT_PLAIN_COMMANDS)
+        )
+        command = message.get("command")
+        if command is None:
+            raise KeyError("'command'")
+        if command not in _all_nrt_commands:
+            raise ValueError(
+                f"'command' must be one of {sorted(_all_nrt_commands)} "
+                f"for 'mtc_cueing_nrt', got {command!r}"
+            )
+        device_id = message.get("device_id", 0x7F)
+        if not (0 <= device_id <= 127):
+            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
+
+        if command in _MTC_CUEING_NRT_SPECIAL_TYPES:
+            special_type = _MTC_CUEING_NRT_SPECIAL_TYPES[command]
+            if command in (
+                "special_time_code_offset", "special_event_list_request",
+            ):
+                hours = message.get("hours")
+                minutes = message.get("minutes")
+                seconds = message.get("seconds")
+                frames = message.get("frames")
+                fractional_frames = message.get("fractional_frames")
+                frame_rate = message.get("frame_rate")
+                if hours is None:
+                    raise KeyError(f"'hours' (required for {command!r})")
+                if minutes is None:
+                    raise KeyError(f"'minutes' (required for {command!r})")
+                if seconds is None:
+                    raise KeyError(f"'seconds' (required for {command!r})")
+                if frames is None:
+                    raise KeyError(f"'frames' (required for {command!r})")
+                if fractional_frames is None:
+                    raise KeyError(
+                        f"'fractional_frames' (required for {command!r})"
+                    )
+                if frame_rate is None:
+                    raise KeyError(
+                        f"'frame_rate' (required for {command!r})"
+                    )
+                time_bytes = _encode_mtc_cueing_time(
+                    hours, minutes, seconds, frames, fractional_frames,
+                    frame_rate,
+                )
+            else:
+                # enable/disable/clear event list, system stop -- time
+                # field explicitly ignored by receivers per the spec.
+                time_bytes = (0, 0, 0, 0, 0)
+            return mido.Message(
+                "sysex",
+                data=(0x7E, device_id, 0x04, 0x00) + time_bytes
+                + (special_type, 0),
+                time=time,
+            )
+
+        # Plain (non-Special) commands -- always need the full time field
+        # plus a REAL caller-supplied event number.
+        sub_id2 = _MTC_CUEING_NRT_PLAIN_COMMANDS[command]
+        hours = message.get("hours")
+        minutes = message.get("minutes")
+        seconds = message.get("seconds")
+        frames = message.get("frames")
+        fractional_frames = message.get("fractional_frames")
+        frame_rate = message.get("frame_rate")
+        if hours is None:
+            raise KeyError("'hours'")
+        if minutes is None:
+            raise KeyError("'minutes'")
+        if seconds is None:
+            raise KeyError("'seconds'")
+        if frames is None:
+            raise KeyError("'frames'")
+        if fractional_frames is None:
+            raise KeyError("'fractional_frames'")
+        if frame_rate is None:
+            raise KeyError("'frame_rate'")
+        time_bytes = _encode_mtc_cueing_time(
+            hours, minutes, seconds, frames, fractional_frames, frame_rate,
+        )
+        event_number = message.get("event_number")
+        if event_number is None:
+            raise KeyError("'event_number'")
+        if not (0 <= event_number <= 16383):
+            raise ValueError(
+                f"'event_number' must be 0-16383, got {event_number!r}"
+            )
+        sl, sm = event_number & 0x7F, (event_number >> 7) & 0x7F
+
+        if command == "event_name":
+            event_name = message.get("event_name")
+            if event_name is None:
+                raise KeyError("'event_name' (required for 'event_name')")
+            for c in event_name:
+                if ord(c) > 127:
+                    raise ValueError(
+                        f"'event_name' must be 7-bit ASCII, got "
+                        f"non-ASCII character {c!r}"
+                    )
+            info_bytes = _nibblize(ord(c) for c in event_name)
+            return mido.Message(
+                "sysex",
+                data=(0x7E, device_id, 0x04, sub_id2) + time_bytes
+                + (sl, sm) + info_bytes,
+                time=time,
+            )
+
+        if command in (
+            "event_start_with_info", "event_stop_with_info",
+            "cue_point_with_info",
+        ):
+            info_message = message.get("additional_info_message")
+            info_raw_bytes = message.get("additional_info_bytes")
+            if info_message is not None and info_raw_bytes is not None:
+                raise ValueError(
+                    "specify only ONE of 'additional_info_message' or "
+                    "'additional_info_bytes', not both"
+                )
+            if info_message is None and info_raw_bytes is None:
+                raise KeyError(
+                    "'additional_info_message' (or "
+                    f"'additional_info_bytes') — required for {command!r}"
+                )
+            if info_message is not None:
+                embedded = _build_message(info_message)
+                raw_bytes = embedded.bytes()
+            else:
+                raw_bytes = info_raw_bytes
+            info_bytes = _nibblize(raw_bytes)
+            return mido.Message(
+                "sysex",
+                data=(0x7E, device_id, 0x04, sub_id2) + time_bytes
+                + (sl, sm) + info_bytes,
+                time=time,
+            )
+
+        # punch_in/out, delete_punch_in/out, event_start/stop,
+        # delete_event_start/stop, cue_point, delete_cue_point -- plain,
+        # no additional info at all.
+        return mido.Message(
+            "sysex",
+            data=(0x7E, device_id, 0x04, sub_id2) + time_bytes + (sl, sm),
+            time=time,
+        )
     raise ValueError(
         f"unknown message type {msg_type!r} — expected one of "
         "note_on, note_off, control_change, program_change, "
         "pitchwheel, aftertouch, polytouch, quarter_frame, songpos, "
         "song_select, tune_request, clock, start, stop, continue, "
         "active_sensing, reset, sysex, mtc_full, mmc, msc, gm_system, "
-        "device_inquiry, device_control"
+        "device_inquiry, device_control, channel_mode, midi_tuning, "
+        "notation, mtc_cueing, mtc_cueing_nrt"
     )
 
 
