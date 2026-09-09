@@ -5,35 +5,37 @@ shared discovery surface for both a MIDI 1.0 and a MIDI 2.0 tool; the MIDI
 2.0 tool has since been removed from this project and moved to its own
 standalone project for further work.
 
-PHASE 1 + PHASE 2 + PHASE 3 SCOPE — more actions land in later phases of the
-same doc (.mid file I/O in Phase 4, pygame add-on in Phase 5). A more real-
-time, event-driven/callback-based receive model for `poll` (instead of the
-current call-and-check polling loop) was also discussed at some point but
-never built — see the note on `poll` below for exactly what it does today.
-Current actions:
+Actions:
   - list_devices : enumerate input/output port names
   - open         : open a named port (as "input" or "output"), returns a
                    handle string for later actions
   - close        : close a previously opened handle
-  - send         : send a channel or system message on an open output
-                   handle. Channel messages: note_on, note_off,
-                   control_change, program_change, pitchwheel, aftertouch
-                   (channel pressure), polytouch (poly key pressure).
-                   System Common: quarter_frame, songpos, song_select,
-                   tune_request. System Real-Time: clock, start, stop,
-                   continue, active_sensing, reset. System Exclusive: sysex
-                   (arbitrary-payload — see Phase 3 note below).
+  - send         : send a channel or system message, or a typed sysex
+                   convenience message, on an open output handle. Channel
+                   messages: note_on, note_off, control_change,
+                   program_change, pitchwheel, aftertouch (channel
+                   pressure), polytouch (poly key pressure). System Common:
+                   quarter_frame, songpos, song_select, tune_request.
+                   System Real-Time: clock, start, stop, continue,
+                   active_sensing, reset. System Exclusive: sysex
+                   (arbitrary-payload — see the SysEx note below), plus
+                   three typed convenience messages built on top of that
+                   same sysex mechanism: mtc_full (MIDI Time Code Full
+                   Message), mmc (MIDI Machine Control transport commands),
+                   and msc (MIDI Show Control General Category commands) —
+                   see each one's own inline comment in `_build_message`
+                   further down in this file for full field details.
   - poll         : non-blocking check for buffered messages on an open input
-                   handle — a bare-bones placeholder for real-time receive,
-                   NOT a full event-driven/callback-based design (an idea
-                   discussed at some point but never built — see above).
-                   Decodes ANY incoming mido message generically
-                   (str(msg)), so it already reports message types beyond
-                   what `send` explicitly constructs — confirmed live during
-                   Phase-2-adjacent hardware testing, where `poll` correctly
-                   surfaced `aftertouch` messages from a real keyboard before
-                   `send` even had aftertouch support. No change needed here
-                   for Phase 2 — this note just records why.
+                   handle. This is a manual, caller-driven check (call it
+                   repeatedly to see new messages) — there is currently no
+                   event-driven/callback-based receive model, and none is
+                   planned unless specifically requested. Decodes ANY
+                   incoming mido message generically (str(msg)), so it
+                   already reports message types beyond what `send`
+                   explicitly constructs — confirmed live during hardware
+                   testing, where `poll` correctly surfaced `aftertouch`
+                   messages from a real keyboard before `send` even had
+                   aftertouch support.
 
                    EXCEPTION: `active_sensing` will NEVER show up in `poll`
                    results, even though `send` can transmit it fine. mido's
@@ -41,46 +43,53 @@ Current actions:
                    `self._rt.ignore_types(False, False, True)` on every input
                    port it opens — the third arg tells RtMidi itself to
                    filter Active Sensing bytes before mido's parser ever
-                   sees them. Confirmed live (Phase 2 offline smoke test:
-                   sent 14 message types, only 13 came back via poll, the
-                   missing one was active_sensing). Not fixable within mido's
+                   sees them. Confirmed live (an offline smoke test sent 14
+                   message types, only 13 came back via poll, the missing
+                   one was active_sensing). Not fixable within mido's
                    public API — would need raw rtmidi.MidiIn to change.
-  - read_midi_file : read a .mid/.midi or .syx file from disk (Phase 4a —
-                   READ side only; write support lands in a later sub-chunk).
-                   See PHASE 4a NOTE below for full field details.
+  - read_midi_file  : read a .mid/.midi or .syx file from disk. See the
+                   file-I/O note below for full field details.
+  - write_midi_file : create a NEW .mid/.midi or .syx file from disk-
+                   supplied track/message data — the mirror-image write
+                   path to read_midi_file. See the file-I/O note below.
 
-PHASE 3 NOTE (SysEx): 'sysex' takes a 'data' array of integers, each 0-127
+SysEx note: 'sysex' takes a 'data' array of integers, each 0-127
 (7-bit data bytes only — MIDI's own spec forbids status-byte values 0x80+
 inside a SysEx payload). Do NOT include the leading 0xF0 or trailing 0xF7 —
 mido's mido.Message('sysex', data=...) adds both automatically on send and
 strips both automatically when decoding a received one. Confirmed live via
 mido.messages.specs.SPEC_BY_TYPE['sysex'] before writing this (status_byte
 240 = 0xF0, single value_name 'data', variable length) — same "check mido's
-spec before guessing kwarg names" discipline as Phase 2. mido itself raises
-a plain ValueError for any out-of-range byte (caught by the same broad
-except as every other message type here, no special-casing needed). Like
-Phase 2, 'poll' needed ZERO changes for this — str(msg) already decodes an
-incoming sysex message generically, confirmed live
+spec before guessing kwarg names" discipline used throughout this file.
+mido itself raises a plain ValueError for any out-of-range byte (caught by
+the same broad except as every other message type here, no special-casing
+needed). 'poll' needed ZERO changes to support this — str(msg) already
+decodes an incoming sysex message generically, confirmed live
 (str(mido.Message('sysex', data=(1,2,3))) -> "sysex data=(1,2,3) time=0").
 
-PHASE 4a NOTE (.mid/.syx file READ support — write support is a later,
-separate sub-chunk): 'read_midi_file' takes a 'path' (absolute path to a
-.mid/.midi or .syx file) and an optional 'max_messages' (default 100, caps
-how many message strings are returned per track/file so a huge file can't
-flood the response — set 0 to get only metadata/counts with zero message
-bodies). For .mid/.midi: uses mido.MidiFile(path), returns file type (0/1/2),
-ticks_per_beat, length_seconds, and a per-track summary (index, track name,
-message count, first tempo_bpm/time_signature/key_signature/instrument_name
-meta values found, decoded messages up to the cap, truncated flag). For
-.syx: uses mido.read_syx_file(path), returns message_count + decoded sysex
-message strings up to the cap. Field names for all meta message types
+File-I/O note (.mid/.syx read AND write support): 'read_midi_file' takes a
+'path' (absolute path to a .mid/.midi or .syx file) and an optional
+'max_messages' (default 100, caps how many message strings are returned per
+track/file so a huge file can't flood the response — set 0 to get only
+metadata/counts with zero message bodies). For .mid/.midi: uses
+mido.MidiFile(path), returns file type (0/1/2), ticks_per_beat,
+length_seconds, and a per-track summary (index, track name, message count,
+first tempo_bpm/time_signature/key_signature/instrument_name meta values
+found, decoded messages up to the cap, truncated flag). For .syx: uses
+mido.read_syx_file(path), returns message_count + decoded sysex message
+strings up to the cap. Field names for all meta message types
 (track_name.name, set_tempo.tempo, time_signature.numerator/denominator/
 clocks_per_click/notated_32nd_notes_per_beat, key_signature.key,
 instrument_name.name, smpte_offset.hours/minutes/seconds/frames/
 sub_frames/frame_rate, etc.) verified live against
 mido.midifiles.meta._META_SPEC_BY_TYPE before writing any code — same
-discipline as Phases 2/3. mido.tempo2bpm() used to convert raw tempo
-(microseconds per quarter note) to a human BPM figure for the summary.
+discipline used throughout this file. mido.tempo2bpm() used to convert raw
+tempo (microseconds per quarter note) to a human BPM figure for the
+summary. 'write_midi_file' builds the corresponding mido.MidiFile/track
+objects from caller-supplied data and saves them to disk, then immediately
+calls 'read_midi_file' on what it just wrote as a built-in round-trip
+sanity check — see `_write_midi_file`'s own docstring further down for
+full detail.
 
 State (open ports) lives in this module's process memory (_OPEN_PORTS dict),
 same pattern as core/kernel.py's persistent IPython kernel or core/browser.py's
@@ -675,8 +684,8 @@ def close_all() -> None:
             print(f"[midi1] close_all: failed to close {handle!r} (ignored): {e}")
 
 
-# Shared by 'mtc_full' (Chunk 3a) and MMC's 'locate' command (Chunk 3b) —
-# both encode an SMPTE-style hour byte as 0yyzzzzz (yy = frame-rate type,
+# Shared by 'mtc_full' and MMC's 'locate' command — both encode an
+# SMPTE-style hour byte as 0yyzzzzz (yy = frame-rate type,
 # zzzzz = hours), confirmed identical in both specs (somascape.org's MTC
 # section and MMC's Locate/Goto section use the exact same bit layout).
 # Factored out here rather than duplicated so the two call sites can't
@@ -696,7 +705,7 @@ def _encode_smpte_hour_byte(hours: int, frame_rate: str) -> int:
 
 
 def _encode_msc_ascii_field(name: str, value: str) -> tuple:
-    """CHUNK 3c: MSC Q_number/Q_list/Q_path are plain ASCII digit strings
+    """MSC Q_number/Q_list/Q_path are plain ASCII digit strings
     with '.' as the decimal-point delimiter (confirmed against a literal
     worked example in the MSC 1.0 spec itself: cue "235.6" list "36.6" path
     "59" encodes as 32 33 35 2E 36 00 33 36 2E 36 00 35 39). Only validates
@@ -713,7 +722,7 @@ def _encode_msc_ascii_field(name: str, value: str) -> tuple:
 
 
 def _encode_msc_cue_data(q_number, q_list, q_path) -> tuple:
-    """CHUNK 3c: shared by the 5 MSC General Category commands that carry
+    """Shared by the 5 MSC General Category commands that carry
     optional trailing cue-targeting data (GO, STOP, RESUME, TIMED_GO,
     GO_OFF) — factored out once rather than repeated 5 times. Per spec:
     Q_list requires Q_number to also be present, Q_path requires Q_list.
@@ -740,17 +749,17 @@ def _encode_msc_time(
     hours: int, minutes: int, seconds: int, frames: int,
     fractional_frames: int, frame_rate: str,
 ) -> tuple:
-    """CHUNK 3c: MSC's own "Standard Time Code" — same 5-byte SHAPE as
+    """MSC's own "Standard Time Code" — same 5-byte SHAPE as
     mtc_full/MMC-locate's time fields, but a MORE elaborate bit layout:
     minutes carries an extra "colour frame" flag bit, seconds carries a
     reserved-must-be-zero bit, and frames carries BOTH a sign bit and a
     subframes-vs-status identification bit, per somascape.org's MSC
     section (cross-referenced against the actual MSC 1.0 spec PDF, which
     confirms "MIDI Show Control time code ... specifications are entirely
-    consistent with ... MIDI Time Code"). Deliberately narrowed scope,
-    matching the plan written before this chunk started: this tool always
-    sends colour-frame=0, sign=positive, and the subframes (not "status")
-    variant — none of those three flags are exposed as separate inputs,
+    consistent with ... MIDI Time Code"). Deliberately narrowed scope:
+    this tool always sends colour-frame=0, sign=positive, and the
+    subframes (not "status") variant — none of those three flags are
+    exposed as separate inputs,
     since they're rare edge cases and hardcoding safe defaults matches the
     same philosophy already used for e.g. mtc_full's device_id default.
     Only the hour byte's encoding is IDENTICAL to mtc_full/MMC's, hence
@@ -774,11 +783,9 @@ def _encode_msc_time(
 def _build_message(message: dict) -> "mido.Message":
     """Build a channel/system/sysex mido.Message from a tool-supplied dict.
 
-    PHASE 4b REFACTOR: extracted verbatim out of `_send` (was previously
-    inline there) so this same construction logic can be shared between
-    live `send` and the new `write_midi_file` action's per-track messages.
-    Behavior/error semantics unchanged from the original `_send` ladder —
-    same required-field KeyErrors, same mido-raised ValueErrors for bad
+    Shared by both live `send` and `write_midi_file`'s per-track messages —
+    kept as one function rather than duplicated so the two stay in sync.
+    Same required-field KeyErrors, same mido-raised ValueErrors for bad
     values, callers still catch both. `time` (delta ticks, meaningful for
     file-writing, harmless/ignored-by-hardware for live send) is read from
     the dict and passed through uniformly — confirmed live that mido.Message
@@ -846,7 +853,7 @@ def _build_message(message: dict) -> "mido.Message":
         # no channel. mido accepts the type name directly.
         return mido.Message(msg_type, time=time)
     if msg_type == "sysex":
-        # System Exclusive (Phase 3) — arbitrary payload. mido adds the
+        # System Exclusive — arbitrary payload. mido adds the
         # leading 0xF0 / trailing 0xF7 automatically; data bytes must each
         # be 0-127, mido itself raises ValueError otherwise (caught by the
         # broad except in every caller, same as every other message type).
@@ -855,7 +862,7 @@ def _build_message(message: dict) -> "mido.Message":
             raise KeyError("'data'")
         return mido.Message("sysex", data=tuple(raw_data), time=time)
     if msg_type == "mtc_full":
-        # CHUNK 3a: MIDI Time Code Full Message — a Universal Real Time
+        # MIDI Time Code Full Message — a Universal Real Time
         # SysEx convenience wrapper (built on the SAME generic sysex path
         # above, not a separate one), for jumping the timeline to an exact
         # position in one message rather than accumulating Quarter Frames.
@@ -908,7 +915,7 @@ def _build_message(message: dict) -> "mido.Message":
             time=time,
         )
     if msg_type == "mmc":
-        # CHUNK 3b: MIDI Machine Control — a Universal Real Time SysEx
+        # MIDI Machine Control — a Universal Real Time SysEx
         # convenience wrapper (built on the SAME generic sysex path, same
         # rule the user set for 'mtc_full'). ONE typed message covers
         # MULTIPLE commands via a required 'command' sub-field, rather than
@@ -925,9 +932,10 @@ def _build_message(message: dict) -> "mido.Message":
         #     hence the shared _encode_smpte_hour_byte helper — sf = SMPTE
         #     sub-frame 0-99, a field mtc_full's own Full Message doesn't
         #     have)
-        # DELIBERATELY OUT OF SCOPE for this chunk (per the plan written
-        # before starting): Shuttle (0x47 — encoding under-specified in
-        # what was sourced) and Write (0x40 — niche, multitrack-specific).
+        # NOT IMPLEMENTED (deliberately): Shuttle (0x47 — encoding under-
+        # specified in what was sourced) and Write (0x40 — niche,
+        # multitrack-specific). Use the generic 'sysex' action directly
+        # for either if ever needed.
         # Command Error Reset (0x0C) IS included — cheap to include, one
         # more dict entry, no reason to leave it out just because Wikipedia's
         # table happened to omit it while somascape's didn't contradict it.
@@ -995,7 +1003,7 @@ def _build_message(message: dict) -> "mido.Message":
             time=time,
         )
     if msg_type == "msc":
-        # CHUNK 3c: MIDI Show Control — a Universal Real Time SysEx
+        # MIDI Show Control — a Universal Real Time SysEx
         # convenience wrapper, same "layers on top of the generic sysex
         # path" rule as mtc_full/mmc. Wire format, confirmed against the
         # ACTUAL MSC 1.0 spec text (MMA Recommended Practice RP-002,
@@ -1004,9 +1012,8 @@ def _build_message(message: dict) -> "mido.Message":
         # cross-checked against ETC's and a GitHub MIDIKit discussion's
         # independent descriptions of the same format string:
         #   F0 7F <device_id> 02 <command_format> <command> <data> F7
-        # Scope, matching the plan written before this chunk started:
-        # only the 11 "General Category" commands (apply to ALL
-        # command_formats, "highly recommended" per the spec, and what
+        # Only the 11 "General Category" commands are implemented (apply
+        # to ALL command_formats, "highly recommended" per the spec, and what
         # real commercial gear actually implements — ETC's own docs note
         # their Express/Expression consoles "will only take Lighting GO,
         # STOP, RESUME, and FIRE"). The extended 15-command "Sound
@@ -1180,11 +1187,11 @@ def _build_message(message: dict) -> "mido.Message":
     )
 
 
-# PHASE 4b: the 17 file-only "meta" message types, verified live against
+# The 17 file-only "meta" message types, verified live against
 # mido.midifiles.meta._META_SPEC_BY_TYPE before writing any code (same
-# "check mido's real spec, don't guess kwargs" discipline as every prior
-# phase). None of these are valid on a live `send` — they only make sense
-# inside a .mid file's track data.
+# "check mido's real spec, don't guess kwargs" discipline used throughout
+# this file). None of these are valid on a live `send` — they only make
+# sense inside a .mid file's track data.
 _META_TYPES = frozenset({
     "track_name", "text", "copyright", "lyrics", "marker", "cue_marker",
     "instrument_name", "device_name", "set_tempo", "time_signature",
@@ -1194,7 +1201,7 @@ _META_TYPES = frozenset({
 
 
 def _build_meta_message(message: dict) -> "mido.MetaMessage":
-    """Build a mido.MetaMessage from a tool-supplied dict, for PHASE 4b
+    """Build a mido.MetaMessage from a tool-supplied dict, for
     `write_midi_file` track content only.
 
     Deliberately generic/thin: confirmed live that mido.MetaMessage(type,
@@ -1207,9 +1214,9 @@ def _build_meta_message(message: dict) -> "mido.MetaMessage":
     attribute lists/defaults — it just passes whatever fields the caller
     gave straight through and lets mido validate them, same "let mido do
     the validating" lesson learned from the type-0-multitrack research
-    during Phase 4b's design pass. Only ONE special case: `set_tempo` gets
-    a `bpm` convenience alt-field (user-requested, Phase 4b design
-    decision) that converts to mido's real `tempo` (microseconds/quarter)
+    done while designing this. Only ONE special case: `set_tempo` gets
+    a `bpm` convenience alt-field (user-requested) that converts to
+    mido's real `tempo` (microseconds/quarter)
     via `mido.bpm2tempo()` — mido itself has no `bpm` kwarg, this is purely
     a tool-level convenience layered on top.
     """
@@ -1351,8 +1358,8 @@ def _read_midi_file(tool_input: dict) -> str:
 
 
 def _write_midi_file(tool_input: dict) -> str:
-    """PHASE 4b: write a .mid/.midi or .syx file from tool-supplied track/
-    message data.
+    """Write a .mid/.midi or .syx file from tool-supplied track/message
+    data.
     """
     path = tool_input.get("path")
     if not path:
@@ -1426,7 +1433,7 @@ def _write_midi_file(tool_input: dict) -> str:
             return _err(f"failed to write {path!r}: {type(e).__name__}: {e}")
 
     # Sanity-check the write by immediately re-reading what actually landed
-    # on disk via the already-proven Phase 4a reader — this both confirms
+    # on disk via the already-proven `_read_midi_file` — this both confirms
     # the write succeeded correctly AND avoids duplicating summary-building
-    # logic here (Phase 4b design decision).
+    # logic here.
     return _read_midi_file({"path": path, "max_messages": 0})
