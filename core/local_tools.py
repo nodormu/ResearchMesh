@@ -90,6 +90,7 @@ async def shutdown():
         ("browser", browser.shutdown),
         ("kernel", kernel.shutdown),
         ("sql_query", data.close),
+        ("midi1", midi1.close_all),
     ):
         try:
             result = close()

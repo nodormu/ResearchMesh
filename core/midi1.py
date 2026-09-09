@@ -108,10 +108,64 @@ TOOLS = [
             "control_change, program_change, pitchwheel, aftertouch, "
             "polytouch), a system message (quarter_frame, songpos, "
             "song_select, tune_request, clock, start, stop, continue, "
-            "active_sensing, reset), or an arbitrary-payload System "
+            "active_sensing, reset), an arbitrary-payload System "
             "Exclusive message ('sysex', with a 'data' array of 0-127 "
             "integers, NOT including the leading 0xF0/trailing 0xF7 which "
-            "are added automatically) on an open output handle. 'poll' does a "
+            "are added automatically), or a typed 'mtc_full' convenience "
+            "message (MIDI Time Code Full Message — jumps the timeline to "
+            "an exact position in one message, built as a validated sysex "
+            "payload under the hood: needs 'hours' 0-23, 'minutes' 0-59, "
+            "'seconds' 0-59, 'frames' 0-29, and REQUIRED 'frame_rate' (one "
+            "of '24'/'25'/'30drop'/'30nondrop' — no default, since guessing "
+            "wrong here changes what the position means downstream; "
+            "optional 'device_id' 0-127 defaults to 127/all-devices, which "
+            "IS the spec's own stated default), or a typed 'mmc' message "
+            "(MIDI Machine Control — transport control, also built as a "
+            "validated sysex payload under the hood): needs a required "
+            "'command', one of 'stop'/'play'/'deferred_play'/"
+            "'fast_forward'/'rewind'/'record_strobe'/'record_exit'/"
+            "'record_pause'/'pause'/'eject'/'chase'/'command_error_reset'/"
+            "'mmc_reset' (no extra fields needed for any of these), or "
+            "'locate' (needs 'hours'/'minutes'/'seconds'/'frames'/"
+            "'frame_rate' same as 'mtc_full' above, PLUS 'subframes' "
+            "0-99 — moves the receiving device's playhead to that exact "
+            "position). Optional 'device_id' 0-127 defaults to 127/all-"
+            "devices, same convention as 'mtc_full'. NOTE: Shuttle and "
+            "Write commands are deliberately NOT supported (Shuttle's "
+            "speed-byte encoding was under-specified in available sources, "
+            "Write is a niche multitrack-recorder feature) — use the "
+            "generic 'sysex' action directly if either is ever needed. "
+            "There is also a typed 'msc' message (MIDI Show Control — "
+            "stage/theatrical equipment control, also a validated sysex "
+            "payload under the hood): needs 'command_format' (one of "
+            "'lighting'/'sound'/'machinery'/'video'/'projection'/"
+            "'process_control'/'pyro'/'all_types', the 8 top-level device "
+            "categories) OR 'command_format_raw' (0-127, for a narrower "
+            "sub-category not in that list — specify exactly one of the "
+            "two), and 'command' (one of the 11 'General Category' "
+            "commands, which apply to every command_format: 'go'/'stop'/"
+            "'resume'/'timed_go'/'load'/'set'/'fire'/'all_off'/'restore'/"
+            "'reset'/'go_off' — NOTE this is a shared field name with "
+            "'mmc' above but a DIFFERENT set of valid values for 'msc'). "
+            "'go'/'stop'/'resume'/'go_off' take optional 'q_number'/"
+            "'q_list'/'q_path' (ASCII digit-and-dot strings, e.g. "
+            "'q_list' requires 'q_number' too, 'q_path' requires "
+            "'q_list' too). 'load' requires 'q_number' (same optional "
+            "'q_list'/'q_path' rules). 'timed_go' requires 'hours'/"
+            "'minutes'/'seconds'/'frames'/'fractional_frames'/'frame_rate' "
+            "(same meaning as 'mtc_full', plus 'fractional_frames' 0-99) "
+            "and takes the same optional q_number/q_list/q_path as 'go'. "
+            "'set' requires 'control_number' and 'control_value' (each "
+            "0-16383) and optionally the SAME 6 time fields as 'timed_go' "
+            "— given ALL together or not at all. 'fire' requires "
+            "'macro_number' (0-127). 'all_off'/'restore'/'reset' need no "
+            "extra fields. Optional 'device_id' 0-127 defaults to 127/all-"
+            "devices, same convention as 'mtc_full'/'mmc'. NOTE: the "
+            "extended 15-command MSC 'Sound Commands' set (clock/cue-list-"
+            "path management) is deliberately NOT supported — use the "
+            "generic 'sysex' action directly if ever needed. "
+            "All of the above are sent on an open output handle. "
+            "'poll' does a "
             "non-blocking check for buffered messages on an open input "
             "handle — decodes any incoming MIDI message generically, not "
             "just the types 'send' explicitly supports. 'close' closes a "
@@ -294,6 +348,7 @@ TOOLS = [
                                 "tune_request",
                                 "clock", "start", "stop", "continue",
                                 "active_sensing", "reset", "sysex",
+                                "mtc_full", "mmc", "msc",
                             ],
                         },
                         "channel": {"type": "integer"},
@@ -316,6 +371,149 @@ TOOLS = [
                                 "0xF0 or trailing 0xF7 — added automatically."
                             ),
                         },
+                        "hours": {
+                            "type": "integer",
+                            "description": "0-23. Required for 'mtc_full'.",
+                        },
+                        "minutes": {
+                            "type": "integer",
+                            "description": "0-59. Required for 'mtc_full'.",
+                        },
+                        "seconds": {
+                            "type": "integer",
+                            "description": "0-59. Required for 'mtc_full'.",
+                        },
+                        "frames": {
+                            "type": "integer",
+                            "description": "0-29. Required for 'mtc_full'.",
+                        },
+                        "frame_rate": {
+                            "type": "string",
+                            "enum": ["24", "25", "30drop", "30nondrop"],
+                            "description": (
+                                "Required for 'mtc_full' — no default, since "
+                                "the wrong value changes what the position "
+                                "means downstream."
+                            ),
+                        },
+                        "device_id": {
+                            "type": "integer",
+                            "description": (
+                                "0-127. Optional for 'mtc_full'/'mmc', "
+                                "defaults to 127 (all devices) — the spec's "
+                                "own default."
+                            ),
+                        },
+                        "command": {
+                            "type": "string",
+                            "enum": [
+                                # mmc values
+                                "stop", "play", "deferred_play",
+                                "fast_forward", "rewind", "record_strobe",
+                                "record_exit", "record_pause", "pause",
+                                "eject", "chase", "command_error_reset",
+                                "mmc_reset", "locate",
+                                # msc values (a DIFFERENT meaning of the
+                                # same field name, disambiguated by the
+                                # message's own 'type' — 'go'/'reset'
+                                # deliberately don't clash with any mmc
+                                # value above)
+                                "go", "resume", "timed_go", "load", "set",
+                                "fire", "all_off", "restore", "reset",
+                                "go_off",
+                            ],
+                            "description": (
+                                "Required for 'mmc' (14 values) or 'msc' "
+                                "(11 DIFFERENT values, sharing this same "
+                                "field name for the analogous role) — "
+                                "which set applies depends on the "
+                                "message's own 'type'."
+                            ),
+                        },
+                        "subframes": {
+                            "type": "integer",
+                            "description": (
+                                "0-99. Required for 'mmc' when 'command' "
+                                "is 'locate'."
+                            ),
+                        },
+                        "command_format": {
+                            "type": "string",
+                            "enum": [
+                                "lighting", "sound", "machinery", "video",
+                                "projection", "process_control", "pyro",
+                                "all_types",
+                            ],
+                            "description": (
+                                "Required for 'msc' (unless "
+                                "'command_format_raw' is used instead)."
+                            ),
+                        },
+                        "command_format_raw": {
+                            "type": "integer",
+                            "description": (
+                                "0-127. Alternative to 'command_format' "
+                                "for 'msc', for a narrower sub-category "
+                                "not in the 8-value enum (e.g. a specific "
+                                "type of moving light rather than "
+                                "'lighting' in general). Specify exactly "
+                                "one of the two, not both."
+                            ),
+                        },
+                        "q_number": {
+                            "type": "string",
+                            "description": (
+                                "'msc' only — ASCII digit/'.' string, e.g. "
+                                "'235.6'. Required for 'load', optional "
+                                "for 'go'/'stop'/'resume'/'timed_go'/"
+                                "'go_off'."
+                            ),
+                        },
+                        "q_list": {
+                            "type": "string",
+                            "description": (
+                                "'msc' only — same ASCII format as "
+                                "'q_number'. Requires 'q_number' to also "
+                                "be given."
+                            ),
+                        },
+                        "q_path": {
+                            "type": "string",
+                            "description": (
+                                "'msc' only — same ASCII format as "
+                                "'q_number'. Requires 'q_list' to also be "
+                                "given."
+                            ),
+                        },
+                        "fractional_frames": {
+                            "type": "integer",
+                            "description": (
+                                "0-99. 'msc' only, required for "
+                                "'timed_go' and (if any time field is "
+                                "given at all) for 'set'."
+                            ),
+                        },
+                        "control_number": {
+                            "type": "integer",
+                            "description": (
+                                "0-16383. Required for 'msc's 'set' "
+                                "command."
+                            ),
+                        },
+                        "control_value": {
+                            "type": "integer",
+                            "description": (
+                                "0-16383. Required for 'msc's 'set' "
+                                "command."
+                            ),
+                        },
+                        "macro_number": {
+                            "type": "integer",
+                            "description": (
+                                "0-127. Required for 'msc's 'fire' "
+                                "command."
+                            ),
+                        },
                     },
                 },
             },
@@ -336,14 +534,45 @@ def handles(name: str) -> bool:
     return name in _TOOL_NAMES
 
 
+def _err(message: str) -> str:
+    return json.dumps({"error": message})
+
+
+# Guards `open`/`send`/`close` against a hung ALSA/JACK driver or a
+# misbehaving physical device — `_run` calls straight into python-rtmidi's C
+# bindings via `asyncio.to_thread`, and without this a stuck call would wait
+# forever with zero feedback to the caller. `poll` is the one action that
+# doesn't need this (mido's `iter_pending()` is confirmed non-blocking — it
+# just loops `poll()` until it returns None), but it's cheap/harmless to
+# cover it too rather than special-case it out.
+#
+# Known limitation, stated plainly rather than hidden: this makes the *tool
+# call* return promptly on a timeout, but does NOT kill the underlying OS
+# thread — Python cannot forcibly cancel a running thread, so a genuinely
+# stuck rtmidi call keeps occupying its slot in the shared default
+# asyncio thread-pool executor (the same pool nearly every other local tool
+# in this app also uses) until the whole process exits. Fixing that half
+# would mean moving off `asyncio.to_thread` onto something killable (e.g. a
+# subprocess) — deliberately out of scope here; this timeout only bounds how
+# long the *caller* waits, not how long the leak persists.
+_DEFAULT_TIMEOUT = 10.0
+
+
 async def execute(name: str, tool_input: dict) -> str:
     if name != "midi1":
         return json.dumps({"error": f"unknown midi1 tool {name!r}"})
-    return await asyncio.to_thread(_run, tool_input)
-
-
-def _err(message: str) -> str:
-    return json.dumps({"error": message})
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_run, tool_input), timeout=_DEFAULT_TIMEOUT
+        )
+    except TimeoutError:
+        return _err(
+            f"midi1 action {tool_input.get('action')!r} timed out after "
+            f"{_DEFAULT_TIMEOUT}s — a MIDI driver or device may be hung "
+            "(the underlying blocking call could not be cancelled and may "
+            "still be running in the background; see the note above "
+            "_DEFAULT_TIMEOUT in core/midi1.py)"
+        )
 
 
 def _run(tool_input: dict) -> str:
@@ -420,6 +649,122 @@ def _close(tool_input: dict) -> str:
     except Exception as e:
         return _err(f"error closing handle {handle!r}: {type(e).__name__}: {e}")
     return json.dumps({"status": "ok", "handle": handle, "closed": True})
+
+
+def close_all() -> None:
+    """Close every still-open port. Called by local_tools.shutdown() on the
+    way out — safe to call even if nothing was ever opened (mirrors every
+    other tool's cleanup callback registered there, e.g. browser.shutdown/
+    kernel.shutdown/data.close, all of which tolerate an idle/never-used
+    state the same way).
+
+    Best-effort per handle, same "one failure must not block the rest"
+    contract local_tools.shutdown() itself already documents for the whole
+    list of registered cleanups — a single stuck/already-dead port here
+    must not prevent the others from being released.
+    """
+    for handle in list(_OPEN_PORTS):
+        _, port = _OPEN_PORTS.pop(handle)
+        try:
+            port.close()
+        except Exception as e:
+            print(f"[midi1] close_all: failed to close {handle!r} (ignored): {e}")
+
+
+# Shared by 'mtc_full' (Chunk 3a) and MMC's 'locate' command (Chunk 3b) —
+# both encode an SMPTE-style hour byte as 0yyzzzzz (yy = frame-rate type,
+# zzzzz = hours), confirmed identical in both specs (somascape.org's MTC
+# section and MMC's Locate/Goto section use the exact same bit layout).
+# Factored out here rather than duplicated so the two call sites can't
+# silently drift apart from each other over time.
+_FRAME_RATE_BITS = {"24": 0b00, "25": 0b01, "30drop": 0b10, "30nondrop": 0b11}
+
+
+def _encode_smpte_hour_byte(hours: int, frame_rate: str) -> int:
+    if not (0 <= hours <= 23):
+        raise ValueError(f"'hours' must be 0-23, got {hours!r}")
+    if frame_rate not in _FRAME_RATE_BITS:
+        raise ValueError(
+            f"'frame_rate' must be one of {sorted(_FRAME_RATE_BITS)}, "
+            f"got {frame_rate!r}"
+        )
+    return (_FRAME_RATE_BITS[frame_rate] << 5) | hours
+
+
+def _encode_msc_ascii_field(name: str, value: str) -> tuple:
+    """CHUNK 3c: MSC Q_number/Q_list/Q_path are plain ASCII digit strings
+    with '.' as the decimal-point delimiter (confirmed against a literal
+    worked example in the MSC 1.0 spec itself: cue "235.6" list "36.6" path
+    "59" encodes as 32 33 35 2E 36 00 33 36 2E 36 00 35 39). Only validates
+    the character set here — the spec's own leniency rules about repeated/
+    misplaced dots are a RECEIVER tolerance requirement, not something a
+    well-behaved sender needs to enforce on itself.
+    """
+    if not value or any(c not in "0123456789." for c in value):
+        raise ValueError(
+            f"{name!r} must be a non-empty string of digits and '.' only, "
+            f"got {value!r}"
+        )
+    return tuple(ord(c) for c in value)
+
+
+def _encode_msc_cue_data(q_number, q_list, q_path) -> tuple:
+    """CHUNK 3c: shared by the 5 MSC General Category commands that carry
+    optional trailing cue-targeting data (GO, STOP, RESUME, TIMED_GO,
+    GO_OFF) — factored out once rather than repeated 5 times. Per spec:
+    Q_list requires Q_number to also be present, Q_path requires Q_list.
+    A single 0x00 delimiter separates each field that's actually present;
+    trailing fields are simply omitted, not delimited with nothing after.
+    """
+    if q_number is None:
+        if q_list is not None or q_path is not None:
+            raise ValueError("'q_list'/'q_path' require 'q_number' too")
+        return ()
+    out = list(_encode_msc_ascii_field("q_number", q_number))
+    if q_list is None:
+        if q_path is not None:
+            raise ValueError("'q_path' requires 'q_list' too")
+        return tuple(out)
+    out += [0x00] + list(_encode_msc_ascii_field("q_list", q_list))
+    if q_path is None:
+        return tuple(out)
+    out += [0x00] + list(_encode_msc_ascii_field("q_path", q_path))
+    return tuple(out)
+
+
+def _encode_msc_time(
+    hours: int, minutes: int, seconds: int, frames: int,
+    fractional_frames: int, frame_rate: str,
+) -> tuple:
+    """CHUNK 3c: MSC's own "Standard Time Code" — same 5-byte SHAPE as
+    mtc_full/MMC-locate's time fields, but a MORE elaborate bit layout:
+    minutes carries an extra "colour frame" flag bit, seconds carries a
+    reserved-must-be-zero bit, and frames carries BOTH a sign bit and a
+    subframes-vs-status identification bit, per somascape.org's MSC
+    section (cross-referenced against the actual MSC 1.0 spec PDF, which
+    confirms "MIDI Show Control time code ... specifications are entirely
+    consistent with ... MIDI Time Code"). Deliberately narrowed scope,
+    matching the plan written before this chunk started: this tool always
+    sends colour-frame=0, sign=positive, and the subframes (not "status")
+    variant — none of those three flags are exposed as separate inputs,
+    since they're rare edge cases and hardcoding safe defaults matches the
+    same philosophy already used for e.g. mtc_full's device_id default.
+    Only the hour byte's encoding is IDENTICAL to mtc_full/MMC's, hence
+    still reusing _encode_smpte_hour_byte for that one byte only — minutes/
+    seconds/frames/fractional_frames need their own construction here.
+    """
+    if not (0 <= minutes <= 59):
+        raise ValueError(f"'minutes' must be 0-59, got {minutes!r}")
+    if not (0 <= seconds <= 59):
+        raise ValueError(f"'seconds' must be 0-59, got {seconds!r}")
+    if not (0 <= frames <= 29):
+        raise ValueError(f"'frames' must be 0-29, got {frames!r}")
+    if not (0 <= fractional_frames <= 99):
+        raise ValueError(
+            f"'fractional_frames' must be 0-99, got {fractional_frames!r}"
+        )
+    hr_byte = _encode_smpte_hour_byte(hours, frame_rate)
+    return (hr_byte, minutes, seconds, frames, fractional_frames)
 
 
 def _build_message(message: dict) -> "mido.Message":
@@ -505,12 +850,329 @@ def _build_message(message: dict) -> "mido.Message":
         if raw_data is None:
             raise KeyError("'data'")
         return mido.Message("sysex", data=tuple(raw_data), time=time)
+    if msg_type == "mtc_full":
+        # CHUNK 3a: MIDI Time Code Full Message — a Universal Real Time
+        # SysEx convenience wrapper (built on the SAME generic sysex path
+        # above, not a separate one), for jumping the timeline to an exact
+        # position in one message rather than accumulating Quarter Frames.
+        # Wire format, confirmed against an independent technical reference
+        # (somascape.org/midi/tech/spec.html), consistent with mido's own
+        # existing System Common 'quarter_frame' handling already above:
+        #   F0 7F <device_id> 01 01 hr mn sc fr F7
+        #   hr = 0yyzzzzz : yy = frame-rate type (00=24fps 01=25fps
+        #        10=30fps-drop 11=30fps-nondrop), zzzzz = hours (0-23)
+        #   mn = minutes (0-59), sc = seconds (0-59), fr = frames (0-29)
+        # `frame_rate` is REQUIRED (not defaulted) — it changes what the
+        # position actually means downstream, so guessing wrong here would
+        # be a real correctness bug, not just a missing convenience default,
+        # unlike e.g. `channel` defaulting to 0 elsewhere in this function.
+        # `device_id` defaults to 0x7F (all devices) — that IS the spec's
+        # own stated default ("id = ID of target device (default = 7F = All
+        # devices)"), a genuinely safe default to carry over, unlike
+        # frame_rate above.
+        hours = message.get("hours")
+        minutes = message.get("minutes")
+        seconds = message.get("seconds")
+        frames = message.get("frames")
+        frame_rate = message.get("frame_rate")
+        if hours is None:
+            raise KeyError("'hours'")
+        if minutes is None:
+            raise KeyError("'minutes'")
+        if seconds is None:
+            raise KeyError("'seconds'")
+        if frames is None:
+            raise KeyError("'frames'")
+        if frame_rate is None:
+            raise KeyError("'frame_rate'")
+        device_id = message.get("device_id", 0x7F)
+
+        if not (0 <= minutes <= 59):
+            raise ValueError(f"'minutes' must be 0-59, got {minutes!r}")
+        if not (0 <= seconds <= 59):
+            raise ValueError(f"'seconds' must be 0-59, got {seconds!r}")
+        if not (0 <= frames <= 29):
+            raise ValueError(f"'frames' must be 0-29, got {frames!r}")
+        if not (0 <= device_id <= 127):
+            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
+
+        hr_byte = _encode_smpte_hour_byte(hours, frame_rate)
+
+        return mido.Message(
+            "sysex",
+            data=(0x7F, device_id, 0x01, 0x01, hr_byte, minutes, seconds, frames),
+            time=time,
+        )
+    if msg_type == "mmc":
+        # CHUNK 3b: MIDI Machine Control — a Universal Real Time SysEx
+        # convenience wrapper (built on the SAME generic sysex path, same
+        # rule the user set for 'mtc_full'). ONE typed message covers
+        # MULTIPLE commands via a required 'command' sub-field, rather than
+        # a dozen separate top-level message types (e.g. 'mmc_stop',
+        # 'mmc_play', ...) — mirrors the same "one type, variable
+        # data/sub-field" shape 'sysex' itself already has, and keeps the
+        # message 'type' enum from ballooning. Wire format, confirmed
+        # against somascape.org's MMC section, cross-checked against
+        # en.wikipedia.org/wiki/MIDI_Machine_Control (matches exactly):
+        #   No-data commands:  F0 7F <device_id> 06 <cc> F7
+        #   Locate/Goto:       F0 7F <device_id> 06 44 06 01 hr mn sc fr sf F7
+        #     (44 = Sub-ID#2/Locate, 06 = byte count that follows, 01 =
+        #     sub-format, hr = SAME 0yyzzzzz encoding as mtc_full above —
+        #     hence the shared _encode_smpte_hour_byte helper — sf = SMPTE
+        #     sub-frame 0-99, a field mtc_full's own Full Message doesn't
+        #     have)
+        # DELIBERATELY OUT OF SCOPE for this chunk (per the plan written
+        # before starting): Shuttle (0x47 — encoding under-specified in
+        # what was sourced) and Write (0x40 — niche, multitrack-specific).
+        # Command Error Reset (0x0C) IS included — cheap to include, one
+        # more dict entry, no reason to leave it out just because Wikipedia's
+        # table happened to omit it while somascape's didn't contradict it.
+        _MMC_COMMANDS = {
+            "stop": 0x01, "play": 0x02, "deferred_play": 0x03,
+            "fast_forward": 0x04, "rewind": 0x05, "record_strobe": 0x06,
+            "record_exit": 0x07, "record_pause": 0x08, "pause": 0x09,
+            "eject": 0x0A, "chase": 0x0B, "command_error_reset": 0x0C,
+            "mmc_reset": 0x0D,
+        }
+        command = message.get("command")
+        if command is None:
+            raise KeyError("'command'")
+        device_id = message.get("device_id", 0x7F)
+        if not (0 <= device_id <= 127):
+            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
+
+        if command == "locate":
+            hours = message.get("hours")
+            minutes = message.get("minutes")
+            seconds = message.get("seconds")
+            frames = message.get("frames")
+            subframes = message.get("subframes")
+            frame_rate = message.get("frame_rate")
+            if hours is None:
+                raise KeyError("'hours'")
+            if minutes is None:
+                raise KeyError("'minutes'")
+            if seconds is None:
+                raise KeyError("'seconds'")
+            if frames is None:
+                raise KeyError("'frames'")
+            if subframes is None:
+                raise KeyError("'subframes'")
+            if frame_rate is None:
+                raise KeyError("'frame_rate'")
+            if not (0 <= minutes <= 59):
+                raise ValueError(f"'minutes' must be 0-59, got {minutes!r}")
+            if not (0 <= seconds <= 59):
+                raise ValueError(f"'seconds' must be 0-59, got {seconds!r}")
+            if not (0 <= frames <= 29):
+                raise ValueError(f"'frames' must be 0-29, got {frames!r}")
+            if not (0 <= subframes <= 99):
+                raise ValueError(
+                    f"'subframes' must be 0-99, got {subframes!r}"
+                )
+            hr_byte = _encode_smpte_hour_byte(hours, frame_rate)
+            return mido.Message(
+                "sysex",
+                data=(
+                    0x7F, device_id, 0x06, 0x44, 0x06, 0x01,
+                    hr_byte, minutes, seconds, frames, subframes,
+                ),
+                time=time,
+            )
+
+        if command not in _MMC_COMMANDS:
+            raise ValueError(
+                f"'command' must be one of "
+                f"{sorted(_MMC_COMMANDS) + ['locate']}, got {command!r}"
+            )
+        return mido.Message(
+            "sysex",
+            data=(0x7F, device_id, 0x06, _MMC_COMMANDS[command]),
+            time=time,
+        )
+    if msg_type == "msc":
+        # CHUNK 3c: MIDI Show Control — a Universal Real Time SysEx
+        # convenience wrapper, same "layers on top of the generic sysex
+        # path" rule as mtc_full/mmc. Wire format, confirmed against the
+        # ACTUAL MSC 1.0 spec text (MMA Recommended Practice RP-002,
+        # 1991-07-25 — the file's own header states it's "made available
+        # here by permission of the MIDI Manufacturers Association"),
+        # cross-checked against ETC's and a GitHub MIDIKit discussion's
+        # independent descriptions of the same format string:
+        #   F0 7F <device_id> 02 <command_format> <command> <data> F7
+        # Scope, matching the plan written before this chunk started:
+        # only the 11 "General Category" commands (apply to ALL
+        # command_formats, "highly recommended" per the spec, and what
+        # real commercial gear actually implements — ETC's own docs note
+        # their Express/Expression consoles "will only take Lighting GO,
+        # STOP, RESUME, and FIRE"). The extended 15-command "Sound
+        # Commands" set (clock/cue-list-path management) is deliberately
+        # NOT implemented — use raw 'sysex' directly if ever needed.
+        _MSC_FORMATS = {
+            "lighting": 0x01, "sound": 0x10, "machinery": 0x20,
+            "video": 0x30, "projection": 0x40, "process_control": 0x50,
+            "pyro": 0x60, "all_types": 0x7F,
+        }
+        _MSC_COMMANDS = {
+            "go": 0x01, "stop": 0x02, "resume": 0x03, "timed_go": 0x04,
+            "load": 0x05, "set": 0x06, "fire": 0x07, "all_off": 0x08,
+            "restore": 0x09, "reset": 0x0A, "go_off": 0x0B,
+        }
+
+        command_format = message.get("command_format")
+        command_format_raw = message.get("command_format_raw")
+        if command_format is not None and command_format_raw is not None:
+            raise ValueError(
+                "specify only ONE of 'command_format' or "
+                "'command_format_raw', not both"
+            )
+        if command_format is None and command_format_raw is None:
+            raise KeyError("'command_format' (or 'command_format_raw')")
+        if command_format_raw is not None:
+            if not (0 <= command_format_raw <= 127):
+                raise ValueError(
+                    f"'command_format_raw' must be 0-127, got "
+                    f"{command_format_raw!r}"
+                )
+            cf_byte = command_format_raw
+        else:
+            if command_format not in _MSC_FORMATS:
+                raise ValueError(
+                    f"'command_format' must be one of "
+                    f"{sorted(_MSC_FORMATS)} (or use 'command_format_raw' "
+                    f"for a narrower sub-category), got {command_format!r}"
+                )
+            cf_byte = _MSC_FORMATS[command_format]
+
+        command = message.get("command")
+        if command is None:
+            raise KeyError("'command'")
+        if command not in _MSC_COMMANDS:
+            raise ValueError(
+                f"'command' must be one of {sorted(_MSC_COMMANDS)} for "
+                f"'msc' (got {command!r} — note this is a DIFFERENT set "
+                f"from 'mmc's own 'command' values)"
+            )
+        cmd_byte = _MSC_COMMANDS[command]
+
+        device_id = message.get("device_id", 0x7F)
+        if not (0 <= device_id <= 127):
+            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
+
+        if command in ("go", "stop", "resume", "go_off"):
+            payload: tuple = _encode_msc_cue_data(
+                message.get("q_number"), message.get("q_list"),
+                message.get("q_path"),
+            )
+        elif command == "load":
+            q_number = message.get("q_number")
+            if q_number is None:
+                raise KeyError("'q_number' (required for 'load')")
+            payload = _encode_msc_cue_data(
+                q_number, message.get("q_list"), message.get("q_path"),
+            )
+        elif command == "timed_go":
+            hours = message.get("hours")
+            minutes = message.get("minutes")
+            seconds = message.get("seconds")
+            frames = message.get("frames")
+            fractional_frames = message.get("fractional_frames")
+            frame_rate = message.get("frame_rate")
+            if hours is None:
+                raise KeyError("'hours' (required for 'timed_go')")
+            if minutes is None:
+                raise KeyError("'minutes' (required for 'timed_go')")
+            if seconds is None:
+                raise KeyError("'seconds' (required for 'timed_go')")
+            if frames is None:
+                raise KeyError("'frames' (required for 'timed_go')")
+            if fractional_frames is None:
+                raise KeyError(
+                    "'fractional_frames' (required for 'timed_go')"
+                )
+            if frame_rate is None:
+                raise KeyError("'frame_rate' (required for 'timed_go')")
+            payload = _encode_msc_time(
+                hours, minutes, seconds, frames, fractional_frames,
+                frame_rate,
+            ) + _encode_msc_cue_data(
+                message.get("q_number"), message.get("q_list"),
+                message.get("q_path"),
+            )
+        elif command == "set":
+            control_number = message.get("control_number")
+            control_value = message.get("control_value")
+            if control_number is None:
+                raise KeyError("'control_number' (required for 'set')")
+            if control_value is None:
+                raise KeyError("'control_value' (required for 'set')")
+            if not (0 <= control_number <= 16383):
+                raise ValueError(
+                    f"'control_number' must be 0-16383, got "
+                    f"{control_number!r}"
+                )
+            if not (0 <= control_value <= 16383):
+                raise ValueError(
+                    f"'control_value' must be 0-16383, got "
+                    f"{control_value!r}"
+                )
+            payload = (
+                control_number & 0x7F, (control_number >> 7) & 0x7F,
+                control_value & 0x7F, (control_value >> 7) & 0x7F,
+            )
+            set_hours = message.get("hours")
+            set_minutes = message.get("minutes")
+            set_seconds = message.get("seconds")
+            set_frames = message.get("frames")
+            set_fractional_frames = message.get("fractional_frames")
+            set_frame_rate = message.get("frame_rate")
+            set_time_provided = [
+                v is not None for v in (
+                    set_hours, set_minutes, set_seconds, set_frames,
+                    set_fractional_frames, set_frame_rate,
+                )
+            ]
+            if any(set_time_provided) and not all(set_time_provided):
+                raise ValueError(
+                    "SET's time fields (hours/minutes/seconds/frames/"
+                    "fractional_frames/frame_rate) must be given ALL "
+                    "together or not at all"
+                )
+            if all(set_time_provided):
+                assert set_hours is not None
+                assert set_minutes is not None
+                assert set_seconds is not None
+                assert set_frames is not None
+                assert set_fractional_frames is not None
+                assert set_frame_rate is not None
+                payload += _encode_msc_time(
+                    set_hours, set_minutes, set_seconds, set_frames,
+                    set_fractional_frames, set_frame_rate,
+                )
+        elif command == "fire":
+            macro_number = message.get("macro_number")
+            if macro_number is None:
+                raise KeyError("'macro_number' (required for 'fire')")
+            if not (0 <= macro_number <= 127):
+                raise ValueError(
+                    f"'macro_number' must be 0-127, got {macro_number!r}"
+                )
+            payload = (macro_number,)
+        else:
+            # all_off, restore, reset — no data bytes at all.
+            payload = ()
+
+        return mido.Message(
+            "sysex",
+            data=(0x7F, device_id, 0x02, cf_byte, cmd_byte) + payload,
+            time=time,
+        )
     raise ValueError(
         f"unknown message type {msg_type!r} — expected one of "
         "note_on, note_off, control_change, program_change, "
         "pitchwheel, aftertouch, polytouch, quarter_frame, songpos, "
         "song_select, tune_request, clock, start, stop, continue, "
-        "active_sensing, reset, sysex"
+        "active_sensing, reset, sysex, mtc_full, mmc, msc"
     )
 
 
