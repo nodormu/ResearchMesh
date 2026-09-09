@@ -77,6 +77,19 @@ Actions:
   - write_midi_file : create a NEW .mid/.midi or .syx file from disk-
                    supplied track/message data — the mirror-image write
                    path to read_midi_file. See the file-I/O note below.
+  - decode_mmc_response : decode a raw MMC Response sysex (mcr=0x07 — the
+                   device-to-Controller direction, mirroring 'mmc's own
+                   commands which send mcc=0x06 the other way) back into a
+                   friendly structured result. Takes 'data' — the FULL
+                   sysex INCLUDING the leading 0xF0/trailing 0xF7 (the
+                   opposite convention from 'sysex' sends, chosen since
+                   this is meant to accept bytes copied from a real
+                   captured response). Currently decodes the 15
+                   Information Fields already registered for
+                   'read'/'write'/'update' (all sharing the 5-byte
+                   "Standard Time Code" format) plus RESPONSE ERROR;
+                   anything else comes back as an "unknown" type with the
+                   raw name byte rather than being guessed at.
 
 SysEx note: 'sysex' takes a 'data' array of integers, each 0-127
 (7-bit data bytes only — MIDI's own spec forbids status-byte values 0x80+
@@ -248,6 +261,7 @@ TOOLS = [
                     "enum": [
                         "list_devices", "open", "close", "send", "poll",
                         "read_midi_file", "write_midi_file",
+                        "decode_mmc_response",
                     ],
                     "description": "Which MIDI operation to perform.",
                 },
@@ -554,6 +568,27 @@ TOOLS = [
                         },
                     },
                 },
+                "data": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "Required for 'decode_mmc_response'. The FULL raw "
+                        "sysex byte sequence to decode, INCLUDING the "
+                        "leading 0xF0 and trailing 0xF7 (the opposite "
+                        "convention from 'message.data' on 'sysex' sends, "
+                        "which excludes both — chosen this way since this "
+                        "is meant to accept bytes copied straight from a "
+                        "real captured MMC Response, e.g. a 'poll' "
+                        "result's own raw bytes). Decodes the 15 "
+                        "Information Fields already supported by "
+                        "'read'/'write'/'update' (SELECTED_TIME_CODE, "
+                        "SELECTED_MASTER_CODE, REQUESTED_OFFSET, "
+                        "ACTUAL_OFFSET, LOCK_DEVIATION, GENERATOR_TIME_CODE, "
+                        "MIDI_TIME_CODE_INPUT, GP0-GP7) plus RESPONSE "
+                        "ERROR; anything else is reported as an 'unknown' "
+                        "type with the raw name byte rather than guessed."
+                    ),
+                },
             },
             "required": ["action"],
         },
@@ -634,10 +669,12 @@ def _run(tool_input: dict) -> str:
         return _read_midi_file(tool_input)
     if action == "write_midi_file":
         return _write_midi_file(tool_input)
+    if action == "decode_mmc_response":
+        return _decode_mmc_response(tool_input)
     return _err(
         f"unknown action {action!r} — expected one of "
         "list_devices, open, close, send, poll, read_midi_file, "
-        "write_midi_file"
+        "write_midi_file, decode_mmc_response"
     )
 
 
@@ -902,6 +939,195 @@ def _encode_nested_mmc_command(
         )
     built = _build_message(nested)
     return tuple(built.data[3:])
+
+
+def _encode_standard_time_code(
+    hours: int,
+    minutes: int,
+    seconds: int,
+    frames: int,
+    frame_rate: str,
+    *,
+    subframes: int = 0,
+    color_frame: bool = False,
+    blank: bool = False,
+    negative: bool = False,
+    use_status_byte: bool = False,
+    estimated: bool = False,
+    invalid: bool = False,
+    video_field_1: bool = False,
+    no_time_code: bool = False,
+) -> tuple:
+    """RP-013's 5-byte "Standard Time Code" format (Section 3, "Standard
+    Specifications") -- the wire format shared by ALL 15 Information
+    Fields currently in _INFO_FIELD_NAMES (SELECTED_TIME_CODE through
+    GP7). Their "Time"/"Sync"/"Gen"/"Math"/"MTC" category labels in the
+    spec's own table describe MEANING, not a different byte layout --
+    all 15 use this identical 5-byte shape, confirmed against the
+    table's own "5" byte-count column for every one of them.
+
+    Layout: hr = "0 tt hhhhh" (SAME 2-bit time-type + 5-bit hours
+    pattern as _encode_smpte_hour_byte, directly reused here -- the two
+    formats are bit-for-bit identical for this one byte).
+    mn = "0 c mmmmmm" (c = color-frame flag, copied from the source time
+    code stream).
+    sc = "0 k ssssss" (k = "blank" flag -- data never loaded since
+    power-up/MMC RESET).
+    fr = "0 g i fffff" (g = sign, permitted only where signed time code
+    is allowed; i = which format the 5th byte uses).
+    5th byte is EITHER subframes (i=0, plain 0-99, fractional frames)
+    OR a 4-flag status byte "0 e v d n xxx" (i=1: estimated/invalid/
+    video_field_1/no_time_code flags, top 3 bits reserved=000).
+
+    The common case (a plain time code, optionally with subframes) only
+    needs the first 5 positional args -- every rarer per-bit flag
+    defaults to its "normal"/off state, same "friendly fields with
+    sensible defaults, not a raw bitfield" pattern used elsewhere (e.g.
+    `step`'s `reverse`).
+    """
+    if not (0 <= minutes <= 59):
+        raise ValueError(f"'minutes' must be 0-59, got {minutes!r}")
+    if not (0 <= seconds <= 59):
+        raise ValueError(f"'seconds' must be 0-59, got {seconds!r}")
+    if not (0 <= frames <= 29):
+        raise ValueError(f"'frames' must be 0-29, got {frames!r}")
+    hr_byte = _encode_smpte_hour_byte(hours, frame_rate)
+    mn_byte = (0x40 if color_frame else 0x00) | minutes
+    sc_byte = (0x40 if blank else 0x00) | seconds
+    fr_byte = (
+        (0x40 if negative else 0x00)
+        | (0x20 if use_status_byte else 0x00)
+        | frames
+    )
+    if use_status_byte:
+        fifth_byte = (
+            (0x40 if estimated else 0x00)
+            | (0x20 if invalid else 0x00)
+            | (0x10 if video_field_1 else 0x00)
+            | (0x08 if no_time_code else 0x00)
+        )
+    else:
+        if not (0 <= subframes <= 99):
+            raise ValueError(
+                f"'subframes' must be 0-99, got {subframes!r}"
+            )
+        fifth_byte = subframes
+    return hr_byte, mn_byte, sc_byte, fr_byte, fifth_byte
+
+
+def _decode_standard_time_code(
+    hr_byte: int, mn_byte: int, sc_byte: int, fr_byte: int, fifth_byte: int
+) -> dict:
+    """Inverse of `_encode_standard_time_code` above — decodes RP-013's
+    5-byte "Standard Time Code" format back into a friendly dict. See
+    that function's own docstring for the full bit layout being
+    reversed here; this simply masks/shifts the same bit positions back
+    out rather than re-deriving them.
+    """
+    frame_rate_names = {v: k for k, v in _FRAME_RATE_BITS.items()}
+    result: dict = {
+        "hours": hr_byte & 0x1F,
+        "frame_rate": frame_rate_names[(hr_byte >> 5) & 0x3],
+        "color_frame": bool(mn_byte & 0x40),
+        "minutes": mn_byte & 0x3F,
+        "blank": bool(sc_byte & 0x40),
+        "seconds": sc_byte & 0x3F,
+        "negative": bool(fr_byte & 0x40),
+        "frames": fr_byte & 0x1F,
+    }
+    use_status_byte = bool(fr_byte & 0x20)
+    result["use_status_byte"] = use_status_byte
+    if use_status_byte:
+        result["estimated"] = bool(fifth_byte & 0x40)
+        result["invalid"] = bool(fifth_byte & 0x20)
+        result["video_field_1"] = bool(fifth_byte & 0x10)
+        result["no_time_code"] = bool(fifth_byte & 0x08)
+    else:
+        result["subframes"] = fifth_byte
+    return result
+
+
+def _decode_mmc_response(tool_input: dict) -> str:
+    """Decode a raw MMC Response sysex (Universal Real-Time SysEx,
+    Sub-ID#2 `mcr`=0x07 — the DEVICE-to-Controller direction, the
+    mirror image of the Controller-to-device `mcc`=0x06 that `mmc`'s
+    own commands use) into a structured result.
+
+    Takes `data` — the FULL sysex byte sequence INCLUDING the leading
+    0xF0 and trailing 0xF7 (unlike the generic `sysex` send type, which
+    deliberately EXCLUDES both — chosen the opposite way here since
+    this is meant to accept bytes copied straight from a real captured
+    response, e.g. a `poll()` result's own raw bytes, which naturally
+    include both delimiters).
+
+    Scoped to what's actually decodable today: the 15 Information
+    Fields already in `_INFO_FIELD_NAMES` (all sharing the 5-byte
+    Standard Time Code format decoded by `_decode_standard_time_code`)
+    plus RESPONSE ERROR (name byte 0x42, a variable-length list of
+    field names that failed — confirmed via the spec's own 3-field
+    worked example). Anything else (COMMAND ERROR, the ~50 other
+    unregistered Information Fields, a segmented/multi-part response)
+    is reported as `"type": "unknown"` with the raw name byte rather
+    than guessed at.
+    """
+    data = tool_input.get("data")
+    if not data:
+        return _err(
+            "'data' (required, a non-empty list of ints — the full "
+            "sysex including the leading 0xF0 and trailing 0xF7)"
+        )
+    data = list(data)
+    if len(data) < 5 or data[0] != 0xF0 or data[-1] != 0xF7:
+        return _err(
+            "'data' must be a complete sysex, including the leading "
+            "0xF0 and trailing 0xF7"
+        )
+    if data[1] != 0x7F or data[3] != 0x06 + 1:
+        return _err(
+            "'data' is not an MMC Response sysex — expected "
+            "F0 7F <device_id> 07 ... F7"
+        )
+    device_id = data[2]
+    name_byte = data[4]
+    payload = data[5:-1]
+    if name_byte == 0x42:
+        field_names_by_byte = {v: k for k, v in _INFO_FIELD_NAMES.items()}
+        unsupported = [
+            field_names_by_byte.get(b, f"0x{b:02X}")
+            for b in payload[1:]  # payload[0] is RESPONSE ERROR's own
+                                   # leading count byte, not a name
+        ]
+        return json.dumps({
+            "status": "ok",
+            "device_id": device_id,
+            "type": "response_error",
+            "unsupported_fields": unsupported,
+        })
+    field_name = {v: k for k, v in _INFO_FIELD_NAMES.items()}.get(name_byte)
+    if field_name is None:
+        return json.dumps({
+            "status": "ok",
+            "device_id": device_id,
+            "type": "unknown",
+            "raw_name_byte": name_byte,
+            "note": (
+                "not yet decodable — only the 15 registered Information "
+                "Fields plus RESPONSE ERROR are currently supported"
+            ),
+        })
+    if len(payload) != 5:
+        return _err(
+            f"expected exactly 5 data bytes for field {field_name!r}, "
+            f"got {len(payload)}"
+        )
+    decoded = _decode_standard_time_code(*payload)
+    return json.dumps({
+        "status": "ok",
+        "device_id": device_id,
+        "type": "field_value",
+        "name": field_name,
+        **decoded,
+    })
 
 
 def _encode_msc_ascii_field(name: str, value: str) -> tuple:
@@ -1299,20 +1525,31 @@ def _build_message(message: dict) -> "mido.Message":
         # 'assign_system_master', 'generator_command',
         # 'midi_time_code_command', 'variable_play', 'search', 'shuttle',
         # 'deferred_variable_play', 'record_strobe_variable', 'wait',
-        # 'drop_frame_adjust', 'move', 'add', 'subtract', 'group',
-        # 'procedure', 'event' — see each one's own inline comment below
-        # for wire format/verification detail. This completes the
-        # entire MOVE/ADD/SUBTRACT/DROP_FRAME_ADJUST "Information Field
-        # math" group — see _INFO_FIELD_NAMES/_WRITEABLE_INFO_FIELDS/
-        # _resolve_info_field_name above for the shared name registry
-        # all four use. 'procedure' and 'event' both use
-        # _encode_nested_mmc_command (also above) for embedding other
-        # mmc commands inside their own payload — this completes the
-        # entire PROCEDURE/EVENT/GROUP research thread.
+        # 'resume', 'drop_frame_adjust', 'move', 'add', 'subtract',
+        # 'group', 'procedure', 'event', 'read', 'write', 'update' —
+        # see each one's own inline comment below for wire format/
+        # verification detail. 'move'/'add'/'subtract'/
+        # 'drop_frame_adjust'/'read'/'write'/'update' all share the
+        # _INFO_FIELD_NAMES/_WRITEABLE_INFO_FIELDS/
+        # _resolve_info_field_name Information Field name registry
+        # above; 'write' additionally uses _encode_standard_time_code
+        # (also above) to encode each field's actual 5-byte data.
+        # 'procedure' and 'event' both use _encode_nested_mmc_command
+        # (also above) for embedding other mmc commands inside their
+        # own payload. 'read'/'write'/'update' all currently only
+        # accept the 15 field names already in _INFO_FIELD_NAMES; a
+        # device's reply to 'read'/'update' is NOT yet decodable by
+        # this tool (see the not-yet-built 'mmc_response' note below).
         # NOT IMPLEMENTED (deliberately, still):
-        # Write (0x40 — this is actually the Information-Field WRITE
-        # access command, part of the not-yet-built Responses/Info-Field
-        # mechanism, not a niche transport command).
+        # Masked Write (0x41) — deliberately deferred: it only operates
+        # on "Standard Track Bitmap" style Information Fields (a
+        # different, variable-length format from the Standard Time Code
+        # fields registered so far), none of which are registered yet.
+        # A new 'mmc_response' message type, to actually decode a
+        # device's replies to read/write/update (today `poll` only
+        # shows raw undecoded sysex bytes for any response). The
+        # remaining ~50+ Information Field names beyond the 15 already
+        # registered.
         # Command Error Reset (0x0C) IS included — cheap to include, one
         # more dict entry, no reason to leave it out just because Wikipedia's
         # table happened to omit it while somascape's didn't contradict it.
@@ -1910,6 +2147,191 @@ def _build_message(message: dict) -> "mido.Message":
                 time=time,
             )
 
+        if command == "read":
+            # READ (0x42) — RP-013 p.26, confirmed via a targeted
+            # pdftotext pull, including the spec's OWN literal worked
+            # example (a READ of SELECTED_TIME_CODE): "Command: F0 7F
+            # <device_ID> <mcc> <READ> <count=01> <SELECTED TIME CODE>
+            # F7" — reproduced exactly as a hand-computed test case.
+            # Requests transmission of one or more Information Fields'
+            # current values; the Controlled Device replies with an mcr
+            # (Response) sysex — NOT YET DECODABLE by this tool (that's
+            # the separate, not-yet-built `mmc_response` message type;
+            # today `poll` would just show the raw undecoded bytes). If
+            # a requested field is unsupported by the device, a
+            # RESPONSE ERROR is generated device-side — receiver
+            # behavior, not something a sender encodes.
+            #
+            # `names` reuses the EXISTING `_INFO_FIELD_NAMES` registry
+            # built for MOVE/ADD/SUBTRACT/DROP_FRAME_ADJUST — no
+            # writeable restriction here (a read-only field like
+            # ACTUAL_OFFSET is perfectly valid to READ; `_resolve_info_
+            # field_name` is called WITHOUT `require_writeable`).
+            # Broader Information Fields beyond this registry's 15
+            # entries (e.g. RESPONSE_ERROR/COMMAND_ERROR) are
+            # deliberately not expanded here — kept as a separate,
+            # smaller, future addition rather than growing this change.
+            names = message.get("names")
+            if not names:
+                raise KeyError(
+                    "'names' (required, non-empty list, for 'read')"
+                )
+            name_bytes = tuple(_resolve_info_field_name(n) for n in names)
+            return mido.Message(
+                "sysex",
+                data=(
+                    0x7F, device_id, 0x06, 0x42, len(name_bytes),
+                    *name_bytes,
+                ),
+                time=time,
+            )
+
+        if command == "write":
+            # WRITE (0x40) — RP-013 p.25, confirmed via a targeted
+            # pdftotext pull. Loads data into one or more Information
+            # Fields: a concatenated series of `<name> <data..>` pairs,
+            # one per field, with NO extra per-field length prefix for
+            # these fields — the receiver already knows each field's
+            # fixed byte length from its own definition. (A per-field
+            # `<count>` prefix inside the data IS used by a different
+            # subset of "count-prefixed" fields, per MASKED WRITE's own
+            # note — none of those are registered yet, so not relevant
+            # to this first WRITE step.) `name` must be WRITEABLE (spec:
+            # "The specified Information Field must be writeable").
+            #
+            # `fields` = a list of dicts, each `{"name": ...,
+            # "hours"/"minutes"/"seconds"/"frames"/"frame_rate": ...,
+            # [optional subframes/flags]}` — every field currently in
+            # _INFO_FIELD_NAMES uses the IDENTICAL 5-byte Standard Time
+            # Code format (see _encode_standard_time_code above), so one
+            # encoder covers all of them; no per-field-type branching
+            # needed yet.
+            fields = message.get("fields")
+            if not fields:
+                raise KeyError(
+                    "'fields' (required, non-empty list, for 'write')"
+                )
+            write_payload: list = []
+            for field in fields:
+                field_name = field.get("name")
+                if field_name is None:
+                    raise KeyError(
+                        "'name' (required within each 'fields' entry)"
+                    )
+                field_byte = _resolve_info_field_name(
+                    field_name, require_writeable=True
+                )
+                field_hours = field.get("hours")
+                field_minutes = field.get("minutes")
+                field_seconds = field.get("seconds")
+                field_frames = field.get("frames")
+                field_frame_rate = field.get("frame_rate")
+                if field_hours is None:
+                    raise KeyError(
+                        f"'hours' (required for field {field_name!r})"
+                    )
+                if field_minutes is None:
+                    raise KeyError(
+                        f"'minutes' (required for field {field_name!r})"
+                    )
+                if field_seconds is None:
+                    raise KeyError(
+                        f"'seconds' (required for field {field_name!r})"
+                    )
+                if field_frames is None:
+                    raise KeyError(
+                        f"'frames' (required for field {field_name!r})"
+                    )
+                if field_frame_rate is None:
+                    raise KeyError(
+                        f"'frame_rate' (required for field {field_name!r})"
+                    )
+                time_code_bytes = _encode_standard_time_code(
+                    field_hours, field_minutes, field_seconds,
+                    field_frames, field_frame_rate,
+                    subframes=field.get("subframes", 0),
+                    color_frame=field.get("color_frame", False),
+                    blank=field.get("blank", False),
+                    negative=field.get("negative", False),
+                    use_status_byte=field.get("use_status_byte", False),
+                    estimated=field.get("estimated", False),
+                    invalid=field.get("invalid", False),
+                    video_field_1=field.get("video_field_1", False),
+                    no_time_code=field.get("no_time_code", False),
+                )
+                write_payload.append(field_byte)
+                write_payload.extend(time_code_bytes)
+            return mido.Message(
+                "sysex",
+                data=(
+                    0x7F, device_id, 0x06, 0x40, len(write_payload),
+                    *write_payload,
+                ),
+                time=time,
+            )
+
+        if command == "update":
+            # UPDATE (0x43) — RP-013 p.26-27, confirmed via a targeted
+            # pdftotext pull of this command's own detail section.
+            # Exactly 2 sub-commands exist — a CORRECTION to earlier,
+            # survey-level research which suspected a 3rd "[CANCEL]"
+            # form; the actual second format is called [END], confirmed
+            # directly here:
+            #   [BEGIN] (0x00): <name(s)> — immediately transmits the
+            #     named field(s) AND adds them to an internal
+            #     auto-retransmit "list" (re-sent no more often than
+            #     the UPDATE RATE field allows, only when changed). No
+            #     special "all" meaning for BEGIN.
+            #   [END] (0x01): <name(s)> — removes field(s) from that
+            #     list. The spec states 0x7F ANYWHERE in the list means
+            #     "discontinue ALL UPDATEs" — exposed here as the
+            #     literal string `"all"` (a sentinel recognized ONLY
+            #     for action='end', short-circuiting the normal name
+            #     lookup), same "friendly value, not raw hex" principle
+            #     used everywhere else in this file. Passing `"all"`
+            #     for action='begin' is NOT special-cased (the spec
+            #     defines no such meaning there) — it correctly falls
+            #     through to the normal lookup and raises an "unknown
+            #     Information Field name" error, since "all" isn't
+            #     itself a registered field name.
+            #
+            # `names` reuses the EXISTING `_INFO_FIELD_NAMES` registry,
+            # same as `read` — no writeable restriction (BEGIN just
+            # transmits current contents, same as READ).
+            _UPDATE_ACTIONS = {"begin": 0x00, "end": 0x01}
+            action = message.get("action")
+            if action is None:
+                raise KeyError("'action' (required for 'update')")
+            if action not in _UPDATE_ACTIONS:
+                raise ValueError(
+                    f"'action' must be one of {sorted(_UPDATE_ACTIONS)} "
+                    f"for 'update', got {action!r}"
+                )
+            names = message.get("names")
+            if not names:
+                raise KeyError(
+                    "'names' (required, non-empty list, for 'update')"
+                )
+            update_name_bytes = []
+            for update_name in names:
+                if action == "end" and update_name == "all":
+                    update_name_bytes.append(0x7F)
+                else:
+                    update_name_bytes.append(
+                        _resolve_info_field_name(update_name)
+                    )
+            update_payload = (
+                _UPDATE_ACTIONS[action], *update_name_bytes,
+            )
+            return mido.Message(
+                "sysex",
+                data=(
+                    0x7F, device_id, 0x06, 0x43, len(update_payload),
+                    *update_payload,
+                ),
+                time=time,
+            )
+
         if command not in _MMC_COMMANDS:
             _mmc_special_commands = [
                 "locate", "step", "assign_system_master",
@@ -1918,6 +2340,7 @@ def _build_message(message: dict) -> "mido.Message":
                 "deferred_variable_play", "record_strobe_variable",
                 "wait", "resume", "drop_frame_adjust",
                 "move", "add", "subtract", "group", "procedure", "event",
+                "read", "write", "update",
             ]
             raise ValueError(
                 f"'command' must be one of "
