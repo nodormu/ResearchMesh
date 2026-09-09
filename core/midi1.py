@@ -27,7 +27,17 @@ Actions:
                    (Identity Request/Reply), and device_control (Master
                    Volume/Balance) — see each one's own inline comment in
                    `_build_message` further down in this file for full
-                   field details.
+                   field details. Two more typed convenience types, rpn
+                   and nrpn (Registered/Non-Registered Parameter Numbers),
+                   are NOT sysex-based and NOT single messages — selecting
+                   and setting one is a short SEQUENCE of Control Change
+                   messages on the wire, built by the separate
+                   `_build_rpn_or_nrpn_sequence` further down. Because of
+                   this, a successful 'send' response's 'sent' field is a
+                   single string for every message type EXCEPT rpn/nrpn,
+                   where it's a list of strings (one per message actually
+                   transmitted) — check whether 'sent' is a str or a list
+                   if parsing this programmatically.
   - poll         : non-blocking check for buffered messages on an open input
                    handle. This is a manual, caller-driven check (call it
                    repeatedly to see new messages) — there is currently no
@@ -1392,6 +1402,161 @@ def _build_message(message: dict) -> "mido.Message":
     )
 
 
+# Registered Parameter Numbers actually defined in the primary MIDI 1.0
+# Detailed Specification's Table IIIa — the only 5 that have an
+# MMA-assigned universal meaning. Values are LSB-first pairs as printed in
+# that table (all 5 happen to share MSB=0x00). Non-Registered Parameter
+# Numbers have no such universal names — 'nrpn' below always requires a
+# raw 'parameter_number' instead.
+_RPN_NAMED_PARAMETERS = {
+    "pitch_bend_sensitivity": 0x0000,
+    "fine_tuning": 0x0001,
+    "coarse_tuning": 0x0002,
+    "tuning_program_select": 0x0003,
+    "tuning_bank_select": 0x0004,
+}
+
+
+def _build_rpn_or_nrpn_sequence(message: dict, *, registered: bool) -> list:
+    """Build the short Control Change SEQUENCE that selects and sets an
+    RPN ('registered=True') or NRPN ('registered=False') parameter.
+
+    Unlike every sysex-based type in `_build_message` above (where one
+    F0...F7 IS one physical message), RPN/NRPN genuinely require MULTIPLE
+    wire messages — there is no single Status byte that encodes
+    "select+set" in one shot. Sequence, confirmed against the primary
+    spec's "Control Change"/"Registered and Non-Registered Parameter
+    Numbers" section (Channel Voice Messages chapter) and the worked RPN
+    example in the separate MIDI Tuning spec ("Changing Tuning Programs":
+    `Bn 64 03 65 00 06 tt`, i.e. RPN LSB(100)=03, RPN MSB(101)=00, Data
+    Entry MSB(6)=tt — confirms LSB-select-first ordering, not just
+    byte-packing order):
+      1. Parameter Number LSB  — CC100 (RPN) or CC98 (NRPN)
+      2. Parameter Number MSB  — CC101 (RPN) or CC99 (NRPN)
+      3. Data Entry MSB        — CC6
+      4. Data Entry LSB        — CC38 (SKIPPED if 'msb_only' is True — the
+         spec explicitly allows sending only the MSB "if seven bits of
+         resolution is sufficient", Channel Voice Messages chapter,
+         Control Change section)
+    Only the 'set' operation (Data Entry) is implemented. Data
+    Increment/Decrement (CC96/97) are DELIBERATELY NOT implemented — the
+    primary spec names these controllers but never defines what their
+    value byte actually means (Table III just lists "Data increment"/
+    "Data decrement" with no further detail), the same genuinely-
+    underspecified situation that already got MMC Shuttle deferred
+    elsewhere in this file. Use raw 'control_change' directly (controller
+    96 or 97) if a specific device's increment/decrement behavior is
+    already known.
+    """
+    channel = message.get("channel", 0)
+    time = message.get("time", 0)
+    type_name = "rpn" if registered else "nrpn"
+
+    if registered:
+        parameter = message.get("parameter")
+        parameter_number = message.get("parameter_number")
+        if parameter is not None and parameter_number is not None:
+            raise ValueError(
+                "specify only ONE of 'parameter' or 'parameter_number', "
+                "not both"
+            )
+        if parameter is None and parameter_number is None:
+            raise KeyError("'parameter' (or 'parameter_number')")
+        if parameter is not None:
+            if parameter not in _RPN_NAMED_PARAMETERS:
+                raise ValueError(
+                    f"'parameter' must be one of "
+                    f"{sorted(_RPN_NAMED_PARAMETERS)} (or use "
+                    f"'parameter_number' for a raw 14-bit value), got "
+                    f"{parameter!r}"
+                )
+            param_num = _RPN_NAMED_PARAMETERS[parameter]
+        else:
+            # Guaranteed not-None here (both-None already raised above,
+            # 'parameter is None' is exactly why we're in this branch) —
+            # mypy can't see across the separate if-statements though, same
+            # "group-level check, not per-field" gotcha as Standing Rule 5.
+            assert parameter_number is not None
+            param_num = parameter_number
+        select_lsb_cc, select_msb_cc = 100, 101
+    else:
+        parameter_number = message.get("parameter_number")
+        if parameter_number is None:
+            raise KeyError("'parameter_number'")
+        param_num = parameter_number
+        select_lsb_cc, select_msb_cc = 98, 99
+
+    if not (0 <= param_num <= 16383):
+        raise ValueError(
+            f"parameter number must be 0-16383, got {param_num!r}"
+        )
+
+    value = message.get("value")
+    if value is None:
+        raise KeyError("'value'")
+    msb_only = message.get("msb_only", False)
+
+    msgs = [
+        mido.Message(
+            "control_change", channel=channel, control=select_lsb_cc,
+            value=param_num & 0x7F, time=time,
+        ),
+        mido.Message(
+            "control_change", channel=channel, control=select_msb_cc,
+            value=(param_num >> 7) & 0x7F, time=0,
+        ),
+    ]
+
+    if msb_only:
+        if not (0 <= value <= 127):
+            raise ValueError(
+                f"'value' must be 0-127 when 'msb_only' is True for "
+                f"'{type_name}', got {value!r}"
+            )
+        msgs.append(mido.Message(
+            "control_change", channel=channel, control=6, value=value,
+            time=0,
+        ))
+    else:
+        if not (0 <= value <= 16383):
+            raise ValueError(
+                f"'value' must be 0-16383 for '{type_name}', got {value!r}"
+            )
+        msgs.append(mido.Message(
+            "control_change", channel=channel, control=6,
+            value=(value >> 7) & 0x7F, time=0,
+        ))
+        msgs.append(mido.Message(
+            "control_change", channel=channel, control=38,
+            value=value & 0x7F, time=0,
+        ))
+
+    return msgs
+
+
+def _build_message_sequence(message: dict) -> list:
+    """Build ONE OR MORE mido.Message objects from a tool-supplied dict —
+    a thin wrapper AROUND `_build_message`, not a replacement for it.
+
+    `_build_message` itself is completely UNCHANGED (still returns exactly
+    one message, still used directly wherever only sysex messages are
+    valid, e.g. the '.syx' file writer below) — every existing message
+    type keeps flowing through that same, already-proven single-message
+    function exactly as before. This wrapper exists ONLY because 'rpn' and
+    'nrpn' are architecturally different: they need a short SEQUENCE of
+    Control Change messages on the wire (see `_build_rpn_or_nrpn_sequence`
+    above), which no single `mido.Message` can represent. Every other
+    message type still produces exactly one message here, just wrapped in
+    a 1-element list for a uniform return type.
+    """
+    msg_type = message.get("type")
+    if msg_type == "rpn":
+        return _build_rpn_or_nrpn_sequence(message, registered=True)
+    if msg_type == "nrpn":
+        return _build_rpn_or_nrpn_sequence(message, registered=False)
+    return [_build_message(message)]
+
+
 # The 17 file-only "meta" message types, verified live against
 # mido.midifiles.meta._META_SPEC_BY_TYPE before writing any code (same
 # "check mido's real spec, don't guess kwargs" discipline used throughout
@@ -1451,14 +1616,23 @@ def _send(tool_input: dict) -> str:
         return _err(f"handle {handle!r} is an input port, cannot send on it")
 
     try:
-        msg = _build_message(message)
-        port.send(msg)
+        msgs = _build_message_sequence(message)
+        for msg in msgs:
+            port.send(msg)
     except KeyError as e:
         return _err(f"message missing required field: {e}")
     except Exception as e:
         return _err(f"send failed: {type(e).__name__}: {e}")
 
-    return json.dumps({"status": "ok", "sent": str(msg)})
+    # Every existing message type still produces exactly one physical
+    # message — keep the response shape EXACTLY as before for those
+    # ('sent': a single string) rather than changing the contract for
+    # everyone just because 'rpn'/'nrpn' need more than one. Only when a
+    # type genuinely sent multiple messages (currently just rpn/nrpn) does
+    # 'sent' become a list of strings instead.
+    if len(msgs) == 1:
+        return json.dumps({"status": "ok", "sent": str(msgs[0])})
+    return json.dumps({"status": "ok", "sent": [str(m) for m in msgs]})
 
 
 def _poll(tool_input: dict) -> str:
@@ -1618,9 +1792,18 @@ def _write_midi_file(tool_input: dict) -> str:
                 msg_type = m.get("type") if isinstance(m, dict) else None
                 try:
                     if msg_type in _META_TYPES:
-                        msg = _build_meta_message(m)
+                        track.append(_build_meta_message(m))
                     else:
-                        msg = _build_message(m)
+                        # Almost every type produces exactly one message
+                        # here; 'rpn'/'nrpn' are the only ones that expand
+                        # to a short sequence (see
+                        # `_build_message_sequence`'s own docstring) — the
+                        # sequence's own internal timing (first message
+                        # carries the caller's requested delta, the rest
+                        # are time=0, i.e. sent back-to-back) already
+                        # matches how a real RPN/NRPN select+set is meant
+                        # to look in a recorded track.
+                        track.extend(_build_message_sequence(m))
                 except KeyError as e:
                     return _err(
                         f"track {ti} message {mi} missing required field: {e}"
@@ -1630,7 +1813,6 @@ def _write_midi_file(tool_input: dict) -> str:
                         f"track {ti} message {mi} invalid: "
                         f"{type(e).__name__}: {e}"
                     )
-                track.append(msg)
             mf.tracks.append(track)
         try:
             mf.save(path)
