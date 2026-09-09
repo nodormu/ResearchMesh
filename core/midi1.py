@@ -23,7 +23,7 @@ Actions:
                    System Real-Time: clock, start, stop, continue,
                    active_sensing, reset. System Exclusive: sysex
                    (arbitrary-payload — see the SysEx note below), plus
-                   six typed convenience messages built on top of that
+                   twelve typed convenience messages built on top of that
                    same sysex mechanism: mtc_full (MIDI Time Code Full
                    Message), mmc (MIDI Machine Control transport commands),
                    msc (MIDI Show Control General Category commands),
@@ -35,19 +35,27 @@ Actions:
                    mtc_cueing (MTC Real-Time Cueing Set-Up messages), and
                    mtc_cueing_nrt (the fuller Non-Real-Time Cueing
                    Set-Up messages, incl. Delete variants and 5 Special
-                   sub-types), and file_dump (transfer an arbitrary file
+                   sub-types), file_dump (transfer an arbitrary file
                    — request/header/data_packet plus the ack/nak/cancel/
-                   wait/eof handshake flags) — see each one's own inline
-                   comment in `_build_message` further down in this file
-                   for full field details. Two more typed convenience types, rpn
-                   and nrpn (Registered/Non-Registered Parameter Numbers),
-                   are NOT sysex-based and NOT single messages — selecting
-                   and setting one is a short SEQUENCE of Control Change
-                   messages on the wire, built by the separate
-                   `_build_rpn_or_nrpn_sequence` further down. Because of
+                   wait/eof handshake flags), and mtc_nak (MTC "sync
+                   dropped" notification — a small dedicated alias for
+                   the same Non-Real-Time NAK handshake file_dump's own
+                   'nak' command already builds, without file_dump's
+                   unrelated required 'packet_number') — see each one's
+                   own inline comment in `_build_message` further down in
+                   this file for full field details. Three more typed
+                   convenience types, rpn and nrpn (Registered/Non-
+                   Registered Parameter Numbers) and mtc_quarter_frame_
+                   sequence (the 8-message Quarter Frame encoding of one
+                   SMPTE time — same information as mtc_full, different
+                   wire format, for receivers that only parse Quarter
+                   Frame), are NOT single messages — each is a short
+                   SEQUENCE built by the separate `_build_rpn_or_nrpn_
+                   sequence`/`_build_quarter_frame_sequence` further down.
+                   Because of
                    this, a successful 'send' response's 'sent' field is a
-                   single string for every message type EXCEPT rpn/nrpn,
-                   where it's a list of strings (one per message actually
+                   single string for every message type EXCEPT these
+                   three, where it's a list of strings (one per message actually
                    transmitted) — check whether 'sent' is a str or a list
                    if parsing this programmatically.
   - poll         : check for buffered messages on an open input handle.
@@ -432,14 +440,30 @@ TOOLS = [
                         "type": {
                             "type": "string",
                             "enum": [
+                                # Channel messages
                                 "note_on", "note_off", "control_change",
                                 "program_change", "pitchwheel", "aftertouch",
-                                "polytouch",
+                                "polytouch", "channel_mode",
+                                # System Common
                                 "quarter_frame", "songpos", "song_select",
                                 "tune_request",
+                                # System Real-Time
                                 "clock", "start", "stop", "continue",
-                                "active_sensing", "reset", "sysex",
-                                "mtc_full", "mmc", "msc",
+                                "active_sensing", "reset",
+                                # System Exclusive: generic passthrough...
+                                "sysex",
+                                # ...plus typed convenience wrappers built
+                                # on top of it, one mido.Message each
+                                "mtc_full", "mtc_nak", "mmc", "msc",
+                                "gm_system", "device_inquiry",
+                                "device_control", "midi_tuning", "notation",
+                                "mtc_cueing", "mtc_cueing_nrt", "file_dump",
+                                # Typed convenience types that build a
+                                # SEQUENCE of multiple wire messages instead
+                                # of one (see _build_message_sequence) —
+                                # 'sent' comes back as a list of strings
+                                # for these three, not a single string
+                                "rpn", "nrpn", "mtc_quarter_frame_sequence",
                             ],
                         },
                         "channel": {"type": "integer"},
@@ -498,25 +522,41 @@ TOOLS = [
                         "command": {
                             "type": "string",
                             "enum": [
-                                # mmc values
+                                # mmc values (36 total: the original 13
+                                # no-data transport commands, PLUS 23
+                                # added later — further transport
+                                # extensions, the procedure/event/group
+                                # trio, and the Information-Field register
+                                # commands read/write/masked_write/update)
                                 "stop", "play", "deferred_play",
                                 "fast_forward", "rewind", "record_strobe",
                                 "record_exit", "record_pause", "pause",
                                 "eject", "chase", "command_error_reset",
-                                "mmc_reset", "locate",
+                                "mmc_reset", "locate", "step",
+                                "assign_system_master", "generator_command",
+                                "midi_time_code_command", "variable_play",
+                                "search", "shuttle",
+                                "deferred_variable_play",
+                                "record_strobe_variable", "wait", "resume",
+                                "drop_frame_adjust", "move", "add",
+                                "subtract", "group", "procedure", "event",
+                                "read", "write", "masked_write", "update",
                                 # msc values (a DIFFERENT meaning of the
                                 # same field name, disambiguated by the
-                                # message's own 'type' — 'go'/'reset'
-                                # deliberately don't clash with any mmc
-                                # value above)
-                                "go", "resume", "timed_go", "load", "set",
-                                "fire", "all_off", "restore", "reset",
-                                "go_off",
+                                # message's own 'type' — 'stop'/'resume'
+                                # are DELIBERATELY shared spellings with
+                                # mmc above, both are the same real-world
+                                # gesture in each protocol; everything
+                                # else here is msc-only)
+                                "timed_go", "load", "set", "fire",
+                                "all_off", "restore", "reset", "go_off",
+                                "go",
                             ],
                             "description": (
-                                "Required for 'mmc' (14 values) or 'msc' "
-                                "(11 DIFFERENT values, sharing this same "
-                                "field name for the analogous role) — "
+                                "Required for 'mmc' (36 values) or 'msc' "
+                                "(11 values, 2 of which — 'stop'/"
+                                "'resume' — deliberately share a "
+                                "spelling with an mmc value above) — "
                                 "which set applies depends on the "
                                 "message's own 'type'."
                             ),
@@ -1724,6 +1764,40 @@ def _build_message(message: dict) -> "mido.Message":
         return mido.Message(
             "sysex",
             data=(0x7F, device_id, 0x01, 0x01, hr_byte, minutes, seconds, frames),
+            time=time,
+        )
+    if msg_type == "mtc_nak":
+        # MTC "synchronization dropped" notification — RP-004/008 p.4:
+        # "If synchronization is dropped the transmitter should send a
+        # NAK message. The receiver should interpret this as 'tape has
+        # stopped' and should turn of any lingering notes, etc." The doc
+        # gives no separate wire format of its own for this — it's
+        # reusing the SAME generic Universal Non-Real-Time handshake
+        # family (sub-ID#1 7E, "NAK") that 'file_dump's own 'nak' command
+        # already builds. That command still exists and produces
+        # IDENTICAL bytes, but requiring a 'packet_number' (which packet
+        # failed) makes no sense for "MTC lock was lost" — there's no
+        # packet here, just a lock-loss notification — and burying this
+        # under 'file_dump' means nobody would think to look there for an
+        # MTC concern. This is a small, dedicated, better-named/
+        # documented alternative for exactly this one use, not a new wire
+        # format: F0 7E <device_id> 7E <packet_number=0 default> F7.
+        # `device_id` defaults to 0x7F (all devices), same convention as
+        # 'mtc_full'/'mtc_quarter_frame_sequence' above — a genuine
+        # "lock lost" notification is naturally broadcast-style, unlike
+        # 'file_dump's point-to-point transfer (which has no default for
+        # exactly that reason).
+        device_id = message.get("device_id", 0x7F)
+        packet_number = message.get("packet_number", 0)
+        if not (0 <= device_id <= 127):
+            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
+        if not (0 <= packet_number <= 127):
+            raise ValueError(
+                f"'packet_number' must be 0-127, got {packet_number!r}"
+            )
+        return mido.Message(
+            "sysex",
+            data=(0x7E, device_id, 0x7E, packet_number),
             time=time,
         )
     if msg_type == "mmc":
@@ -3994,6 +4068,105 @@ def _build_rpn_or_nrpn_sequence(message: dict, *, registered: bool) -> list:
     return msgs
 
 
+def _build_quarter_frame_sequence(message: dict) -> list:
+    """Build the 8 mido 'quarter_frame' messages that together encode ONE
+    complete SMPTE time (RP-004/008, "MIDI Time Code", pp.1-4 — confirmed
+    via a targeted pdftotext pull, cross-checked byte-for-byte against the
+    spec's own worked example: 01:37:52:16 at 30fps non-drop -> F1 00,
+    F1 11, F1 24, F1 33, F1 45, F1 52, F1 61, F1 76, reproduced exactly by
+    this function).
+
+    SAME required fields as 'mtc_full' (hours/minutes/seconds/frames/
+    frame_rate, no defaults — guessing 'frame_rate' wrong changes what the
+    position means downstream, same reasoning as 'mtc_full'), because this
+    is architecturally the SAME operation as 'mtc_full' — "encode this one
+    point in time" — just using the Quarter Frame wire format instead of
+    the Full Message format. Some real devices/receivers only parse
+    Quarter Frame (not every Full Message), so this exists as an
+    alternative encoding of identical information, NOT a different
+    feature. Optional 'direction' ("forward", default, or "reverse")
+    controls message ORDER only (7->0 instead of 0->7) — the per-message
+    nibble VALUES are identical either way, only the sequence flips (the
+    spec explicitly notes tape running backwards sends the same 8
+    messages in reverse order).
+
+    Scope boundary, stated plainly: this produces one CORRECT, complete
+    8-message snapshot of a specific instant — it is NOT a substitute for
+    a real free-running MTC master clock (which needs continuous,
+    precisely-timed quarter-frame messages emitted by an external
+    scheduler roughly every 2 frames, forever, while "playing" — well
+    beyond what a single tool call can already do for any other message
+    type in this file either). Same "one-shot, not a live generator"
+    boundary 'mtc_full' already has, just using different wire bytes.
+
+    Byte-splitting mechanics: each of frames (0-29)/seconds (0-59)/
+    minutes (0-59) is sent as its own LS-nibble-then-MS-nibble pair
+    (message types 0/1, 2/3, 4/5 respectively) — trivial since none of
+    these exceed 6 bits. Hours is the one exception: its byte is NOT just
+    the raw hour value — reusing "_encode_smpte_hour_byte" (the exact
+    same helper 'mtc_full'/MMC's 'locate' already share) packs the 2-bit
+    frame-rate type into bits 5-6 alongside the 5-bit hour value first,
+    THEN that combined byte gets the same LS/MS nibble split as the
+    others (message types 6/7) — confirmed exactly against the spec's own
+    worked example, where hours=1/type=30fps-non-drop(0b11) produces
+    byte 0x61, split into LS=1 (message 6) and MS=6 (message 7) — matching
+    the spec's own literal explanation: "the value transmitted is '6'
+    because the SMPTE Type (11 binary) is encoded in bits 5 and 6".
+    """
+    hours = message.get("hours")
+    minutes = message.get("minutes")
+    seconds = message.get("seconds")
+    frames = message.get("frames")
+    frame_rate = message.get("frame_rate")
+    if hours is None:
+        raise KeyError("'hours'")
+    if minutes is None:
+        raise KeyError("'minutes'")
+    if seconds is None:
+        raise KeyError("'seconds'")
+    if frames is None:
+        raise KeyError("'frames'")
+    if frame_rate is None:
+        raise KeyError("'frame_rate'")
+    if not (0 <= minutes <= 59):
+        raise ValueError(f"'minutes' must be 0-59, got {minutes!r}")
+    if not (0 <= seconds <= 59):
+        raise ValueError(f"'seconds' must be 0-59, got {seconds!r}")
+    if not (0 <= frames <= 29):
+        raise ValueError(f"'frames' must be 0-29, got {frames!r}")
+
+    direction = message.get("direction", "forward")
+    if direction not in ("forward", "reverse"):
+        raise ValueError(
+            f"'direction' must be 'forward' or 'reverse', got {direction!r}"
+        )
+
+    time = message.get("time", 0)
+    # _encode_smpte_hour_byte itself validates 'hours' (0-23) and
+    # 'frame_rate' — no need to duplicate those checks here.
+    hr_byte = _encode_smpte_hour_byte(hours, frame_rate)
+
+    # Message-type order 0-7 is FIXED by the spec regardless of
+    # 'direction' (direction only changes which order these 8 VALUES get
+    # transmitted in, not which value goes with which type number).
+    values_by_type = [
+        frames & 0xF, (frames >> 4) & 0xF,
+        seconds & 0xF, (seconds >> 4) & 0xF,
+        minutes & 0xF, (minutes >> 4) & 0xF,
+        hr_byte & 0xF, (hr_byte >> 4) & 0xF,
+    ]
+
+    type_order = range(8) if direction == "forward" else range(7, -1, -1)
+    return [
+        mido.Message(
+            "quarter_frame", frame_type=frame_type,
+            frame_value=values_by_type[frame_type],
+            time=(time if position == 0 else 0),
+        )
+        for position, frame_type in enumerate(type_order)
+    ]
+
+
 def _build_message_sequence(message: dict) -> list:
     """Build ONE OR MORE mido.Message objects from a tool-supplied dict —
     a thin wrapper AROUND `_build_message`, not a replacement for it.
@@ -4014,6 +4187,8 @@ def _build_message_sequence(message: dict) -> list:
         return _build_rpn_or_nrpn_sequence(message, registered=True)
     if msg_type == "nrpn":
         return _build_rpn_or_nrpn_sequence(message, registered=False)
+    if msg_type == "mtc_quarter_frame_sequence":
+        return _build_quarter_frame_sequence(message)
     return [_build_message(message)]
 
 
