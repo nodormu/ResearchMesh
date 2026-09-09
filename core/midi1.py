@@ -50,17 +50,33 @@ Actions:
                    where it's a list of strings (one per message actually
                    transmitted) — check whether 'sent' is a str or a list
                    if parsing this programmatically.
-  - poll         : non-blocking check for buffered messages on an open input
-                   handle. This is a manual, caller-driven check (call it
-                   repeatedly to see new messages) — there is currently no
-                   event-driven/callback-based receive model, and none is
-                   planned unless specifically requested. Decodes ANY
-                   incoming mido message generically (str(msg)), so it
-                   already reports message types beyond what `send`
-                   explicitly constructs — confirmed live during hardware
-                   testing, where `poll` correctly surfaced `aftertouch`
-                   messages from a real keyboard before `send` even had
-                   aftertouch support.
+  - poll         : check for buffered messages on an open input handle.
+                   Every message carries a real wall-clock 'received_at'
+                   timestamp (epoch seconds, float) captured at the exact
+                   moment it arrived — attached by a dedicated capture
+                   callback registered at 'open' time, NOT at poll() call
+                   time, so gaps between messages are measurable even if
+                   poll() itself is only called irregularly. Nothing is
+                   lost between calls while the port stays open: messages
+                   are captured continuously into a bounded per-handle
+                   buffer (10,000 most recent; oldest silently dropped
+                   only if that's exceeded between polls) regardless of
+                   whether/how often poll() runs.
+                   By default (no 'timeout_seconds', or 0) this returns
+                   instantly with whatever's already buffered — the
+                   original non-blocking behavior, unchanged. Pass
+                   'timeout_seconds' (0-60) to instead BLOCK until either
+                   something arrives or that many seconds elapse — wakes
+                   up as soon as a message shows up rather than always
+                   waiting the full duration, useful for "wait for the
+                   device to respond to what I just sent" instead of
+                   guessing a sleep duration and polling blind.
+                   Decodes ANY incoming mido message generically
+                   (str(msg)), so it already reports message types beyond
+                   what `send` explicitly constructs — confirmed live
+                   during hardware testing, where `poll` correctly
+                   surfaced `aftertouch` messages from a real keyboard
+                   before `send` even had aftertouch support.
 
                    EXCEPTION: `active_sensing` will NEVER show up in `poll`
                    results, even though `send` can transmit it fine. mido's
@@ -139,6 +155,9 @@ import asyncio
 import itertools
 import json
 import os
+import threading
+import time
+from collections import deque
 
 try:
     import mido
@@ -216,10 +235,18 @@ TOOLS = [
             "path management) is deliberately NOT supported — use the "
             "generic 'sysex' action directly if ever needed. "
             "All of the above are sent on an open output handle. "
-            "'poll' does a "
-            "non-blocking check for buffered messages on an open input "
-            "handle — decodes any incoming MIDI message generically, not "
-            "just the types 'send' explicitly supports. 'close' closes a "
+            "'poll' checks for buffered messages on an open input handle "
+            "— decodes any incoming MIDI message generically, not just "
+            "the types 'send' explicitly supports. Each returned message "
+            "includes a real wall-clock 'received_at' timestamp (epoch "
+            "seconds) captured at actual arrival time, and nothing is "
+            "lost between calls while the port stays open (continuously "
+            "captured into a bounded 10,000-message buffer regardless of "
+            "poll timing). By default returns instantly with whatever's "
+            "already buffered; pass optional 'timeout_seconds' (0-60, "
+            "default 0) to instead BLOCK until either a message arrives "
+            "or that many seconds elapse, waking up early rather than "
+            "always waiting the full duration. 'close' closes a "
             "previously opened handle. Handles only live for the current "
             "ResearchMesh process — reopen after a restart. "
             "'read_midi_file' reads a .mid/.midi or .syx file from disk "
@@ -282,6 +309,18 @@ TOOLS = [
                     "description": (
                         "Handle returned by a previous 'open' call. Required "
                         "for 'close', 'send', and 'poll'."
+                    ),
+                },
+                "timeout_seconds": {
+                    "type": "number",
+                    "description": (
+                        "Optional for 'poll'. 0-60, default 0 (instant, "
+                        "non-blocking — returns immediately with whatever "
+                        "is already buffered). A value above 0 instead "
+                        "BLOCKS until either a message arrives or this "
+                        "many seconds elapse, returning early as soon as "
+                        "something shows up rather than always waiting "
+                        "the full duration."
                     ),
                 },
                 "path": {
@@ -602,6 +641,35 @@ _TOOL_NAMES = {t["name"] for t in TOOLS}
 _OPEN_PORTS: dict = {}
 _HANDLE_COUNTER = itertools.count(1)
 
+# Per-INPUT-handle message buffer + wakeup event, populated by a real
+# rtmidi-level callback registered at 'open' time (see _open below) rather
+# than relying on mido's own default behavior (an untimed internal queue
+# only drainable via port.iter_pending()). Confirmed live: mido's rtmidi
+# backend already registers its OWN background callback the moment a port
+# opens, continuously feeding an UNBOUNDED queue regardless of whether/how
+# often 'poll' gets called — so messages were never actually being lost
+# between polls, contrary to what "manual, caller-driven" might suggest.
+# What WAS missing: (1) a wall-clock arrival timestamp (mido's own queue
+# only carries relative delta-time, meant for file playback, not live
+# capture) and (2) any way to block-and-wait for something to arrive
+# instead of only "check right now". This buffer/event pair, plus a
+# CUSTOM callback (which REPLACES mido's default queue -- Input only ever
+# feeds ONE destination, see mido/backends/rtmidi.py's
+# `(self._callback or self._queue.put)(msg)`), fixes both: every message
+# gets a real time.time() timestamp at the moment the callback fires (on
+# rtmidi's own background OS thread), and the Event lets 'poll' block with
+# a caller-specified timeout instead of only ever returning instantly.
+#
+# Bounded via maxlen to avoid unbounded memory growth if a port is left
+# open and unpolled for a long time on a busy input (e.g. dense MIDI clock
+# or CC automation) -- deque(maxlen=N) silently drops the OLDEST entries
+# once full, same "graceful degradation over unbounded growth" tradeoff
+# real hardware sysex buffers already make elsewhere in this file (e.g.
+# the Standard Track Bitmap's own "not included = assumed inactive").
+_INPUT_BUFFER_MAXLEN = 10_000
+_INPUT_BUFFERS: dict = {}
+_INPUT_EVENTS: dict = {}
+
 
 def handles(name: str) -> bool:
     return name in _TOOL_NAMES
@@ -614,34 +682,69 @@ def _err(message: str) -> str:
 # Guards `open`/`send`/`close` against a hung ALSA/JACK driver or a
 # misbehaving physical device — `_run` calls straight into python-rtmidi's C
 # bindings via `asyncio.to_thread`, and without this a stuck call would wait
-# forever with zero feedback to the caller. `poll` is the one action that
-# doesn't need this (mido's `iter_pending()` is confirmed non-blocking — it
-# just loops `poll()` until it returns None), but it's cheap/harmless to
-# cover it too rather than special-case it out.
+# forever with zero feedback to the caller.
+#
+# `poll` USED to be exempt from needing any real thought here (mido's old
+# `iter_pending()` path was non-blocking, so it was covered by this wrapper
+# only incidentally/harmlessly). That's no longer true now that `poll`
+# supports a genuine blocking wait via `timeout_seconds` (see `_poll` and
+# _MAX_POLL_TIMEOUT below) — a caller legitimately asking to wait, say, 30
+# real seconds for a device's reply must not get cut off early by this
+# wrapper's own blanket timeout. `execute()` below computes the actual
+# `asyncio.wait_for` timeout per-call instead of always using the same
+# constant, specifically to accommodate that.
 #
 # Known limitation, stated plainly rather than hidden: this makes the *tool
 # call* return promptly on a timeout, but does NOT kill the underlying OS
 # thread — Python cannot forcibly cancel a running thread, so a genuinely
-# stuck rtmidi call keeps occupying its slot in the shared default
-# asyncio thread-pool executor (the same pool nearly every other local tool
-# in this app also uses) until the whole process exits. Fixing that half
-# would mean moving off `asyncio.to_thread` onto something killable (e.g. a
-# subprocess) — deliberately out of scope here; this timeout only bounds how
-# long the *caller* waits, not how long the leak persists.
+# stuck rtmidi call (or a `poll` blocked in `event.wait()`) keeps occupying
+# its slot in the shared default asyncio thread-pool executor (the same
+# pool nearly every other local tool in this app also uses) until the
+# whole process exits. Fixing that half would mean moving off
+# `asyncio.to_thread` onto something killable (e.g. a subprocess) —
+# deliberately out of scope here; this timeout only bounds how long the
+# *caller* waits, not how long the leak persists. This is WHY
+# _MAX_POLL_TIMEOUT (below) is capped at 60s rather than left unbounded —
+# a longer blocking wait means a longer-lived potential thread-pool leak
+# if the caller is ever abandoned mid-wait.
 _DEFAULT_TIMEOUT = 10.0
+
+# Upper bound on `poll`'s own `timeout_seconds` parameter (see `_poll`) — a
+# generous allowance for "wait for a device to respond" without permitting
+# an effectively-unbounded blocking wait (see the thread-pool-leak note
+# above for why that matters more here than for other actions).
+_MAX_POLL_TIMEOUT = 60.0
+
+# How much longer than the caller's own requested `timeout_seconds` this
+# wrapper waits before giving up on a blocking `poll` — must be enough
+# that `_poll`'s own `event.wait(timeout=timeout_seconds)` always has a
+# chance to return (empty-handed or not) on its own terms first, rather
+# than racing exactly at the boundary and this outer wrapper winning by a
+# hair and reporting a generic "hung driver" timeout for what was actually
+# just an empty, well-behaved wait.
+_POLL_TIMEOUT_MARGIN = 2.0
 
 
 async def execute(name: str, tool_input: dict) -> str:
     if name != "midi1":
         return json.dumps({"error": f"unknown midi1 tool {name!r}"})
+
+    effective_timeout = _DEFAULT_TIMEOUT
+    if tool_input.get("action") == "poll":
+        requested = tool_input.get("timeout_seconds")
+        if isinstance(requested, (int, float)) and not isinstance(requested, bool):
+            effective_timeout = max(
+                _DEFAULT_TIMEOUT, requested + _POLL_TIMEOUT_MARGIN
+            )
+
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_run, tool_input), timeout=_DEFAULT_TIMEOUT
+            asyncio.to_thread(_run, tool_input), timeout=effective_timeout
         )
     except TimeoutError:
         return _err(
             f"midi1 action {tool_input.get('action')!r} timed out after "
-            f"{_DEFAULT_TIMEOUT}s — a MIDI driver or device may be hung "
+            f"{effective_timeout}s — a MIDI driver or device may be hung "
             "(the underlying blocking call could not be cancelled and may "
             "still be running in the background; see the note above "
             "_DEFAULT_TIMEOUT in core/midi1.py)"
@@ -695,18 +798,41 @@ def _open(tool_input: dict) -> str:
     if direction not in ("input", "output"):
         return _err("'direction' must be 'input' or 'output' for 'open'")
 
+    handle = f"midi1-{next(_HANDLE_COUNTER)}"
+
     try:
         if direction == "input":
-            port = mido.open_input(port_name)
+            # Own buffer + event, wired in via a CUSTOM callback (see the
+            # _INPUT_BUFFERS/_INPUT_EVENTS comment above for why this
+            # replaces rather than supplements mido's default queue).
+            # `msg` here is already a fully-parsed mido.Message — rtmidi's
+            # raw bytes + mido's own Parser have already run by the time
+            # this fires (see mido/backends/rtmidi.py's
+            # Input._callback_wrapper). This callback runs on rtmidi's own
+            # background OS thread, NOT the thread `_poll` runs on — deque
+            # append/popleft and Event.set/.wait/.clear are all
+            # individually GIL-safe for this single-producer/single-
+            # consumer pattern, no extra lock needed.
+            buf: deque = deque(maxlen=_INPUT_BUFFER_MAXLEN)
+            event = threading.Event()
+
+            def _on_message(msg: "mido.Message", _buf: deque = buf, _event: threading.Event = event) -> None:
+                _buf.append((time.time(), str(msg)))
+                _event.set()
+
+            port = mido.open_input(port_name, callback=_on_message)
+            _INPUT_BUFFERS[handle] = buf
+            _INPUT_EVENTS[handle] = event
         else:
             port = mido.open_output(port_name)
     except Exception as e:
+        _INPUT_BUFFERS.pop(handle, None)
+        _INPUT_EVENTS.pop(handle, None)
         return _err(
             f"failed to open {direction} port {port_name!r}: "
             f"{type(e).__name__}: {e}"
         )
 
-    handle = f"midi1-{next(_HANDLE_COUNTER)}"
     _OPEN_PORTS[handle] = (direction, port)
     return json.dumps(
         {"status": "ok", "handle": handle, "direction": direction, "port_name": port_name}
@@ -719,6 +845,9 @@ def _close(tool_input: dict) -> str:
     if entry is None:
         return _err(f"no open port for handle {handle!r}")
     _, port = entry
+    # Harmless .pop(..., None) for an output handle (never had an entry).
+    _INPUT_BUFFERS.pop(handle, None)
+    _INPUT_EVENTS.pop(handle, None)
     try:
         port.close()
     except Exception as e:
@@ -740,6 +869,8 @@ def close_all() -> None:
     """
     for handle in list(_OPEN_PORTS):
         _, port = _OPEN_PORTS.pop(handle)
+        _INPUT_BUFFERS.pop(handle, None)
+        _INPUT_EVENTS.pop(handle, None)
         try:
             port.close()
         except Exception as e:
@@ -3969,14 +4100,59 @@ def _poll(tool_input: dict) -> str:
     entry = _OPEN_PORTS.get(handle) if handle else None
     if entry is None:
         return _err(f"no open port for handle {handle!r}")
-    direction, port = entry
+    direction, _port = entry
     if direction != "input":
         return _err(f"handle {handle!r} is an output port, cannot poll it")
 
-    try:
-        messages = [str(msg) for msg in port.iter_pending()]
-    except Exception as e:
-        return _err(f"poll failed: {type(e).__name__}: {e}")
+    buf = _INPUT_BUFFERS.get(handle)
+    event = _INPUT_EVENTS.get(handle)
+    if buf is None or event is None:
+        # Should be unreachable in practice (every 'input' _OPEN_PORTS
+        # entry gets a matching buffer/event at 'open' time) -- guarded
+        # anyway rather than assuming, per this file's own "never trust
+        # invariants silently" habit.
+        return _err(
+            f"no message buffer for handle {handle!r} (internal "
+            "inconsistency — the port may not have been opened correctly)"
+        )
+
+    timeout_seconds = tool_input.get("timeout_seconds", 0)
+    if not isinstance(timeout_seconds, (int, float)) or isinstance(timeout_seconds, bool):
+        return _err("'timeout_seconds' must be a number (0-60, default 0)")
+    if not (0 <= timeout_seconds <= _MAX_POLL_TIMEOUT):
+        return _err(
+            f"'timeout_seconds' must be 0-{_MAX_POLL_TIMEOUT}, got "
+            f"{timeout_seconds!r}"
+        )
+
+    # Block ONLY if nothing is buffered yet AND the caller actually asked
+    # to wait (default 0 preserves the original always-instant behavior
+    # exactly). Safe against the lost-wakeup race: if a message arrives in
+    # the tiny window between the `if not buf` check and calling
+    # event.wait(), the Event is already set by then and wait() returns
+    # immediately rather than blocking the full timeout — Event.wait()
+    # doesn't require the setter to happen strictly "during" the wait
+    # call, only that .set() ran at some point since the last .clear().
+    if not buf and timeout_seconds > 0:
+        event.wait(timeout=timeout_seconds)
+
+    # Drain whatever's already buffered. Every message here already has a
+    # real wall-clock 'received_at' timestamp attached at the moment
+    # rtmidi's own callback fired (see _open/_on_message above) — NOT a
+    # "time of this poll() call" timestamp, so gaps between messages are
+    # now measurable even if 'poll' itself is called irregularly.
+    #
+    # Clearing the event HERE (always, whether or not a blocking wait
+    # happened above) rather than only after waiting avoids a stale-set
+    # flag persisting from an earlier drain and causing some LATER
+    # blocking poll() call to return instantly with nothing new to show
+    # (e.g. after a non-blocking poll drains everything and happens to
+    # leave the event set from that same batch).
+    event.clear()
+    messages = []
+    while buf:
+        received_at, msg_str = buf.popleft()
+        messages.append({"received_at": received_at, "message": msg_str})
 
     return json.dumps({"status": "ok", "messages": messages})
 
