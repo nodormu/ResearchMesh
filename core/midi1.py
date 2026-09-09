@@ -833,6 +833,24 @@ _INFO_FIELD_NAMES = {
     "gp5": 0x0D,
     "gp6": 0x0E,
     "gp7": 0x0F,
+    # Standard Track Bitmap fields (RP-013 p.17 opcode table + p.?? "STANDARD
+    # TRACK BITMAP" section, confirmed via targeted pdftotext pull) -- a
+    # DIFFERENT wire format from every field above (variable-length
+    # <count><bitmap bytes...>, one bit per track, NOT the 5-byte Standard
+    # Time Code). See _TRACK_BITMAP_INFO_FIELDS/_MASK_WRITEABLE_INFO_FIELDS
+    # below -- these 5 names are deliberately NOT added to
+    # _WRITEABLE_INFO_FIELDS above, since that set (and everything gated by
+    # it: 'write', 'move'/'add'/'subtract'/'drop_frame_adjust') only knows
+    # how to encode/decode Standard Time Code. TRACK_RECORD_STATUS is
+    # genuinely read-only per the spec; the other 4 are read/write but only
+    # reachable today via 'read'/'update' (whole-field) or 'masked_write'
+    # (single bit-masked byte) -- a future full-bitmap 'write' path is not
+    # built.
+    "track_record_status": 0x4E,
+    "track_record_ready": 0x4F,
+    "track_sync_monitor": 0x52,
+    "track_input_monitor": 0x53,
+    "track_mute": 0x62,
 }
 
 # The subset of _INFO_FIELD_NAMES marked Read/Writeable in RP-013's own
@@ -840,19 +858,53 @@ _INFO_FIELD_NAMES = {
 # *destination*. Source fields may be ANY name in _INFO_FIELD_NAMES,
 # writeable or not (e.g. reading the read-only ACTUAL_OFFSET as an ADD
 # input is valid; writing a result INTO it is not).
+# NOTE: this set is scoped to Standard-Time-Code-format fields only (see
+# _TRACK_BITMAP_INFO_FIELDS below for the other format) -- do not add the
+# Track Bitmap fields here even though 4 of the 5 are genuinely writeable
+# per spec, since 'write'/'move'/'add'/'subtract'/'drop_frame_adjust' would
+# then wrongly try to encode/decode them as 5-byte time codes.
 _WRITEABLE_INFO_FIELDS = frozenset({
     "selected_time_code", "requested_offset", "generator_time_code",
     "gp0", "gp1", "gp2", "gp3", "gp4", "gp5", "gp6", "gp7",
 })
 
+# Every Information Field whose data is the variable-length Standard Track
+# Bitmap format (<count> <bitmap byte 0> <bitmap byte 1> ...) rather than
+# the 5-byte Standard Time Code -- used by _decode_mmc_response to branch
+# on format instead of assuming every field is time-code shaped.
+_TRACK_BITMAP_INFO_FIELDS = frozenset({
+    "track_record_status", "track_record_ready", "track_sync_monitor",
+    "track_input_monitor", "track_mute",
+})
 
-def _resolve_info_field_name(name: str, *, require_writeable: bool = False) -> int:
+# The subset of _TRACK_BITMAP_INFO_FIELDS that's actually mask-writeable
+# (RP-013's MASKED WRITE Note *1: "the only mask-writeable Information
+# Fields currently defined are those which employ the Standard Track
+# Bitmap" -- but TRACK_RECORD_STATUS is read-only per its own R/W column,
+# so it's excluded here despite sharing the same bitmap format).
+_MASK_WRITEABLE_INFO_FIELDS = frozenset({
+    "track_record_ready", "track_sync_monitor", "track_input_monitor",
+    "track_mute",
+})
+
+
+def _resolve_info_field_name(
+    name: str,
+    *,
+    require_writeable: bool = False,
+    require_mask_writeable: bool = False,
+) -> int:
     """Look up an MMC Information Field name and return its single-byte
     hex value (see _INFO_FIELD_NAMES above for the full table and source).
     Pass `require_writeable=True` when resolving a *destination* field
     (MOVE/ADD/SUBTRACT/DROP_FRAME_ADJUST all require a Read/Writeable
     destination); leave it False for *source* fields, which may be any
-    valid name regardless of R/W status.
+    valid name regardless of R/W status. Pass `require_mask_writeable=True`
+    instead when resolving a MASKED WRITE target -- a DIFFERENT, narrower
+    gate (see _MASK_WRITEABLE_INFO_FIELDS above): only Track-Bitmap-format
+    fields that are also genuinely writeable qualify, which is why this is
+    its own flag rather than reusing `require_writeable` (that one is
+    scoped to Standard-Time-Code fields only).
     """
     if name not in _INFO_FIELD_NAMES:
         raise ValueError(
@@ -863,6 +915,11 @@ def _resolve_info_field_name(name: str, *, require_writeable: bool = False) -> i
         raise ValueError(
             f"Information Field {name!r} is read-only; valid destinations "
             f"are {sorted(_WRITEABLE_INFO_FIELDS)}"
+        )
+    if require_mask_writeable and name not in _MASK_WRITEABLE_INFO_FIELDS:
+        raise ValueError(
+            f"Information Field {name!r} is not mask-writeable; valid "
+            f"targets are {sorted(_MASK_WRITEABLE_INFO_FIELDS)}"
         )
     return _INFO_FIELD_NAMES[name]
 
@@ -1114,6 +1171,41 @@ def _decode_mmc_response(tool_input: dict) -> str:
                 "not yet decodable — only the 15 registered Information "
                 "Fields plus RESPONSE ERROR are currently supported"
             ),
+        })
+    if field_name in _TRACK_BITMAP_INFO_FIELDS:
+        # Standard Track Bitmap format: <count> <bitmap byte 0> ... --
+        # count says how many bitmap bytes follow (a device may omit
+        # trailing all-zero bytes per spec, "any track not included...
+        # will be assumed to be inactive"). Decode into both the raw
+        # bytes (for masked_write's byte#/mask bookkeeping) and a plain
+        # list of active (1-indexed) track numbers, bit 0 of byte 0 =
+        # track 1.
+        if not payload:
+            return _err(
+                f"expected at least a <count> byte for field "
+                f"{field_name!r}, got an empty payload"
+            )
+        bitmap_count = payload[0]
+        bitmap_bytes = payload[1:]
+        if len(bitmap_bytes) != bitmap_count:
+            return _err(
+                f"'{field_name}' declared byte count {bitmap_count} but "
+                f"{len(bitmap_bytes)} bitmap byte(s) actually followed"
+            )
+        active_tracks = [
+            byte_index * 7 + bit_index + 1
+            for byte_index, byte_value in enumerate(bitmap_bytes)
+            for bit_index in range(7)
+            if byte_value & (1 << bit_index)
+        ]
+        return json.dumps({
+            "status": "ok",
+            "device_id": device_id,
+            "type": "field_value",
+            "name": field_name,
+            "byte_count": bitmap_count,
+            "bitmap_bytes": list(bitmap_bytes),
+            "active_tracks": active_tracks,
         })
     if len(payload) != 5:
         return _err(
@@ -2270,6 +2362,89 @@ def _build_message(message: dict) -> "mido.Message":
                 time=time,
             )
 
+        if command == "masked_write":
+            # MASKED WRITE (0x41) — RP-013 p.25-26, confirmed via a
+            # targeted pdftotext pull of the command's own detail
+            # section: "Allows specific bits to be altered in a bitmap
+            # style Information Field... the bitmap must begin
+            # immediately after the <count> byte." Wire format per
+            # field: <name> <byte#> <mask> <data> (a fixed 4 bytes each,
+            # "count=04+ext" meaning multiple such quads may be
+            # concatenated, mirroring WRITE's own multi-pair pattern).
+            # `byte#` is 0-indexed within the TARGET field's own bitmap
+            # (byte 0 = the first byte after that field's OWN <count>
+            # byte, per the spec's own wording — nothing to do with this
+            # command's outer count). `mask`/`data` are 7-bit MIDI data
+            # bytes (0-127) — spec's own Note *2 gives 0x7F, not 0xFF,
+            # as the "all one's" value, confirming 7 significant bits
+            # per byte (bit 7 is a reserved/always-zero MIDI data-byte
+            # constraint, same as every other sysex payload byte in this
+            # file).
+            #
+            # Only Track-Bitmap-format fields that are ALSO genuinely
+            # writeable qualify as a target (spec Note *1) —
+            # `_MASK_WRITEABLE_INFO_FIELDS` excludes the read-only
+            # TRACK_RECORD_STATUS despite it sharing the same bitmap
+            # format, which is why this resolves names with the new
+            # `require_mask_writeable=True` flag rather than
+            # `require_writeable` (that flag is scoped to
+            # Standard-Time-Code fields, see _resolve_info_field_name).
+            masked_fields = message.get("fields")
+            if not masked_fields:
+                raise KeyError(
+                    "'fields' (required, non-empty list, for "
+                    "'masked_write')"
+                )
+            masked_write_payload: list = []
+            for masked_field in masked_fields:
+                masked_name = masked_field.get("name")
+                if masked_name is None:
+                    raise KeyError(
+                        "'name' (required within each 'fields' entry)"
+                    )
+                masked_field_byte = _resolve_info_field_name(
+                    masked_name, require_mask_writeable=True
+                )
+                byte_number = masked_field.get("byte_number")
+                mask = masked_field.get("mask")
+                mask_data = masked_field.get("data")
+                if byte_number is None:
+                    raise KeyError(
+                        f"'byte_number' (required for field "
+                        f"{masked_name!r})"
+                    )
+                if mask is None:
+                    raise KeyError(
+                        f"'mask' (required for field {masked_name!r})"
+                    )
+                if mask_data is None:
+                    raise KeyError(
+                        f"'data' (required for field {masked_name!r})"
+                    )
+                if not (0 <= byte_number <= 127):
+                    raise ValueError(
+                        f"'byte_number' must be 0-127, got {byte_number!r}"
+                    )
+                if not (0 <= mask <= 127):
+                    raise ValueError(
+                        f"'mask' must be 0-127, got {mask!r}"
+                    )
+                if not (0 <= mask_data <= 127):
+                    raise ValueError(
+                        f"'data' must be 0-127, got {mask_data!r}"
+                    )
+                masked_write_payload.extend((
+                    masked_field_byte, byte_number, mask, mask_data,
+                ))
+            return mido.Message(
+                "sysex",
+                data=(
+                    0x7F, device_id, 0x06, 0x41, len(masked_write_payload),
+                    *masked_write_payload,
+                ),
+                time=time,
+            )
+
         if command == "update":
             # UPDATE (0x43) — RP-013 p.26-27, confirmed via a targeted
             # pdftotext pull of this command's own detail section.
@@ -2340,7 +2515,7 @@ def _build_message(message: dict) -> "mido.Message":
                 "deferred_variable_play", "record_strobe_variable",
                 "wait", "resume", "drop_frame_adjust",
                 "move", "add", "subtract", "group", "procedure", "event",
-                "read", "write", "update",
+                "read", "write", "masked_write", "update",
             ]
             raise ValueError(
                 f"'command' must be one of "
