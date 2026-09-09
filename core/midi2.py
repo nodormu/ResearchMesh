@@ -1,12 +1,22 @@
-"""MIDI 2.0 / UMP (Universal MIDI Packet) tool — Phase 1 skeleton.
+"""MIDI 2.0 / UMP (Universal MIDI Packet) tool.
 
-STATUS: raw cffi/ALSA-sequencer plumbing only, ported directly from the
-already-proven standalone POC scripts (/tmp/ump_poc.py, /tmp/ump_poc2.py —
-see memories/sysex-midi-tool-addition.md, "Phase 9" section, for the full
-research/decision history). NOT YET wired into core/local_tools.py or
-core/chat.py, and does not yet expose any of the list_devices/open/close/
-send/poll actions midi1.py exposes — that is a deliberately separate,
-later step per this project's standing "small chunks" build rule.
+STATUS (updated after full live review/testing — see
+memories/midi2-python-implementation-unverified-evaluation.md for the
+verification pass): this module is fully wired into core/local_tools.py's
+tool registry and exposes list_devices / open / close / send / poll,
+matching midi1.py's action surface. 'send'/'poll' support BOTH a raw
+4-word (128-bit) UMP packet (a plain list of ints) AND a typed 'message'
+dict covering all six UMP message groups — native MIDI 2.0 Channel Voice,
+classic MIDI-1-in-UMP Channel Voice, System Common/Real-Time, Utility,
+SysEx7, and SysEx8/Mixed Data Set. Every encoder/decoder pair below has
+been round-tripped live (encode->decode match) and the send/poll path has
+been exercised end-to-end over a real ALSA self-loopback, not just unit
+tested in isolation. Still-real scope limits, not yet done: no MIDI-CI
+discovery, no Property Exchange, no Profiles, and sysex7/sysex8 remain
+single-packet building blocks (the caller chunks a longer payload across
+multiple 'send' calls themselves — no automatic multi-packet reassembly).
+Linux/ALSA-specific; device discovery still shells out to `aconnect -l`
+rather than a native client/port-query API call.
 
 Why raw cffi + libasound instead of a Python MIDI library: no mature
 Python UMP/MIDI-2.0 library exists (checked live — python-rtmidi/mido are
@@ -18,28 +28,23 @@ confirmed present via `nm -D` and header inspection
 in ABI mode (dlopen, no compile step) since it's already available in the
 venv backing this whole client.
 
-PROVEN LIVE (self-loopback, /tmp/ump_poc2.py, this session's predecessor):
-opening an ALSA seq client, switching it to UMP MIDI-2.0 mode, creating two
-ports on the same client, connecting them to each other, sending one raw
-UMP Note-On event, and reading it back — byte-for-byte round trip
-confirmed (word0=0x40903c00, word1=0x80000000). This module's cdef/consts
-below are a direct copy of what made that proof work, not a rewrite.
+PROVEN LIVE (self-loopback): opening an ALSA seq client, switching it to
+UMP MIDI-2.0 mode, creating two ports on the same client, connecting them
+to each other, sending a UMP event, and reading it back — byte-for-byte
+round trip confirmed, both for raw words and for typed messages across
+all six message groups (most recently re-confirmed via the public
+send/poll actions themselves, not just the internal encode/decode
+helpers).
 
-ACTION SURFACE (added this step) — deliberately RAW UMP WORDS ONLY, not
-typed messages: list_devices / open / close / send / poll, same five verbs
-as midi1.py's Phase 1, but 'send'/'poll' move a raw 4-word (128-bit) UMP
-packet as a list of ints rather than a decoded message — typed encode/
-decode for real UMP message groups is explicitly Phase 2 of the midi2_tool
-plan (memories/sysex-midi-tool-addition.md), not built yet. This mirrors
-the "don't over-invest until real hardware exists" decision already locked
-in for this tool.
+ACTION SURFACE: list_devices / open / close / send / poll, same five verbs
+as midi1.py.
 
 - list_devices: shells out to `aconnect -l` (already the tool used during
   this project's own live research to confirm PipeWire's UMP-MIDI2
   clients) and parses it into structured client/port entries, flagging
   which clients advertise UMP-MIDI2 support. Chosen over hand-rolling the
   ALSA client/port-info query API (snd_seq_query_next_client/_port, etc.)
-  to keep this step's cdef surface small — those bindings can be added
+  to keep this module's cdef surface small — those bindings can be added
   later if `aconnect` ever proves insufficient.
 - open: lazily creates ONE shared ALSA seq client for this whole process
   (module-level, mirrors midi1's _OPEN_PORTS process-lifetime-only
@@ -49,14 +54,16 @@ in for this tool.
   snd_seq_connect_from for an input port) — omit both to leave the port
   unconnected (e.g. to self-loop-connect two of our own just-opened
   ports by passing our own client id + the other handle's port number).
-- send: takes 'words', a list of up to 4 unsigned-32-bit ints (the raw UMP
-  packet, zero-padded if shorter) — no validation beyond that, matching
-  Phase 1's raw-words scope.
+- send: takes EITHER 'words' (a list of up to 4 unsigned-32-bit ints, the
+  raw UMP packet, zero-padded if shorter) OR a typed 'message' dict (see
+  the TOOLS description below for the full per-type field list across all
+  six message groups) — not both.
 - poll: drains ALL pending events on the shared client into a per-port
   buffer (since every handle shares one underlying ALSA client/queue),
   then returns and clears just the buffer for the requested handle's own
   port — so two open handles polling independently won't steal each
-  other's events.
+  other's events. Returns both the raw 'messages' (hex words) and a
+  parallel best-effort typed 'decoded' array covering all six groups.
 """
 import asyncio
 import itertools
@@ -163,10 +170,10 @@ def _check(rc, what):
     return rc
 
 
-# --- midi2 Stage 2 (typed message encode) — INERT helper only, this step ---
-# Not wired into _send/TOOLS yet (deliberately, per the small-chunks rule).
-# Pure bit-math, no ALSA calls, no side effects — safe to add/test in
-# isolation. Bit layout verified against the reviewed reference
+# --- Native MIDI 2.0 Channel Voice (message_type=4) — typed message encode ---
+# Wired into _send below (see the 'message' dispatch there). Pure bit-math,
+# no ALSA calls, no side effects on its own. Bit layout verified against
+# the reviewed reference
 # ~/Programs/py-midi2/code/ump.py (MIT-licensed, encode-only, see
 # memories/sysex-midi-tool-addition.md's "Reference find" entry) and
 # cross-checked against the MIDI 2.0 UMP spec's own Channel Voice message
@@ -271,10 +278,10 @@ def _encode_channel_voice(message: dict):
     return word0 & 0xFFFFFFFF, word1 & 0xFFFFFFFF
 
 
-# --- midi2 Stage 2 (typed message DECODE) — INERT helper only, this step ---
-# Not wired into poll/TOOLS yet (deliberately, same "inert first" pattern as
-# _encode_channel_voice above). Pure bit-math, no ALSA calls, no side
-# effects. This is the exact inverse of _encode_channel_voice — no reference
+# --- Native MIDI 2.0 Channel Voice (message_type=4) — typed message decode ---
+# Wired into _poll's 'decoded' array below. Pure bit-math, no ALSA calls, no
+# side effects on its own. This is the exact inverse of _encode_channel_voice
+# — no reference
 # implementation exists for this direction either (the reviewed
 # ~/Programs/py-midi2/code/ump.py is encode-only), so it was hand-derived
 # directly from the same word0/word1 layout documented above rather than
@@ -359,10 +366,11 @@ def _decode_channel_voice(word0: int, word1: int) -> dict:
     return out
 
 
-# --- midi2 Stage 2, MIDI-1-in-UMP group — INERT helper only, this step ---
-# Not wired into _send/_poll/TOOLS yet (deliberately, same "inert first"
-# pattern as _encode_channel_voice above). Pure bit-math, no ALSA calls, no
-# side effects. This is UMP message_type=2 ("MIDI 1.0 Channel Voice
+# --- MIDI-1-in-UMP Channel Voice (message_type=2) — typed message encode ---
+# Wired into _send below (see the 'message' dispatch there, including the
+# 'protocol' disambiguator for the 4 type names shared with native Channel
+# Voice). Pure bit-math, no ALSA calls, no side effects on its own. This is
+# UMP message_type=2 ("MIDI 1.0 Channel Voice
 # Messages") — a SINGLE 32-bit word (unlike type=4 Channel Voice's 2
 # words), since it's literally the classic 3-byte MIDI 1.0 status+data1+
 # data2 wrapped in a UMP header, at 7-bit (0-127) data resolution rather
@@ -441,13 +449,12 @@ def _encode_midi1_channel_voice(message: dict) -> int:
     return word & 0xFFFFFFFF
 
 
-# --- midi2 Stage 2, MIDI-1-in-UMP group — DECODE direction, INERT this
-# step (mirrors the "inert first" pattern used for every prior encode/
-# decode pair in this file). Not wired into _poll's 'decoded' array yet —
-# that's the next sub-step, once a try-order/precedence decision is made
-# (this decoder and _decode_channel_voice both need a shot at any given
-# packet, since a raw word alone doesn't self-announce which UMP message
-# group produced it beyond the message_type nibble). Pure bit-math, exact
+# --- MIDI-1-in-UMP Channel Voice (message_type=2) — typed message decode ---
+# Wired into _poll's 'decoded' array below, tried right after native
+# Channel Voice (this decoder and _decode_channel_voice each reject fast on
+# a message_type mismatch, so a raw word is never ambiguous between the
+# two — see _poll's try-chain for the full 6-group order). Pure bit-math,
+# no ALSA calls, no side effects on its own. Exact
 # inverse of _encode_midi1_channel_voice — same word layout comment above
 # applies (bits[31:28]=2, [27:24]=group, [23:20]=opcode, [19:16]=channel,
 # [15:8]=data1, [7:0]=data2).
@@ -758,9 +765,9 @@ def _decode_utility_message(word: int) -> dict:
     return out
 
 
-# --- midi2 Stage 2 (SysEx7, message_type=3) — INERT helpers only, this
-# step. Not wired into send/poll/TOOLS yet (deliberately, same "inert
-# first" pattern as every prior group). Bit layout confirmed against
+# --- System Exclusive 7-Bit-in-UMP (SysEx7, message_type=3) — encode+decode ---
+# Wired into _send/_poll below, same as every other group in this file.
+# Bit layout confirmed against
 # atsushieno/cmidi2 (cmidi2_ump_sysex_get_packet_of + the independent
 # cmidi2_ump_sysex7_direct formula, hand-traced to agree bit-for-bit —
 # see memories/sysex-midi-tool-addition.md for the full derivation).
@@ -860,9 +867,9 @@ def _decode_sysex7_message(word0: int, word1: int) -> dict:
     return {"type": "sysex7", "group": group, "status": status_name, "data": data}
 
 
-# --- midi2 Stage 2 (SysEx8/Mixed Data Set, message_type=5) — INERT helpers
-# only, this step. Not wired into send/poll/TOOLS yet (same "inert first"
-# pattern as every prior group). Bit layout confirmed against
+# --- System Exclusive 8-Bit/Mixed Data Set-in-UMP (SysEx8, message_type=5)
+# --- encode+decode. Wired into _send/_poll below, same as every other
+# group in this file. Bit layout confirmed against
 # atsushieno/cmidi2's shared cmidi2_ump_sysex_get_packet_of helper (the
 # same generic function SysEx7 above already uses, called here with
 # radix=13, hasStreamId=true instead of SysEx7's radix=6,
@@ -996,12 +1003,13 @@ TOOLS = [
         "name": "midi2",
         "description": (
             "MIDI 2.0 / UMP (Universal MIDI Packet) device discovery and "
-            "RAW-word I/O, via direct cffi bindings to libasound's ALSA "
+            "I/O, via direct cffi bindings to libasound's ALSA "
             "sequencer API (no mature Python MIDI-2.0 library exists yet — "
-            "see memories/sysex-midi-tool-addition.md). This is Phase 1 "
-            "scope only: typed message encode/decode (Note On/Off, CC, "
-            "etc. in native UMP form) is NOT implemented — 'send'/'poll' "
-            "move raw 4-word (128-bit) UMP packets as plain integer lists. "
+            "see memories/sysex-midi-tool-addition.md). 'send'/'poll' "
+            "support EITHER a raw 4-word (128-bit) UMP packet (a plain "
+            "integer list) OR a typed message dict covering all six UMP "
+            "message groups (Channel Voice, MIDI-1-in-UMP, System Common/"
+            "Real-Time, Utility, SysEx7, SysEx8 — see below). "
             "Actions: 'list_devices' shells out to `aconnect -l` and "
             "returns structured ALSA sequencer clients/ports, flagging "
             "which ones advertise UMP-MIDI2 support (e.g. PipeWire's own "
@@ -1682,7 +1690,7 @@ def _send(tool_input: dict) -> str:
         else:
             return _err(
                 f"unknown or unsupported 'message' type {msg_type!r} — "
-                f"supported typed types so far (midi2 Stage 2): Channel "
+                f"supported typed types: Channel "
                 f"Voice {sorted(_CV_OPCODES)}, MIDI-1-in-UMP "
                 f"{sorted(_M1CV_OPCODES)} (pass 'protocol':'midi1' to pick "
                 f"the MIDI-1-in-UMP encoding for the 4 shared-name types), "
