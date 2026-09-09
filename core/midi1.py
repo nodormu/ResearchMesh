@@ -1298,6 +1298,7 @@ def _build_message(message: dict) -> "mido.Message":
         # Added later (RP-013 v1.0, the ACTUAL MMC spec PDF): 'step',
         # 'assign_system_master', 'generator_command',
         # 'midi_time_code_command', 'variable_play', 'search', 'shuttle',
+        # 'deferred_variable_play', 'record_strobe_variable', 'wait',
         # 'drop_frame_adjust', 'move', 'add', 'subtract', 'group',
         # 'procedure', 'event' — see each one's own inline comment below
         # for wire format/verification detail. This completes the
@@ -1465,17 +1466,33 @@ def _build_message(message: dict) -> "mido.Message":
                 time=time,
             )
 
-        if command in ("variable_play", "search", "shuttle"):
-            # VARIABLE PLAY (0x45) / SEARCH (0x46) / SHUTTLE (0x47) —
-            # RP-013 p.29-30, confirmed via a targeted pdftotext pull of
+        if command in (
+            "variable_play", "search", "shuttle", "deferred_variable_play",
+            "record_strobe_variable",
+        ):
+            # VARIABLE PLAY (0x45) / SEARCH (0x46) / SHUTTLE (0x47) /
+            # DEFERRED VARIABLE PLAY (0x54) / RECORD STROBE VARIABLE
+            # (0x55) — RP-013 p.29-30 (VARIABLE PLAY/SEARCH/SHUTTLE),
+            # p.37 (DEFERRED VARIABLE PLAY), p.41 (RECORD STROBE
+            # VARIABLE), all confirmed via targeted pdftotext pulls of
             # the "STANDARD SPEED" section (not a full-doc OCR pass) plus
             # en.wikipedia.org/wiki/MIDI_Machine_Control's Shuttle
-            # description — both matched exactly. All three share the
+            # description — all matched exactly. All FIVE share the
             # IDENTICAL payload shape (only the opcode differs): a fixed
             # byte count of 3, followed by the Standard Speed
             # Specification (sh/sm/sl, see _encode_standard_speed).
+            # DEFERRED VARIABLE PLAY's own spec text states "Identical
+            # to the VARIABLE PLAY command..."; RECORD STROBE VARIABLE's
+            # own text gives the same 3-byte payload directly
+            # (`<count=03> sh sm sl / Standard Speed Specification`) —
+            # its device-side record/rehearse-entry behavior (switching
+            # into an automatic VARIABLE PLAY from a stopped state, per
+            # its own NOTES) is receiver-side, not something a stateless
+            # sender encodes differently.
             _SPEED_COMMAND_OPCODES = {
                 "variable_play": 0x45, "search": 0x46, "shuttle": 0x47,
+                "deferred_variable_play": 0x54,
+                "record_strobe_variable": 0x55,
             }
             speed = message.get("speed")
             if speed is None:
@@ -1488,6 +1505,45 @@ def _build_message(message: dict) -> "mido.Message":
                     0x7F, device_id, 0x06,
                     _SPEED_COMMAND_OPCODES[command], 0x03, sh, sm, sl,
                 ),
+                time=time,
+            )
+
+        if command == "wait":
+            # WAIT (0x7C) — RP-013 p.42, confirmed via a targeted
+            # pdftotext pull (clean OCR). A no-data handshake command:
+            # tells the Controlled Device to hold off on Response
+            # transmissions until a RESUME is received. Cross-checked
+            # against TWO separate clean listings elsewhere in the doc
+            # (p.17/p.36 Index Lists) to confirm the opcode, since this
+            # particular section's OWN nearby text had some unrelated
+            # OCR noise. **Envelope device_id is hardcoded to 0x7F**
+            # (the "all-call" address) — the spec states outright "The
+            # WAIT command is always the only command in its Sysex, and
+            # is directed to the 'all-call' address i.e. F0 7F 7F <mcc>
+            # <WAIT> F7" — same footgun-prevention reasoning already
+            # used for `assign_system_master` above (deliberately does
+            # NOT read the general `device_id` field for this one).
+            return mido.Message(
+                "sysex",
+                data=(0x7F, 0x7F, 0x06, 0x7C),
+                time=time,
+            )
+
+        if command == "resume":
+            # RESUME (0x7F) — RP-013 p.42, confirmed via the same
+            # targeted pdftotext pull as WAIT above (same cross-check
+            # against two separate clean Index List listings elsewhere
+            # in the doc). A no-data handshake command: signals the
+            # Controller is ready to receive Machine Control Responses
+            # again after a WAIT (default/power-up state is already
+            # "ready to receive"). Same hardcoded-envelope pattern as
+            # WAIT — spec states outright "The RESUME command is always
+            # the only command in its Sysex, and is directed to the
+            # 'all-call' address i.e. F0 7F 7F <mcc> <RESUME> F7" —
+            # deliberately does NOT read the general `device_id` field.
+            return mido.Message(
+                "sysex",
+                data=(0x7F, 0x7F, 0x06, 0x7F),
                 time=time,
             )
 
@@ -1858,7 +1914,9 @@ def _build_message(message: dict) -> "mido.Message":
             _mmc_special_commands = [
                 "locate", "step", "assign_system_master",
                 "generator_command", "midi_time_code_command",
-                "variable_play", "search", "shuttle", "drop_frame_adjust",
+                "variable_play", "search", "shuttle",
+                "deferred_variable_play", "record_strobe_variable",
+                "wait", "resume", "drop_frame_adjust",
                 "move", "add", "subtract", "group", "procedure", "event",
             ]
             raise ValueError(
