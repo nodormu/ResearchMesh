@@ -22,6 +22,8 @@ from core import (
     kernel,
     listen,
     memory,
+    midi1,
+    midi2,
     processes,
     speak,
     text_embeddings,
@@ -44,6 +46,19 @@ MODULES = [
     vision,       # your own private vision-capable model, config-driven
     speak,        # local text-to-speech via Piper, config-driven
     listen,       # local speech-to-text via faster-whisper, config-driven
+    midi1,        # MIDI 1.0 device I/O via mido/python-rtmidi — device
+                  # discovery, channel/system messages, SysEx, and .mid/.syx
+                  # file read+write are all done (Phases 0-4 and 6 of the
+                  # build; Phase 5's pygame add-on was abandoned and Phase
+                  # 7/8's network transport was skipped, both per user
+                  # decision — see memories/sysex-midi-tool-addition.md)
+    midi2,        # MIDI 2.0/UMP raw-word + typed message I/O via cffi+
+                  # libasound — Stage 0-2 done (raw transport plus all 6
+                  # UMP message groups: native/MIDI-1-in-UMP Channel Voice,
+                  # System Common/Real-Time, Utility, SysEx7, SysEx8). Stage
+                  # 3 (MIDI-CI) and Stage 4 (real UMP hardware validation)
+                  # remain deferred, both hardware-contingent — see
+                  # memories/sysex-midi-tool-addition.md
 ]
 
 TOOLS = [tool for module in MODULES for tool in module.TOOLS]

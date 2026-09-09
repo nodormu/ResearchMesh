@@ -27,7 +27,7 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 
 ## What it can do
 
-**22 local tools**, plus whatever your MCP servers expose:
+**24 local tools**, plus whatever your MCP servers expose:
 
 | Tool | For |
 |---|---|
@@ -46,6 +46,8 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 | `text_embeddings` | Vector embeddings from an HTTP embedding server you configure — self-hosted or a paid API both work. See `[embeddings]` in config.toml for worked examples |
 | `vision_query` | Ask a question about an image via a vision-capable chat server you configure — self-hosted or a paid API both work. See `[vision]` in config.toml for worked examples |
 | `speak` · `listen` | Local text-to-speech (Piper) and speech-to-text (faster-whisper) through your own speaker/mic — no cloud audio API. Disabled by default; see `[speak]`/`[listen]` in config.toml, including first-time device setup |
+| `midi1` | MIDI 1.0 device discovery and I/O via `mido`/`python-rtmidi` — list ports, open/close, send/poll channel and system messages, SysEx, and read/write `.mid`/`.syx` files |
+| `midi2` | MIDI 2.0/UMP device discovery and I/O via direct `cffi` bindings to `libasound` (no mature Python MIDI 2.0 library exists yet) — raw UMP-word transport plus typed encode/decode for all 6 UMP message groups (native and MIDI-1-in-UMP Channel Voice, System Common/Real-Time, Utility, SysEx7, SysEx8) |
 
 Claude chooses the tools and keeps working until it has an answer.
 
@@ -55,7 +57,7 @@ You need **Linux**, **Python 3.11+**, and an Anthropic **API key** — this is a
 so a Claude subscription won't work.
 
 **MCP servers are optional.** The `[mcp]` block in `config.toml` ships with
-`enabled = false` and every server commented out, so a fresh clone runs on the 20
+`enabled = false` and every server commented out, so a fresh clone runs on the 24
 local tools alone. The commented entries are kept as worked examples of both entry
 shapes — the addresses and paths in them are machine-specific, so replace them with
 your own before uncommenting and setting `enabled = true`.
@@ -100,7 +102,7 @@ to NOT keep the LLM going for long periods. Pre-building memories and telling th
 LLM to take pauses and provide status updates while writing progress to a task related
 memory file helps tremendously if a 400 error occurs.
 
-**MCP servers are optional** — all 22 local tools work without any of them.
+**MCP servers are optional** — all 24 local tools work without any of them.
 
 ## Try it
 
@@ -197,7 +199,7 @@ both, or neither:
    Claude Code  ──delegate──▶  ResearchMesh  ──▶  n8n / Unreal / Unity / …
    (any MCP client)            (server AND client)     (its own MCP servers)
         │                            │                          │
-     mcp_server.py            22 local tools           [mcp] in config.toml
+     mcp_server.py            24 local tools           [mcp] in config.toml
 ```
 
 **As a client**, it connects out to MCP servers and merges their tools with its own — that's
