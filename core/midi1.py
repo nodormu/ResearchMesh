@@ -19,12 +19,15 @@ Actions:
                    System Real-Time: clock, start, stop, continue,
                    active_sensing, reset. System Exclusive: sysex
                    (arbitrary-payload — see the SysEx note below), plus
-                   three typed convenience messages built on top of that
+                   six typed convenience messages built on top of that
                    same sysex mechanism: mtc_full (MIDI Time Code Full
                    Message), mmc (MIDI Machine Control transport commands),
-                   and msc (MIDI Show Control General Category commands) —
-                   see each one's own inline comment in `_build_message`
-                   further down in this file for full field details.
+                   msc (MIDI Show Control General Category commands),
+                   gm_system (General MIDI System On/Off), device_inquiry
+                   (Identity Request/Reply), and device_control (Master
+                   Volume/Balance) — see each one's own inline comment in
+                   `_build_message` further down in this file for full
+                   field details.
   - poll         : non-blocking check for buffered messages on an open input
                    handle. This is a manual, caller-driven check (call it
                    repeatedly to see new messages) — there is currently no
@@ -1178,12 +1181,214 @@ def _build_message(message: dict) -> "mido.Message":
             data=(0x7F, device_id, 0x02, cf_byte, cmd_byte) + payload,
             time=time,
         )
+    if msg_type == "gm_system":
+        # General MIDI System On/Off — a Universal SysEx convenience
+        # wrapper, same "layers on top of the generic sysex path, not a
+        # separate/duplicate mechanism" rule as mtc_full/mmc/msc above.
+        # UNLIKE those three, this one uses Universal ID 7E (Non-Real
+        # Time), not 7F (Real Time) — confirmed against the MMA's own
+        # MIDI 1.0 Detailed Specification (both the "General MIDI System
+        # Messages" section and Table VIIa's "Currently Defined Universal
+        # System Exclusive Messages" registry agree: Non-Real Time,
+        # sub-ID#1 = 09). Wire format — the simplest of any typed sysex
+        # helper in this file, no data bytes at all beyond the fixed
+        # sub-ID#2:
+        #   F0 7E <device_id> 09 01 F7   (General MIDI System On)
+        #   F0 7E <device_id> 09 02 F7   (General MIDI System Off)
+        # `device_id` defaults to 0x7F (all devices) — the spec's own
+        # suggested default for this specific message ("ID of target
+        # device (suggest using 7F 'All Call')"), same default already
+        # used for mtc_full/mmc/msc above.
+        _GM_SYSTEM_COMMANDS = {"on": 0x01, "off": 0x02}
+        command = message.get("command")
+        if command is None:
+            raise KeyError("'command'")
+        if command not in _GM_SYSTEM_COMMANDS:
+            raise ValueError(
+                f"'command' must be one of {sorted(_GM_SYSTEM_COMMANDS)} "
+                f"for 'gm_system', got {command!r}"
+            )
+        device_id = message.get("device_id", 0x7F)
+        if not (0 <= device_id <= 127):
+            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
+        return mido.Message(
+            "sysex",
+            data=(0x7E, device_id, 0x09, _GM_SYSTEM_COMMANDS[command]),
+            time=time,
+        )
+    if msg_type == "device_inquiry":
+        # Device Inquiry — a Universal Non-Real Time SysEx convenience
+        # wrapper (same generic-sysex-path rule as gm_system/mtc_full/mmc/
+        # msc above), "General Information" sub-ID#1 = 06. Two message
+        # shapes under one 'command' sub-field, same "one type, several
+        # named commands" pattern already used by mmc/msc:
+        #   Identity Request: F0 7E <device_id> 06 01 F7 — no data.
+        #   Identity Reply:   F0 7E <device_id> 06 02 mm [..] ff ff dd dd
+        #                      ss ss ss ss F7
+        # Confirmed against the primary MIDI 1.0 Detailed Specification's
+        # "Device Inquiry" section and Table VIIa.
+        #   mm = manufacturer ID. Either ONE byte (1-127, direct
+        #   assignment) OR the extended 3-byte form (00, then two more ID
+        #   bytes) when the direct byte would be 00H — the spec's own text
+        #   says so explicitly ("if the manufacturers id code (mm) begins
+        #   with 00H then the above message is extended by two bytes").
+        #   Accepted here as either a single int (1-127) or a 3-element
+        #   list/tuple starting with 0 for the extended form.
+        #   ff ff = device family code, 14 bits LSB-first (same split
+        #   pattern used elsewhere in this file, e.g. msc's 'set' command).
+        #   dd dd = device family member code, 14 bits LSB-first.
+        #   ss ss ss ss = software revision level, 4 bytes, "format device
+        #   specific" per the spec (no further structure defined) —
+        #   accepted here as a raw 4-int list/tuple, each 0-127.
+        # Sending an Identity REPLY is a rarer use case for a
+        # controller-side tool (normally a physical device sends the
+        # reply, not us) but is included for completeness/symmetry with
+        # the spec, same "cover the message family fully" precedent as
+        # mmc/msc rather than only the "obviously useful" half.
+        _DEVICE_INQUIRY_COMMANDS = {"request", "reply"}
+        command = message.get("command")
+        if command is None:
+            raise KeyError("'command'")
+        if command not in _DEVICE_INQUIRY_COMMANDS:
+            raise ValueError(
+                f"'command' must be one of "
+                f"{sorted(_DEVICE_INQUIRY_COMMANDS)} for 'device_inquiry', "
+                f"got {command!r}"
+            )
+        device_id = message.get("device_id", 0x7F)
+        if not (0 <= device_id <= 127):
+            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
+
+        if command == "request":
+            return mido.Message(
+                "sysex", data=(0x7E, device_id, 0x06, 0x01), time=time,
+            )
+
+        # command == "reply"
+        manufacturer_id = message.get("manufacturer_id")
+        device_family_code = message.get("device_family_code")
+        device_family_member_code = message.get("device_family_member_code")
+        software_revision = message.get("software_revision")
+        if manufacturer_id is None:
+            raise KeyError("'manufacturer_id' (required for 'reply')")
+        if device_family_code is None:
+            raise KeyError("'device_family_code' (required for 'reply')")
+        if device_family_member_code is None:
+            raise KeyError(
+                "'device_family_member_code' (required for 'reply')"
+            )
+        if software_revision is None:
+            raise KeyError("'software_revision' (required for 'reply')")
+
+        if isinstance(manufacturer_id, int):
+            if not (1 <= manufacturer_id <= 127):
+                raise ValueError(
+                    "'manufacturer_id' as a single int must be 1-127 (use "
+                    "a 3-element list/tuple starting with 0 for the "
+                    f"extended form), got {manufacturer_id!r}"
+                )
+            mfr_bytes: tuple = (manufacturer_id,)
+        else:
+            mfr_bytes = tuple(manufacturer_id)
+            if len(mfr_bytes) != 3 or mfr_bytes[0] != 0:
+                raise ValueError(
+                    "'manufacturer_id' as a list/tuple must have exactly "
+                    f"3 bytes, the first being 0, got {manufacturer_id!r}"
+                )
+            for b in mfr_bytes:
+                if not (0 <= b <= 127):
+                    raise ValueError(
+                        "'manufacturer_id' bytes must each be 0-127, got "
+                        f"{manufacturer_id!r}"
+                    )
+
+        if not (0 <= device_family_code <= 16383):
+            raise ValueError(
+                f"'device_family_code' must be 0-16383, got "
+                f"{device_family_code!r}"
+            )
+        if not (0 <= device_family_member_code <= 16383):
+            raise ValueError(
+                f"'device_family_member_code' must be 0-16383, got "
+                f"{device_family_member_code!r}"
+            )
+        software_revision_bytes = tuple(software_revision)
+        if len(software_revision_bytes) != 4:
+            raise ValueError(
+                "'software_revision' must be exactly 4 bytes, got "
+                f"{software_revision!r}"
+            )
+        for b in software_revision_bytes:
+            if not (0 <= b <= 127):
+                raise ValueError(
+                    "'software_revision' bytes must each be 0-127, got "
+                    f"{software_revision!r}"
+                )
+
+        return mido.Message(
+            "sysex",
+            data=(0x7E, device_id, 0x06, 0x02) + mfr_bytes + (
+                device_family_code & 0x7F,
+                (device_family_code >> 7) & 0x7F,
+                device_family_member_code & 0x7F,
+                (device_family_member_code >> 7) & 0x7F,
+            ) + software_revision_bytes,
+            time=time,
+        )
+    if msg_type == "device_control":
+        # Device Control — Master Volume/Balance — a Universal REAL TIME
+        # SysEx convenience wrapper (same generic-sysex-path rule as the
+        # others above), sub-ID#1 = 04. Unlike gm_system/device_inquiry
+        # (both Non-Real-Time, 0x7E), this one uses Real-Time (0x7F) —
+        # same ID as mtc_full/mmc/msc. Wire format, confirmed against the
+        # primary MIDI 1.0 Detailed Specification's "Device Control"
+        # section and Table VIIa:
+        #   Master Volume:  F0 7F <device_id> 04 01 vv vv F7
+        #   Master Balance: F0 7F <device_id> 04 02 bb bb F7
+        # Both are a single 14-bit value, LSB-first (same split pattern
+        # used elsewhere in this file, e.g. msc's 'set' command and
+        # device_inquiry's family/member codes above). Per the spec, for
+        # Master Volume 00 00 = volume off; for Master Balance 00 00 =
+        # hard left and 7F 7F = hard right — these are just data-value
+        # conventions at the receiving device, not encoding rules this
+        # function needs to special-case.
+        # These address the WHOLE DEVICE rather than a channel — the
+        # channel-scoped equivalents already exist as ordinary
+        # control_change messages (CC7 Channel Volume, CC8 Balance),
+        # unrelated code path, no overlap to reconcile here.
+        _DEVICE_CONTROL_COMMANDS = {"master_volume": 0x01, "master_balance": 0x02}
+        command = message.get("command")
+        if command is None:
+            raise KeyError("'command'")
+        if command not in _DEVICE_CONTROL_COMMANDS:
+            raise ValueError(
+                f"'command' must be one of "
+                f"{sorted(_DEVICE_CONTROL_COMMANDS)} for 'device_control', "
+                f"got {command!r}"
+            )
+        value = message.get("value")
+        if value is None:
+            raise KeyError("'value'")
+        if not (0 <= value <= 16383):
+            raise ValueError(f"'value' must be 0-16383, got {value!r}")
+        device_id = message.get("device_id", 0x7F)
+        if not (0 <= device_id <= 127):
+            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
+        return mido.Message(
+            "sysex",
+            data=(
+                0x7F, device_id, 0x04, _DEVICE_CONTROL_COMMANDS[command],
+                value & 0x7F, (value >> 7) & 0x7F,
+            ),
+            time=time,
+        )
     raise ValueError(
         f"unknown message type {msg_type!r} — expected one of "
         "note_on, note_off, control_change, program_change, "
         "pitchwheel, aftertouch, polytouch, quarter_frame, songpos, "
         "song_select, tune_request, clock, start, stop, continue, "
-        "active_sensing, reset, sysex, mtc_full, mmc, msc"
+        "active_sensing, reset, sysex, mtc_full, mmc, msc, gm_system, "
+        "device_inquiry, device_control"
     )
 
 
