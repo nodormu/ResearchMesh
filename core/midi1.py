@@ -769,6 +769,67 @@ def _encode_standard_speed(speed: float, reverse: bool) -> tuple:
     return sh, sm, sl
 
 
+# MMC "Information Field" name registry (RP-013 pp.14-16, the Index List /
+# alphabetical Response-and-Information-Field table / categorized-by-type
+# table -- cross-checked across all three, they agree). Only the "5-byte
+# group" names 01h-0Fh are included: RP-013's own command text for MOVE/
+# ADD/SUBTRACT/DROP_FRAME_ADJUST says fields are "names 01 thru 1F", but
+# 10h-1Fh have no actual assignment anywhere in the spec's own tables --
+# reserved/unused headroom, not real names today. Consumed by the not-yet-
+# wired MOVE/ADD/SUBTRACT/DROP_FRAME_ADJUST mmc commands (see standing
+# memory file for the wiring plan) -- this dict/set and the lookup helper
+# below are deliberately built and verified in isolation FIRST, before any
+# dispatch code touches them.
+_INFO_FIELD_NAMES = {
+    "selected_time_code": 0x01,
+    "selected_master_code": 0x02,
+    "requested_offset": 0x03,
+    "actual_offset": 0x04,
+    "lock_deviation": 0x05,
+    "generator_time_code": 0x06,
+    "midi_time_code_input": 0x07,
+    "gp0": 0x08,
+    "gp1": 0x09,
+    "gp2": 0x0A,
+    "gp3": 0x0B,
+    "gp4": 0x0C,
+    "gp5": 0x0D,
+    "gp6": 0x0E,
+    "gp7": 0x0F,
+}
+
+# The subset of _INFO_FIELD_NAMES marked Read/Writeable in RP-013's own
+# table -- the only names valid as a MOVE/ADD/SUBTRACT/DROP_FRAME_ADJUST
+# *destination*. Source fields may be ANY name in _INFO_FIELD_NAMES,
+# writeable or not (e.g. reading the read-only ACTUAL_OFFSET as an ADD
+# input is valid; writing a result INTO it is not).
+_WRITEABLE_INFO_FIELDS = frozenset({
+    "selected_time_code", "requested_offset", "generator_time_code",
+    "gp0", "gp1", "gp2", "gp3", "gp4", "gp5", "gp6", "gp7",
+})
+
+
+def _resolve_info_field_name(name: str, *, require_writeable: bool = False) -> int:
+    """Look up an MMC Information Field name and return its single-byte
+    hex value (see _INFO_FIELD_NAMES above for the full table and source).
+    Pass `require_writeable=True` when resolving a *destination* field
+    (MOVE/ADD/SUBTRACT/DROP_FRAME_ADJUST all require a Read/Writeable
+    destination); leave it False for *source* fields, which may be any
+    valid name regardless of R/W status.
+    """
+    if name not in _INFO_FIELD_NAMES:
+        raise ValueError(
+            f"unknown Information Field name {name!r}; must be one of "
+            f"{sorted(_INFO_FIELD_NAMES)}"
+        )
+    if require_writeable and name not in _WRITEABLE_INFO_FIELDS:
+        raise ValueError(
+            f"Information Field {name!r} is read-only; valid destinations "
+            f"are {sorted(_WRITEABLE_INFO_FIELDS)}"
+        )
+    return _INFO_FIELD_NAMES[name]
+
+
 def _encode_msc_ascii_field(name: str, value: str) -> tuple:
     """MSC Q_number/Q_list/Q_path are plain ASCII digit strings
     with '.' as the decimal-point delimiter (confirmed against a literal
@@ -1162,17 +1223,19 @@ def _build_message(message: dict) -> "mido.Message":
         #     have)
         # Added later (RP-013 v1.0, the ACTUAL MMC spec PDF): 'step',
         # 'assign_system_master', 'generator_command',
-        # 'midi_time_code_command', 'variable_play', 'search', 'shuttle'
-        # — see each one's own inline comment below for wire format/
-        # verification detail.
+        # 'midi_time_code_command', 'variable_play', 'search', 'shuttle',
+        # 'drop_frame_adjust', 'move', 'add', 'subtract' — see each one's
+        # own inline comment below for wire format/verification detail.
+        # This completes the entire MOVE/ADD/SUBTRACT/DROP_FRAME_ADJUST
+        # "Information Field math" group — see _INFO_FIELD_NAMES/
+        # _WRITEABLE_INFO_FIELDS/_resolve_info_field_name above for the
+        # shared name registry all four use.
         # NOT IMPLEMENTED (deliberately, still):
         # Write (0x40 — this is actually the Information-Field WRITE
         # access command, part of the not-yet-built Responses/Info-Field
-        # mechanism, not a niche transport command), Move/Add/Subtract/
-        # Drop-Frame-Adjust (reference Information Field NAMES this tool
-        # doesn't have a registry for yet), and Procedure/Event/Group
-        # (more complex multi-format commands, deferred to their own
-        # dedicated research pass).
+        # mechanism, not a niche transport command) and Procedure/Event/
+        # Group (more complex multi-format commands, deferred to their
+        # own dedicated research pass).
         # Command Error Reset (0x0C) IS included — cheap to include, one
         # more dict entry, no reason to leave it out just because Wikipedia's
         # table happened to omit it while somascape's didn't contradict it.
@@ -1352,11 +1415,99 @@ def _build_message(message: dict) -> "mido.Message":
                 time=time,
             )
 
+        if command == "drop_frame_adjust":
+            # DROP FRAME ADJUST (0x4F) — RP-013 p.33, confirmed via a
+            # targeted pdftotext pull (this section's OCR was clean, no
+            # rendering needed). Converts the named Information Field's
+            # contents to drop-frame format in place; a no-op device-side
+            # if the field isn't currently 30fps non-drop. `name` must be
+            # one of the Read/Writeable "5-byte group" fields (01h-0Fh) —
+            # see _INFO_FIELD_NAMES/_WRITEABLE_INFO_FIELDS/
+            # _resolve_info_field_name above for the registry and why
+            # only writeable fields are valid here (per spec's own text:
+            # "Valid Information Fields are the Read/Writeable fields").
+            name = message.get("name")
+            if name is None:
+                raise KeyError("'name' (required for 'drop_frame_adjust')")
+            field_byte = _resolve_info_field_name(name, require_writeable=True)
+            return mido.Message(
+                "sysex",
+                data=(0x7F, device_id, 0x06, 0x4F, 0x01, field_byte),
+                time=time,
+            )
+
+        if command == "move":
+            # MOVE (0x4C) — RP-013 p.32, confirmed via a targeted
+            # pdftotext pull (clean OCR, no rendering needed). Transfers
+            # the contents of `source` into `destination` device-side.
+            # `destination` must be a Read/Writeable field (spec: "Valid
+            # destination Information Fields are the Read/Writeable
+            # fields"); `source` may be ANY valid field, writeable or not
+            # (spec: "Valid source Information Fields are all of the
+            # [named group]"). Byte count is always 2 (one name each).
+            destination = message.get("destination")
+            source = message.get("source")
+            if destination is None:
+                raise KeyError("'destination' (required for 'move')")
+            if source is None:
+                raise KeyError("'source' (required for 'move')")
+            dest_byte = _resolve_info_field_name(
+                destination, require_writeable=True
+            )
+            source_byte = _resolve_info_field_name(source)
+            return mido.Message(
+                "sysex",
+                data=(
+                    0x7F, device_id, 0x06, 0x4C, 0x02, dest_byte, source_byte,
+                ),
+                time=time,
+            )
+
+        if command in ("add", "subtract"):
+            # ADD (0x4D) / SUBTRACT (0x4E) — RP-013 p.32-33, confirmed
+            # via a targeted pdftotext pull (clean OCR, no rendering
+            # needed). Both share the IDENTICAL payload shape (only the
+            # opcode differs), same "shared dispatch block" pattern as
+            # variable_play/search/shuttle above:
+            #   [Destination] = [Source #1] + [Source #2]      (ADD)
+            #   [Destination] = [Source #1] - [Source #2]      (SUBTRACT)
+            # `destination` must be Read/Writeable (same rule as MOVE);
+            # `source_1`/`source_2` may be ANY valid field, writeable or
+            # not. Byte count is always 3 (three names). Per spec text,
+            # it's explicitly permissible for `destination` to equal one
+            # of the sources (caller's responsibility to avoid clobbering
+            # a source before it's read, same note the spec itself gives
+            # — not something a stateless sender can enforce).
+            _MATH_OPCODES = {"add": 0x4D, "subtract": 0x4E}
+            destination = message.get("destination")
+            source_1 = message.get("source_1")
+            source_2 = message.get("source_2")
+            if destination is None:
+                raise KeyError(f"'destination' (required for {command!r})")
+            if source_1 is None:
+                raise KeyError(f"'source_1' (required for {command!r})")
+            if source_2 is None:
+                raise KeyError(f"'source_2' (required for {command!r})")
+            dest_byte = _resolve_info_field_name(
+                destination, require_writeable=True
+            )
+            source_1_byte = _resolve_info_field_name(source_1)
+            source_2_byte = _resolve_info_field_name(source_2)
+            return mido.Message(
+                "sysex",
+                data=(
+                    0x7F, device_id, 0x06, _MATH_OPCODES[command], 0x03,
+                    dest_byte, source_1_byte, source_2_byte,
+                ),
+                time=time,
+            )
+
         if command not in _MMC_COMMANDS:
             _mmc_special_commands = [
                 "locate", "step", "assign_system_master",
                 "generator_command", "midi_time_code_command",
-                "variable_play", "search", "shuttle",
+                "variable_play", "search", "shuttle", "drop_frame_adjust",
+                "move", "add", "subtract",
             ]
             raise ValueError(
                 f"'command' must be one of "
