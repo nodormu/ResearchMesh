@@ -26,7 +26,6 @@ dependencies = [
     "httpx>=0.24",             # `text_embeddings` — already guaranteed by `anthropic`,
                                # listed here for the direct import in core/text_embeddings.py
     "mido[ports-rtmidi]>=1.3", # `midi1` — see requirements.txt for the full note
-    "cffi>=1.16",              # `midi2` — see requirements.txt for the full note
 ]
 
 # Ruff is NOT a dependency of this project and nothing runs it automatically —

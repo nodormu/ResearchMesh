@@ -54,15 +54,6 @@ mido[ports-rtmidi]>=1.3  # `midi1` — MIDI 1.0 device I/O (core/midi1.py). The
                          # dispatcher): missing this only disables `midi1`,
                          # same "declares itself, returns an install hint"
                          # contract as every other tool in this section.
-cffi>=1.16               # `midi2` — MIDI 2.0/UMP raw-word device I/O via
-                         # direct ALSA-seq bindings (core/midi2.py), no
-                         # mature Python MIDI-2.0 library exists yet. Also
-                         # guarded the same way as mido above — missing cffi
-                         # (or a missing `libasound.so.2` at runtime, see
-                         # below) only disables midi2's non-`list_devices`
-                         # actions, `list_devices` itself shells out to
-                         # `aconnect` and needs neither.
-
 # `memory` needs nothing beyond the standard library (core/memory.py).
 
 # --- system binaries, not pip ------------------------------------------------
@@ -80,11 +71,4 @@ cffi>=1.16               # `midi2` — MIDI 2.0/UMP raw-word device I/O via
 # synthesises, so it refuses to run on one (see core/computer.py). For a
 # headless or Wayland machine:
 #   sudo apt install xvfb          # xvfb-run -s '-screen 0 1280x800x24' python main.py
-#
-# `midi2` dlopen()s the ALSA sequencer lib directly (cffi ABI mode, no compile
-# step, so no -dev/headers package needed) — just the runtime lib itself:
-#   sudo apt install libasound2    # provides libasound.so.2
-# Already present on most desktop Linux installs (anything with working audio)
-# and on Ubuntu Studio specifically it's guaranteed by the audio metapackages.
-# `midi2`'s `list_devices` action also shells out to `aconnect` (package
-# `alsa-utils`), same "almost certainly already there" caveat.
+

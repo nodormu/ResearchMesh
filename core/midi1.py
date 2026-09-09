@@ -1,8 +1,9 @@
 """MIDI 1.0 tool — device discovery, port I/O, and channel/system messages.
 
-Built via `mido[ports-rtmidi]` (python-rtmidi backend). This is the shared
-discovery surface both the MIDI 1.0 and (future) MIDI 2.0 tools use — see
-memories/sysex-midi-tool-addition.md for the full design/phase history.
+Built via `mido[ports-rtmidi]` (python-rtmidi backend). This started as the
+shared discovery surface for both a MIDI 1.0 and a MIDI 2.0 tool; the MIDI
+2.0 tool has since been removed from this project and moved to its own
+standalone project for further work.
 
 PHASE 1 + PHASE 2 + PHASE 3 SCOPE — more actions land in later phases of the
 same doc (.mid file I/O in Phase 4, pygame add-on in Phase 5, multi-port/
@@ -99,8 +100,7 @@ TOOLS = [
     {
         "name": "midi1",
         "description": (
-            "MIDI 1.0 device discovery and I/O (Phases 1-2 of a larger "
-            "planned MIDI tool — see memories/sysex-midi-tool-addition.md). "
+            "MIDI 1.0 device discovery and I/O. "
             "Actions: 'list_devices' enumerates available MIDI input/output "
             "port names. 'open' opens a named port as either 'input' or "
             "'output' and returns a handle string to use in later calls. "
@@ -686,8 +686,7 @@ def _read_midi_file(tool_input: dict) -> str:
 
 def _write_midi_file(tool_input: dict) -> str:
     """PHASE 4b: write a .mid/.midi or .syx file from tool-supplied track/
-    message data. See memories/sysex-midi-tool-addition.md's "Phase 4b —
-    DESIGN LOCKED IN" entry for the full design discussion this implements.
+    message data.
     """
     path = tool_input.get("path")
     if not path:
