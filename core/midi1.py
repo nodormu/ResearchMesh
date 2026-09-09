@@ -35,9 +35,11 @@ Actions:
                    mtc_cueing (MTC Real-Time Cueing Set-Up messages), and
                    mtc_cueing_nrt (the fuller Non-Real-Time Cueing
                    Set-Up messages, incl. Delete variants and 5 Special
-                   sub-types) — see each one's own inline comment in
-                   `_build_message` further down in this file for full
-                   field details. Two more typed convenience types, rpn
+                   sub-types), and file_dump (transfer an arbitrary file
+                   — request/header/data_packet plus the ack/nak/cancel/
+                   wait/eof handshake flags) — see each one's own inline
+                   comment in `_build_message` further down in this file
+                   for full field details. Two more typed convenience types, rpn
                    and nrpn (Registered/Non-Registered Parameter Numbers),
                    are NOT sysex-based and NOT single messages — selecting
                    and setting one is a short SEQUENCE of Control Change
@@ -923,6 +925,46 @@ def _nibblize(raw_bytes) -> tuple:
             )
         out.append(b & 0x0F)
         out.append((b >> 4) & 0x0F)
+    return tuple(out)
+
+
+def _encode_file_dump_data(stored_bytes) -> tuple:
+    """Encode up to 112 raw 8-bit "stored" file-content bytes into File
+    Dump's own "7-bit-ized" wire format — a COMPLETELY DIFFERENT scheme
+    from `_nibblize` above (bit-level sign-extraction, not a nibble
+    split), used only by File Dump's Data Packet message. Per the
+    spec's own words: "the sign bits of the seven [stored] bytes are
+    sent, followed by the low-order 7 bits of each byte" — groups of up
+    to 7 stored bytes become groups of up to 8 transmitted bytes: one
+    "sign byte" (each original byte's bit 7, packed MSB-first, so the
+    first original byte's sign lands in bit 6 and so on), followed by
+    each original byte's own low 7 bits verbatim, in original order.
+
+    Verified with two hand-constructed numeric examples before writing
+    any message-building code around it (the spec itself only gives a
+    symbolic example, not concrete numbers): a full 7-byte group with
+    alternating sign bits, and a short 3-byte trailing group — the short
+    case specifically confirms the spec's own symbolic example
+    ("0ABC0000") produces the sign bits left-justified with the
+    remainder zero-padded, not right-justified.
+    """
+    if not (1 <= len(stored_bytes) <= 112):
+        raise ValueError(
+            f"a single Data Packet holds 1-112 stored bytes (encodes to "
+            f"a max 128-byte payload), got {len(stored_bytes)}"
+        )
+    out: list = []
+    for group_start in range(0, len(stored_bytes), 7):
+        group = stored_bytes[group_start:group_start + 7]
+        sign_byte = 0
+        for i, b in enumerate(group):
+            if not (0 <= b <= 255):
+                raise ValueError(
+                    f"stored bytes must each be 0-255, got {b!r}"
+                )
+            sign_byte |= ((b >> 7) & 1) << (6 - i)
+        out.append(sign_byte)
+        out.extend(b & 0x7F for b in group)
     return tuple(out)
 
 
@@ -2165,6 +2207,174 @@ def _build_message(message: dict) -> "mido.Message":
             data=(0x7E, device_id, 0x04, sub_id2) + time_bytes + (sl, sm),
             time=time,
         )
+    if msg_type == "file_dump":
+        # File Dump — a Universal Non-Real Time SysEx family, sub-ID#1 =
+        # 07, for transferring arbitrary files (not just audio samples —
+        # the OTHER motivation this exists for, per the spec's own words,
+        # is moving Standard MIDI Files between computers and small ROM-
+        # based "boxes"). Genuinely still useful for archiving/restoring
+        # patch or sample data on vintage hardware that predates USB mass
+        # storage (per the user's own explicit reasoning for building this
+        # despite Sample Dump Standard being deliberately skipped).
+        # Wire formats:
+        #   request:      F0 7E <device_id> 07 03 ss <type> <name> F7
+        #   header:       F0 7E <device_id> 07 01 ss <type> <len> <name> F7
+        #   data_packet:  F0 7E <device_id> 07 02 <pkt#> <count> <data>
+        #                 <chksm> F7
+        #   ack/nak/cancel/wait/eof (shared generic handshake numbering,
+        #   Non-Real-Time sub-ID#1 = 7B-7F, the same space Sample Dump
+        #   uses, "plus a new EOF message" per the spec's own words):
+        #     F0 7E <device_id> <7B..7F> pp F7
+        # UNLIKE every other typed helper in this file, `device_id` has NO
+        # DEFAULT here — File Dump is inherently a point-to-point handshake
+        # between two SPECIFIC addressed devices (the spec explicitly
+        # forbids the source device ID ever being the 7F "all-call" value,
+        # a strong signal this isn't a broadcast-style message family the
+        # way gm_system/mtc_full/etc. are) — silently defaulting to 0x7F
+        # here could paper over a real addressing mistake, so it's
+        # required explicitly instead.
+        # `<type>` is exactly 4 printable-ASCII bytes (e.g. "MIDI", "TEXT",
+        # "BIN " with a trailing space) — validated as exactly 4
+        # characters in the printable range 0x20-0x7E, same range the
+        # spec itself requires for `<name>`.
+        # `<length>` is 4 bytes, LSB-first, 0-127 bits' worth via 4x7-bit
+        # bytes (0 = "length unknown", spec's own stated meaning).
+        # Data Packet's checksum is unambiguous in the spec's own words —
+        # "XOR of all bytes which follow F0 up to the checksum byte" — NO
+        # discrepancy like MIDI Tuning's checksum had; still hand-verified
+        # against a self-constructed numeric example before writing this,
+        # same discipline regardless.
+        _FILE_DUMP_HANDSHAKE = {
+            "eof": 0x7B, "wait": 0x7C, "cancel": 0x7D, "nak": 0x7E,
+            "ack": 0x7F,
+        }
+        _FILE_DUMP_COMMANDS = {"request", "header", "data_packet"} | set(
+            _FILE_DUMP_HANDSHAKE
+        )
+        command = message.get("command")
+        if command is None:
+            raise KeyError("'command'")
+        if command not in _FILE_DUMP_COMMANDS:
+            raise ValueError(
+                f"'command' must be one of {sorted(_FILE_DUMP_COMMANDS)} "
+                f"for 'file_dump', got {command!r}"
+            )
+        device_id = message.get("device_id")
+        if device_id is None:
+            raise KeyError("'device_id' (no default for 'file_dump' — "
+                            "see the code comment for why)")
+        if not (0 <= device_id <= 127):
+            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
+
+        def _validate_ascii_field(name: str, value: str) -> tuple:
+            for c in value:
+                if not (0x20 <= ord(c) <= 0x7E):
+                    raise ValueError(
+                        f"{name!r} must be printable ASCII (0x20-0x7E), "
+                        f"got non-printable character {c!r}"
+                    )
+            return tuple(ord(c) for c in value)
+
+        if command in _FILE_DUMP_HANDSHAKE:
+            sub_id1 = _FILE_DUMP_HANDSHAKE[command]
+            if command in ("ack", "nak"):
+                packet_number = message.get("packet_number")
+                if packet_number is None:
+                    raise KeyError(
+                        f"'packet_number' (required for {command!r})"
+                    )
+            else:
+                # wait/cancel/eof -- packet number explicitly "ignored"
+                # by the receiver per the spec, no need to require
+                # meaningless input from the caller.
+                packet_number = message.get("packet_number", 0)
+            if not (0 <= packet_number <= 127):
+                raise ValueError(
+                    f"'packet_number' must be 0-127, got {packet_number!r}"
+                )
+            return mido.Message(
+                "sysex",
+                data=(0x7E, device_id, sub_id1, packet_number),
+                time=time,
+            )
+
+        if command in ("request", "header"):
+            source_device_id = message.get("source_device_id")
+            if source_device_id is None:
+                raise KeyError("'source_device_id'")
+            if not (0 <= source_device_id <= 126):
+                raise ValueError(
+                    "'source_device_id' must be 0-126 (the spec "
+                    "explicitly disallows 127/'all-call' as a source), "
+                    f"got {source_device_id!r}"
+                )
+            file_type = message.get("file_type")
+            if file_type is None:
+                raise KeyError("'file_type'")
+            if len(file_type) != 4:
+                raise ValueError(
+                    "'file_type' must be exactly 4 characters (e.g. "
+                    f"'MIDI', 'TEXT', 'BIN '), got {len(file_type)} "
+                    f"({file_type!r})"
+                )
+            type_bytes = _validate_ascii_field("file_type", file_type)
+            filename = message.get("filename", "")
+            name_bytes = _validate_ascii_field("filename", filename)
+
+            if command == "request":
+                return mido.Message(
+                    "sysex",
+                    data=(0x7E, device_id, 0x07, 0x03, source_device_id)
+                    + type_bytes + name_bytes,
+                    time=time,
+                )
+
+            # header
+            length = message.get("length")
+            if length is None:
+                raise KeyError("'length' (0 for 'unknown', per the spec)")
+            if not (0 <= length <= 0xFFFFFFF):
+                raise ValueError(
+                    f"'length' must be 0-{0xFFFFFFF} (4x7-bit bytes), "
+                    f"got {length!r}"
+                )
+            length_bytes = (
+                length & 0x7F, (length >> 7) & 0x7F,
+                (length >> 14) & 0x7F, (length >> 21) & 0x7F,
+            )
+            return mido.Message(
+                "sysex",
+                data=(0x7E, device_id, 0x07, 0x01, source_device_id)
+                + type_bytes + length_bytes + name_bytes,
+                time=time,
+            )
+
+        # data_packet
+        packet_number = message.get("packet_number")
+        if packet_number is None:
+            raise KeyError("'packet_number'")
+        if not (0 <= packet_number <= 127):
+            raise ValueError(
+                f"'packet_number' must be 0-127, got {packet_number!r}"
+            )
+        stored_bytes = message.get("stored_bytes")
+        if not stored_bytes:
+            raise KeyError(
+                "'stored_bytes' (required, non-empty, for 'data_packet')"
+            )
+        encoded = _encode_file_dump_data(list(stored_bytes))
+        byte_count = len(encoded) - 1
+        payload_before_checksum = (
+            0x7E, device_id, 0x07, 0x02, packet_number, byte_count,
+        ) + encoded
+        checksum = 0
+        for b in payload_before_checksum:
+            checksum ^= b
+        return mido.Message(
+            "sysex",
+            data=payload_before_checksum + (checksum,),
+            time=time,
+        )
     raise ValueError(
         f"unknown message type {msg_type!r} — expected one of "
         "note_on, note_off, control_change, program_change, "
@@ -2172,7 +2382,7 @@ def _build_message(message: dict) -> "mido.Message":
         "song_select, tune_request, clock, start, stop, continue, "
         "active_sensing, reset, sysex, mtc_full, mmc, msc, gm_system, "
         "device_inquiry, device_control, channel_mode, midi_tuning, "
-        "notation, mtc_cueing, mtc_cueing_nrt"
+        "notation, mtc_cueing, mtc_cueing_nrt, file_dump"
     )
 
 
