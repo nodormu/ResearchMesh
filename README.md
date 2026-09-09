@@ -520,6 +520,8 @@ Claude, not a place for your project files — and it persists until you delete 
 | `memory` | nothing — standard library only |
 | `text_embeddings` | `httpx` — already pulled in by `anthropic`, so this is normally a no-op install |
 | `vision_query` | `httpx` — same as `text_embeddings`, normally a no-op install |
+| `speak` | `piper-tts` — **not** `sudo apt install piper` (an unrelated GTK app); playback shells out to `paplay` |
+| `listen` | `faster-whisper`; capture shells out to `parecord` |
 | `midi1` | `mido[ports-rtmidi]` |
 
 To drop a tool entirely, remove its module from `MODULES` in `core/local_tools.py`.
@@ -609,6 +611,8 @@ core/
   files.py                       recoverable deletes
   text_embeddings.py             embeddings from your own private HTTP endpoint
   vision.py                      vision-capable image queries against your own private endpoint
+  speak.py                       local text-to-speech via Piper
+  listen.py                      local speech-to-text via faster-whisper
   midi1.py                       MIDI 1.0 device I/O via mido/python-rtmidi
   output.py                      shared output trimming + image results
   cli.py                         prompt_toolkit REPL
