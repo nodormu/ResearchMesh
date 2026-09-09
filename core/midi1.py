@@ -830,6 +830,80 @@ def _resolve_info_field_name(name: str, *, require_writeable: bool = False) -> i
     return _INFO_FIELD_NAMES[name]
 
 
+def _encode_nested_mmc_command(
+    nested: dict,
+    *,
+    forbid_assemble: bool = False,
+    forbid_define: bool = False,
+    forbid_execute_name: "int | None" = None,
+) -> tuple:
+    """Encode one nested MMC command dict for use INSIDE a PROCEDURE
+    [ASSEMBLE] or EVENT [DEFINE] payload (RP-013 pp.34-37).
+
+    A "nested command" is NOT a separate wire format -- it's the exact
+    same `<opcode> <count> <data...>` bytes any standalone mmc command
+    already produces via `_build_message`, just WITHOUT the shared
+    `0x7F <device_id> 0x06` envelope prefix (that envelope is written
+    ONCE by the enclosing PROCEDURE/EVENT message, not repeated per
+    nested command -- confirmed against the spec's own multi-command
+    worked example in the EVENT [DEFINE] NOTES). So this function simply
+    re-enters the SAME `_build_message` used for every top-level command
+    (any current or future mmc command type works as a nested command
+    for free, no duplicated encoding logic) and strips that 3-byte
+    prefix off the result.
+
+    The two spec-mandated nesting restrictions are validated here, since
+    both callers (PROCEDURE [ASSEMBLE], EVENT [DEFINE]) need at least
+    one of them:
+    - `forbid_assemble`: reject a nested PROCEDURE [ASSEMBLE] (both
+      callers forbid this -- ASSEMBLE can't nest ASSEMBLE, and DEFINE
+      can't nest an ASSEMBLE either).
+    - `forbid_define`: reject a nested EVENT [DEFINE] (EVENT [DEFINE]
+      can't nest another DEFINE; PROCEDURE [ASSEMBLE] has no such
+      restriction on EVENT [DEFINE] itself).
+    - `forbid_execute_name`: (PROCEDURE [ASSEMBLE] only) reject a nested
+      PROCEDURE [EXECUTE] naming the SAME procedure currently being
+      assembled (a "recursive PROCEDURE [EXECUTE]" error per spec).
+    """
+    if nested.get("type") != "mmc":
+        raise ValueError(
+            f"nested commands must be type 'mmc', got "
+            f"{nested.get('type')!r}"
+        )
+    nested_command = nested.get("command")
+    if (
+        forbid_assemble
+        and nested_command == "procedure"
+        and nested.get("action") == "assemble"
+    ):
+        raise ValueError(
+            "a nested command cannot be another PROCEDURE [ASSEMBLE] "
+            "(nested/recursive ASSEMBLE is not permitted)"
+        )
+    if (
+        forbid_define
+        and nested_command == "event"
+        and nested.get("action") == "define"
+    ):
+        raise ValueError(
+            "a nested command cannot be another EVENT [DEFINE] "
+            "(nested/recursive DEFINE is not permitted)"
+        )
+    if (
+        forbid_execute_name is not None
+        and nested_command == "procedure"
+        and nested.get("action") == "execute"
+        and nested.get("procedure") == forbid_execute_name
+    ):
+        raise ValueError(
+            f"a PROCEDURE [ASSEMBLE] cannot nest a PROCEDURE [EXECUTE] "
+            f"naming the SAME procedure ({forbid_execute_name!r}) "
+            f"currently being assembled (recursive EXECUTE)"
+        )
+    built = _build_message(nested)
+    return tuple(built.data[3:])
+
+
 def _encode_msc_ascii_field(name: str, value: str) -> tuple:
     """MSC Q_number/Q_list/Q_path are plain ASCII digit strings
     with '.' as the decimal-point delimiter (confirmed against a literal
@@ -1224,18 +1298,20 @@ def _build_message(message: dict) -> "mido.Message":
         # Added later (RP-013 v1.0, the ACTUAL MMC spec PDF): 'step',
         # 'assign_system_master', 'generator_command',
         # 'midi_time_code_command', 'variable_play', 'search', 'shuttle',
-        # 'drop_frame_adjust', 'move', 'add', 'subtract' — see each one's
-        # own inline comment below for wire format/verification detail.
-        # This completes the entire MOVE/ADD/SUBTRACT/DROP_FRAME_ADJUST
-        # "Information Field math" group — see _INFO_FIELD_NAMES/
-        # _WRITEABLE_INFO_FIELDS/_resolve_info_field_name above for the
-        # shared name registry all four use.
+        # 'drop_frame_adjust', 'move', 'add', 'subtract', 'group',
+        # 'procedure', 'event' — see each one's own inline comment below
+        # for wire format/verification detail. This completes the
+        # entire MOVE/ADD/SUBTRACT/DROP_FRAME_ADJUST "Information Field
+        # math" group — see _INFO_FIELD_NAMES/_WRITEABLE_INFO_FIELDS/
+        # _resolve_info_field_name above for the shared name registry
+        # all four use. 'procedure' and 'event' both use
+        # _encode_nested_mmc_command (also above) for embedding other
+        # mmc commands inside their own payload — this completes the
+        # entire PROCEDURE/EVENT/GROUP research thread.
         # NOT IMPLEMENTED (deliberately, still):
         # Write (0x40 — this is actually the Information-Field WRITE
         # access command, part of the not-yet-built Responses/Info-Field
-        # mechanism, not a niche transport command) and Procedure/Event/
-        # Group (more complex multi-format commands, deferred to their
-        # own dedicated research pass).
+        # mechanism, not a niche transport command).
         # Command Error Reset (0x0C) IS included — cheap to include, one
         # more dict entry, no reason to leave it out just because Wikipedia's
         # table happened to omit it while somascape's didn't contradict it.
@@ -1502,12 +1578,288 @@ def _build_message(message: dict) -> "mido.Message":
                 time=time,
             )
 
+        if command == "group":
+            # GROUP (0x52) — RP-013 p.39, confirmed via a targeted
+            # pdftotext pull (clean OCR, no rendering needed). Two
+            # sub-commands, same "action" sub-field pattern already used
+            # by generator_command/midi_time_code_command above:
+            #   [ASSIGN] (0x00): device(s) join <group>. <group> may be
+            #     any device_id EXCEPT 0x7F (0x7F is reserved/all-call,
+            #     cannot itself be assigned as a group number).
+            #   [DIS-ASSIGN] (0x01): device(s) leave <group>. <group>
+            #     0x7F means "dis-assign from ALL groups" (a DIFFERENT
+            #     meaning than ASSIGN's restriction on the same byte).
+            #     0x7F ANYWHERE in `device_ids` also means "all devices"
+            #     (spec's own worked example: dis-assign all devices from
+            #     all groups is `F0 7F 7F <mcc> 52 03 01 7F 7F F7`,
+            #     reproduced exactly as one of the byte-exact test cases
+            #     below).
+            # Byte count = 2 + len(device_ids) (sub_id byte + group byte
+            # + one byte per device_id) — confirmed against that same
+            # worked example (count=03 for a 1-entry device_ids list).
+            _GROUP_ACTIONS = {"assign": 0x00, "dis_assign": 0x01}
+            action = message.get("action")
+            if action is None:
+                raise KeyError("'action' (required for 'group')")
+            if action not in _GROUP_ACTIONS:
+                raise ValueError(
+                    f"'action' must be one of {sorted(_GROUP_ACTIONS)} "
+                    f"for 'group', got {action!r}"
+                )
+            group = message.get("group")
+            if group is None:
+                raise KeyError("'group' (required for 'group')")
+            if not (0 <= group <= 127):
+                raise ValueError(f"'group' must be 0-127, got {group!r}")
+            if action == "assign" and group == 0x7F:
+                raise ValueError(
+                    "'group' must not be 0x7F (127) for action='assign' "
+                    "-- 0x7F is reserved for the 'all-call' address and "
+                    "cannot itself be used as a group number"
+                )
+            device_ids = message.get("device_ids")
+            if not device_ids:
+                raise KeyError(
+                    "'device_ids' (required, non-empty list, for 'group')"
+                )
+            for entry in device_ids:
+                if not (0 <= entry <= 127):
+                    raise ValueError(
+                        f"each 'device_ids' entry must be 0-127, "
+                        f"got {entry!r}"
+                    )
+            return mido.Message(
+                "sysex",
+                data=(
+                    0x7F, device_id, 0x06, 0x52, 2 + len(device_ids),
+                    _GROUP_ACTIONS[action], group, *device_ids,
+                ),
+                time=time,
+            )
+
+        if command == "procedure":
+            # PROCEDURE (0x50) — RP-013 pp.34-35, confirmed via a
+            # targeted pdftotext pull (mostly clean OCR). Device-side
+            # named macro storage, 4 sub-commands via the same 'action'
+            # sub-field pattern as group/generator_command/etc.:
+            #   [ASSEMBLE] (0x00): <procedure> + one or more NESTED mmc
+            #     commands (see _encode_nested_mmc_command above) stored
+            #     for later playback. 'procedure' 0x7F is RESERVED here
+            #     (not "assemble all" -- that's not a defined concept).
+            #   [DELETE] (0x01) / [SET] (0x02): <procedure> only.
+            #     0x7F means "all procedures" for BOTH of these (per
+            #     spec's own stated meaning) -- unlike ASSEMBLE/EXECUTE.
+            #   [EXECUTE] (0x03): <procedure> only. 0x7F is RESERVED
+            #     here too (executing "all procedures at once" is not a
+            #     defined concept, unlike delete-all/set-all).
+            # Byte count is always 2 + (nested bytes, ASSEMBLE only).
+            _PROCEDURE_ACTIONS = {
+                "assemble": 0x00, "delete": 0x01, "set": 0x02,
+                "execute": 0x03,
+            }
+            action = message.get("action")
+            if action is None:
+                raise KeyError("'action' (required for 'procedure')")
+            if action not in _PROCEDURE_ACTIONS:
+                raise ValueError(
+                    f"'action' must be one of "
+                    f"{sorted(_PROCEDURE_ACTIONS)} for 'procedure', "
+                    f"got {action!r}"
+                )
+            procedure = message.get("procedure")
+            if procedure is None:
+                raise KeyError("'procedure' (required for 'procedure')")
+            if action in ("assemble", "execute"):
+                if not (0 <= procedure <= 0x7E):
+                    raise ValueError(
+                        f"'procedure' must be 0-0x7E for action="
+                        f"{action!r} (0x7F is reserved, not a valid "
+                        f"'all procedures' target for this action), "
+                        f"got {procedure!r}"
+                    )
+            else:
+                if not (0 <= procedure <= 0x7F):
+                    raise ValueError(
+                        f"'procedure' must be 0-0x7F, got {procedure!r}"
+                    )
+            if action == "assemble":
+                commands = message.get("commands")
+                if not commands:
+                    raise KeyError(
+                        "'commands' (required, non-empty list, for "
+                        "action='assemble')"
+                    )
+                nested_bytes: tuple = ()
+                for nested in commands:
+                    nested_bytes += _encode_nested_mmc_command(
+                        nested,
+                        forbid_assemble=True,
+                        forbid_execute_name=procedure,
+                    )
+                procedure_payload = (0x00, procedure, *nested_bytes)
+            else:
+                procedure_payload = (_PROCEDURE_ACTIONS[action], procedure)
+            return mido.Message(
+                "sysex",
+                data=(
+                    0x7F, device_id, 0x06, 0x50, len(procedure_payload),
+                    *procedure_payload,
+                ),
+                time=time,
+            )
+
+        if command == "event":
+            # EVENT (0x51) — RP-013 pp.35-38, confirmed via a targeted
+            # pdftotext pull. Same 4-sub-command shape as PROCEDURE
+            # (define/delete/set/test via 'action'), 'event' name range
+            # follows the SAME asymmetric 0x7F rule as PROCEDURE: 0x7F
+            # is RESERVED for define/test, but means "ALL events" for
+            # delete/set.
+            #
+            # [DEFINE]'s flags byte ("0 k 0 a 00 dd" per spec) — bit
+            # positions confirmed against the spec's OWN worked example
+            # (a looping Event using flags=0x40, which is bit6 alone
+            # set): k=bit6 ("non-delete": 1=Event stays armed after
+            # triggering, matches the worked example's looping use
+            # case), a=bit4 ("all speeds": 1=trigger regardless of
+            # play-speed), dd=bits1-0 (direction: 00=forward-only,
+            # 01=reverse-only, 10=either direction). Exposed as 3
+            # friendly fields (direction/all_speeds/non_delete) packed
+            # here, same "friendly flags, not a raw bitfield" pattern as
+            # `step`'s `reverse`.
+            #
+            # `trigger_source`/`name` reuse the SAME byte values as
+            # _INFO_FIELD_NAMES, but EVENT restricts each to its own
+            # narrower subset (spec's own text): trigger_source may only
+            # be a time-code-bearing field (SELECTED_TIME_CODE/
+            # SELECTED_MASTER_CODE/GENERATOR_TIME_CODE/
+            # MIDI_TIME_CODE_INPUT), `name` (the register holding the
+            # trigger TIME value) may only be a GP0-GP7 register.
+            #
+            # `trigger_command` = ONE nested mmc command (not a list,
+            # unlike PROCEDURE's `commands`) — reuses
+            # _encode_nested_mmc_command, forbidding a nested EVENT
+            # [DEFINE] (can't nest itself) AND a nested PROCEDURE
+            # [ASSEMBLE] (spec's own stated exception, distinct from
+            # PROCEDURE [ASSEMBLE]'s own restrictions). Deliberately NOT
+            # named 'command' -- that's the OUTER dict's own dispatch
+            # key (holding "event"), reusing it here would collide.
+            _EVENT_ACTIONS = {
+                "define": 0x00, "delete": 0x01, "set": 0x02, "test": 0x03,
+            }
+            action = message.get("action")
+            if action is None:
+                raise KeyError("'action' (required for 'event')")
+            if action not in _EVENT_ACTIONS:
+                raise ValueError(
+                    f"'action' must be one of {sorted(_EVENT_ACTIONS)} "
+                    f"for 'event', got {action!r}"
+                )
+            event = message.get("event")
+            if event is None:
+                raise KeyError("'event' (required for 'event')")
+            if action in ("define", "test"):
+                if not (0 <= event <= 0x7E):
+                    raise ValueError(
+                        f"'event' must be 0-0x7E for action={action!r} "
+                        f"(0x7F is reserved, not a valid 'all events' "
+                        f"target for this action), got {event!r}"
+                    )
+            else:
+                if not (0 <= event <= 0x7F):
+                    raise ValueError(
+                        f"'event' must be 0-0x7F, got {event!r}"
+                    )
+            if action == "define":
+                _EVENT_DIRECTION_BITS = {
+                    "forward": 0b00, "reverse": 0b01, "both": 0b10,
+                }
+                direction = message.get("direction")
+                if direction is None:
+                    raise KeyError(
+                        "'direction' (required for action='define')"
+                    )
+                if direction not in _EVENT_DIRECTION_BITS:
+                    raise ValueError(
+                        f"'direction' must be one of "
+                        f"{sorted(_EVENT_DIRECTION_BITS)}, "
+                        f"got {direction!r}"
+                    )
+                all_speeds = message.get("all_speeds", False)
+                non_delete = message.get("non_delete", False)
+                flags_byte = (
+                    (0x40 if non_delete else 0x00)
+                    | (0x10 if all_speeds else 0x00)
+                    | _EVENT_DIRECTION_BITS[direction]
+                )
+                _EVENT_TRIGGER_SOURCES = {
+                    "selected_time_code", "selected_master_code",
+                    "generator_time_code", "midi_time_code_input",
+                }
+                trigger_source = message.get("trigger_source")
+                if trigger_source is None:
+                    raise KeyError(
+                        "'trigger_source' (required for action='define')"
+                    )
+                if trigger_source not in _EVENT_TRIGGER_SOURCES:
+                    raise ValueError(
+                        f"'trigger_source' must be one of "
+                        f"{sorted(_EVENT_TRIGGER_SOURCES)}, "
+                        f"got {trigger_source!r}"
+                    )
+                trigger_source_byte = _INFO_FIELD_NAMES[trigger_source]
+                _EVENT_TRIGGER_TIME_FIELDS = {
+                    "gp0", "gp1", "gp2", "gp3", "gp4", "gp5", "gp6", "gp7",
+                }
+                trigger_time_name = message.get("name")
+                if trigger_time_name is None:
+                    raise KeyError(
+                        "'name' (required for action='define')"
+                    )
+                if trigger_time_name not in _EVENT_TRIGGER_TIME_FIELDS:
+                    raise ValueError(
+                        f"'name' must be one of "
+                        f"{sorted(_EVENT_TRIGGER_TIME_FIELDS)}, "
+                        f"got {trigger_time_name!r}"
+                    )
+                trigger_time_byte = _INFO_FIELD_NAMES[trigger_time_name]
+                # NOTE: this field is deliberately named 'trigger_command'
+                # (NOT 'command') -- the outer message dict's own
+                # top-level dispatch key IS 'command' (holding "event"),
+                # so reusing that name for the nested field would
+                # silently collide/overwrite it in the same dict.
+                nested_command_dict = message.get("trigger_command")
+                if nested_command_dict is None:
+                    raise KeyError(
+                        "'trigger_command' (required, a nested mmc "
+                        "message dict, for action='define')"
+                    )
+                nested_bytes = _encode_nested_mmc_command(
+                    nested_command_dict,
+                    forbid_assemble=True,
+                    forbid_define=True,
+                )
+                event_payload = (
+                    0x00, event, flags_byte, trigger_source_byte,
+                    trigger_time_byte, *nested_bytes,
+                )
+            else:
+                event_payload = (_EVENT_ACTIONS[action], event)
+            return mido.Message(
+                "sysex",
+                data=(
+                    0x7F, device_id, 0x06, 0x51, len(event_payload),
+                    *event_payload,
+                ),
+                time=time,
+            )
+
         if command not in _MMC_COMMANDS:
             _mmc_special_commands = [
                 "locate", "step", "assign_system_master",
                 "generator_command", "midi_time_code_command",
                 "variable_play", "search", "shuttle", "drop_frame_adjust",
-                "move", "add", "subtract",
+                "move", "add", "subtract", "group", "procedure", "event",
             ]
             raise ValueError(
                 f"'command' must be one of "
