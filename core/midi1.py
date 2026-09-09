@@ -3735,6 +3735,14 @@ _RPN_NAMED_PARAMETERS = {
     "coarse_tuning": 0x0002,
     "tuning_program_select": 0x0003,
     "tuning_bank_select": 0x0004,
+    # RPN #6 — the MPE Configuration Message (MCM), MMA/AMEI M1-100-UM MPE
+    # spec section 2.2.1: sent to a Zone's Manager Channel (channel 0 for
+    # the Lower Zone, channel 15 for the Upper Zone in this tool's
+    # 0-indexed scheme) with 'value' = number of Member Channels (0-15;
+    # 0 deactivates that Zone). The spec states the Data Entry LSB "has
+    # no function" for this RPN — pass 'msb_only': true, same as any
+    # other RPN where only 7 bits of resolution matter.
+    "mpe_configuration": 0x0006,
 }
 
 
