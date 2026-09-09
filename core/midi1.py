@@ -729,6 +729,46 @@ def _encode_smpte_hour_byte(hours: int, frame_rate: str) -> int:
     return (_FRAME_RATE_BITS[frame_rate] << 5) | hours
 
 
+def _encode_standard_speed(speed: float, reverse: bool) -> tuple:
+    """MMC's "Standard Speed Specification" (RP-013 p.10) — a 3-byte
+    (sh/sm/sl) block-floating-point encoding shared by the VARIABLE PLAY,
+    SEARCH, and SHUTTLE commands. `speed` is the magnitude of the
+    play-speed multiple (0 to ~1023.99); direction is the separate
+    `reverse` flag, same "value + direction flag" pattern as `step`'s
+    `quantity`+`reverse`.
+
+    Layout: sh = "0 g sss ppp" (g=sign, sss=shift-left count 0-7,
+    ppp=top 3 bits of a 17-bit raw magnitude), sm/sl = middle/bottom 7
+    bits of that same 17-bit value. What changes per `sss` is only the
+    SCALE those 17 bits represent (raw = round(speed * 2**(14-sss)));
+    `sss` has no effect on the decoded value, so the smallest `sss` that
+    fits is chosen automatically for maximum precision — not exposed as
+    a caller field. Confirmed self-consistent against RP-013's own
+    range/resolution table (total bits = (3+sss)+(14-sss) = 17 for every
+    row) and round-trip tested against test vectors before use here.
+    """
+    if speed < 0:
+        raise ValueError(
+            f"'speed' must be >= 0 (use 'reverse' for direction), "
+            f"got {speed!r}"
+        )
+    raw = None
+    shift = None
+    for candidate_shift in range(8):
+        candidate_raw = round(speed * (2 ** (14 - candidate_shift)))
+        if candidate_raw <= 0x1FFFF:
+            raw = candidate_raw
+            shift = candidate_shift
+            break
+    if raw is None or shift is None:
+        raise ValueError(f"'speed' out of range (max ~1023.99), got {speed!r}")
+    ppp = (raw >> 14) & 0x7
+    sm = (raw >> 7) & 0x7F
+    sl = raw & 0x7F
+    sh = (0x40 if reverse else 0x00) | (shift << 3) | ppp
+    return sh, sm, sl
+
+
 def _encode_msc_ascii_field(name: str, value: str) -> tuple:
     """MSC Q_number/Q_list/Q_path are plain ASCII digit strings
     with '.' as the decimal-point delimiter (confirmed against a literal
@@ -1122,12 +1162,10 @@ def _build_message(message: dict) -> "mido.Message":
         #     have)
         # Added later (RP-013 v1.0, the ACTUAL MMC spec PDF): 'step',
         # 'assign_system_master', 'generator_command',
-        # 'midi_time_code_command' — see each one's own inline comment
-        # below for wire format/verification detail.
-        # NOT IMPLEMENTED (deliberately, still): Shuttle (0x47 — its
-        # payload turns out to be the same "Standard Speed Specification"
-        # format 'search'/'variable_play' also need, not yet built here
-        # either — revisit together once that shared format is sourced),
+        # 'midi_time_code_command', 'variable_play', 'search', 'shuttle'
+        # — see each one's own inline comment below for wire format/
+        # verification detail.
+        # NOT IMPLEMENTED (deliberately, still):
         # Write (0x40 — this is actually the Information-Field WRITE
         # access command, part of the not-yet-built Responses/Info-Field
         # mechanism, not a niche transport command), Move/Add/Subtract/
@@ -1288,10 +1326,37 @@ def _build_message(message: dict) -> "mido.Message":
                 time=time,
             )
 
+        if command in ("variable_play", "search", "shuttle"):
+            # VARIABLE PLAY (0x45) / SEARCH (0x46) / SHUTTLE (0x47) —
+            # RP-013 p.29-30, confirmed via a targeted pdftotext pull of
+            # the "STANDARD SPEED" section (not a full-doc OCR pass) plus
+            # en.wikipedia.org/wiki/MIDI_Machine_Control's Shuttle
+            # description — both matched exactly. All three share the
+            # IDENTICAL payload shape (only the opcode differs): a fixed
+            # byte count of 3, followed by the Standard Speed
+            # Specification (sh/sm/sl, see _encode_standard_speed).
+            _SPEED_COMMAND_OPCODES = {
+                "variable_play": 0x45, "search": 0x46, "shuttle": 0x47,
+            }
+            speed = message.get("speed")
+            if speed is None:
+                raise KeyError(f"'speed' (required for {command!r})")
+            reverse = message.get("reverse", False)
+            sh, sm, sl = _encode_standard_speed(speed, reverse)
+            return mido.Message(
+                "sysex",
+                data=(
+                    0x7F, device_id, 0x06,
+                    _SPEED_COMMAND_OPCODES[command], 0x03, sh, sm, sl,
+                ),
+                time=time,
+            )
+
         if command not in _MMC_COMMANDS:
             _mmc_special_commands = [
                 "locate", "step", "assign_system_master",
                 "generator_command", "midi_time_code_command",
+                "variable_play", "search", "shuttle",
             ]
             raise ValueError(
                 f"'command' must be one of "
