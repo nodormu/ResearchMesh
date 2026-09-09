@@ -1120,10 +1120,21 @@ def _build_message(message: dict) -> "mido.Message":
         #     hence the shared _encode_smpte_hour_byte helper — sf = SMPTE
         #     sub-frame 0-99, a field mtc_full's own Full Message doesn't
         #     have)
-        # NOT IMPLEMENTED (deliberately): Shuttle (0x47 — encoding under-
-        # specified in what was sourced) and Write (0x40 — niche,
-        # multitrack-specific). Use the generic 'sysex' action directly
-        # for either if ever needed.
+        # Added later (RP-013 v1.0, the ACTUAL MMC spec PDF): 'step',
+        # 'assign_system_master', 'generator_command',
+        # 'midi_time_code_command' — see each one's own inline comment
+        # below for wire format/verification detail.
+        # NOT IMPLEMENTED (deliberately, still): Shuttle (0x47 — its
+        # payload turns out to be the same "Standard Speed Specification"
+        # format 'search'/'variable_play' also need, not yet built here
+        # either — revisit together once that shared format is sourced),
+        # Write (0x40 — this is actually the Information-Field WRITE
+        # access command, part of the not-yet-built Responses/Info-Field
+        # mechanism, not a niche transport command), Move/Add/Subtract/
+        # Drop-Frame-Adjust (reference Information Field NAMES this tool
+        # doesn't have a registry for yet), and Procedure/Event/Group
+        # (more complex multi-format commands, deferred to their own
+        # dedicated research pass).
         # Command Error Reset (0x0C) IS included — cheap to include, one
         # more dict entry, no reason to leave it out just because Wikipedia's
         # table happened to omit it while somascape's didn't contradict it.
@@ -1180,10 +1191,112 @@ def _build_message(message: dict) -> "mido.Message":
                 time=time,
             )
 
+        if command == "step":
+            # STEP (0x48) — RP-013 p.30, visually re-verified against a
+            # rendered page image (this section's raw text extraction was
+            # garbled). Payload is ONE byte: bit6=sign (1=reverse), bits
+            # 5-0=quantity (0-63), bit7 always 0 (ordinary MIDI data byte
+            # constraint) — spec's own notation "0 g ssssss".
+            reverse = message.get("reverse", False)
+            quantity = message.get("quantity")
+            if quantity is None:
+                raise KeyError("'quantity' (required for 'step')")
+            if not (0 <= quantity <= 63):
+                raise ValueError(
+                    f"'quantity' must be 0-63, got {quantity!r}"
+                )
+            steps_byte = (0x40 if reverse else 0x00) | quantity
+            return mido.Message(
+                "sysex",
+                data=(0x7F, device_id, 0x06, 0x48, 0x01, steps_byte),
+                time=time,
+            )
+        if command == "assign_system_master":
+            # ASSIGN SYSTEM MASTER (0x49) — RP-013 p.30-31, visually
+            # re-verified. `target_device_id` = the device being assigned
+            # master (0x7F = dis-assign, per spec's own reserved meaning).
+            # The message's ENVELOPE device_id is deliberately hardcoded
+            # to 0x7F here (NOT read from the general 'device_id' field
+            # above) — the spec states outright "The ASSIGN SYSTEM MASTER
+            # message MUST be transmitted via the 'All-Call' device ID
+            # (7F)", so exposing it as a configurable field would just be
+            # a footgun for silently violating the spec.
+            target_device_id = message.get("target_device_id")
+            if target_device_id is None:
+                raise KeyError(
+                    "'target_device_id' (required for "
+                    "'assign_system_master')"
+                )
+            if not (0 <= target_device_id <= 127):
+                raise ValueError(
+                    f"'target_device_id' must be 0-127, got "
+                    f"{target_device_id!r}"
+                )
+            return mido.Message(
+                "sysex",
+                data=(0x7F, 0x7F, 0x06, 0x49, 0x01, target_device_id),
+                time=time,
+            )
+        if command == "generator_command":
+            # GENERATOR COMMAND (0x4A) — RP-013 p.31, visually
+            # re-verified. Controls the time-code generator's running
+            # state; see also the (not yet built) GENERATOR SET UP
+            # Information Field.
+            _GENERATOR_ACTIONS = {"stop": 0x00, "run": 0x01, "copy_jam": 0x02}
+            action = message.get("action")
+            if action is None:
+                raise KeyError(
+                    "'action' (required for 'generator_command')"
+                )
+            if action not in _GENERATOR_ACTIONS:
+                raise ValueError(
+                    f"'action' must be one of "
+                    f"{sorted(_GENERATOR_ACTIONS)} for "
+                    f"'generator_command', got {action!r}"
+                )
+            return mido.Message(
+                "sysex",
+                data=(
+                    0x7F, device_id, 0x06, 0x4A, 0x01,
+                    _GENERATOR_ACTIONS[action],
+                ),
+                time=time,
+            )
+        if command == "midi_time_code_command":
+            # MIDI TIME CODE COMMAND (0x4B) — RP-013 p.31, visually
+            # re-verified. Only 00/02 are defined (NOT a typo/OCR gap —
+            # 01 is genuinely skipped in the source); see also the (not
+            # yet built) MIDI TIME CODE SET UP Information Field.
+            _MTC_COMMAND_ACTIONS = {"off": 0x00, "follow": 0x02}
+            action = message.get("action")
+            if action is None:
+                raise KeyError(
+                    "'action' (required for 'midi_time_code_command')"
+                )
+            if action not in _MTC_COMMAND_ACTIONS:
+                raise ValueError(
+                    f"'action' must be one of "
+                    f"{sorted(_MTC_COMMAND_ACTIONS)} for "
+                    f"'midi_time_code_command', got {action!r}"
+                )
+            return mido.Message(
+                "sysex",
+                data=(
+                    0x7F, device_id, 0x06, 0x4B, 0x01,
+                    _MTC_COMMAND_ACTIONS[action],
+                ),
+                time=time,
+            )
+
         if command not in _MMC_COMMANDS:
+            _mmc_special_commands = [
+                "locate", "step", "assign_system_master",
+                "generator_command", "midi_time_code_command",
+            ]
             raise ValueError(
                 f"'command' must be one of "
-                f"{sorted(_MMC_COMMANDS) + ['locate']}, got {command!r}"
+                f"{sorted(_MMC_COMMANDS) + _mmc_special_commands}, "
+                f"got {command!r}"
             )
         return mido.Message(
             "sysex",
