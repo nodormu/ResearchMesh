@@ -46,13 +46,18 @@ MODULES = [
     speak,        # local text-to-speech via Piper, config-driven
     listen,       # local speech-to-text via faster-whisper, config-driven
     midi1,        # MIDI 1.0 device I/O via mido/python-rtmidi — device
-                  # discovery, channel/system messages, SysEx, and .mid/.syx
-                  # file read+write are all done (Phases 0-4 and 6 of the
-                  # build; Phase 5's pygame add-on was abandoned and Phase
-                  # 7/8's network transport was skipped, both per user
-                  # decision). midi2 (MIDI 2.0/UMP) was removed from this
-                  # project and moved to its own standalone project for
-                  # further work.
+                  # discovery, open/close/send/poll (poll carries real
+                  # per-message timestamps and an optional blocking wait),
+                  # every standard channel/System-Common/System-Real-Time
+                  # message, generic SysEx, full .mid/.syx file read+write,
+                  # and a large set of typed SysEx convenience messages
+                  # (MTC incl. Quarter Frame and NAK, MMC incl. the full
+                  # Information-Field register/masked_write and a
+                  # decode_mmc_response action, MSC, RPN/NRPN, General
+                  # MIDI system, device inquiry/control, channel mode,
+                  # MIDI tuning, notation, and more). midi2 (MIDI 2.0/UMP)
+                  # was removed from this project and moved to its own
+                  # standalone project for further work.
 ]
 
 TOOLS = [tool for module in MODULES for tool in module.TOOLS]
