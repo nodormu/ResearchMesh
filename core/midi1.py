@@ -6,8 +6,11 @@ shared discovery surface for both a MIDI 1.0 and a MIDI 2.0 tool; the MIDI
 standalone project for further work.
 
 PHASE 1 + PHASE 2 + PHASE 3 SCOPE — more actions land in later phases of the
-same doc (.mid file I/O in Phase 4, pygame add-on in Phase 5, multi-port/
-callback hardening in Phase 6). Current actions:
+same doc (.mid file I/O in Phase 4, pygame add-on in Phase 5). A more real-
+time, event-driven/callback-based receive model for `poll` (instead of the
+current call-and-check polling loop) was also discussed at some point but
+never built — see the note on `poll` below for exactly what it does today.
+Current actions:
   - list_devices : enumerate input/output port names
   - open         : open a named port (as "input" or "output"), returns a
                    handle string for later actions
@@ -22,8 +25,9 @@ callback hardening in Phase 6). Current actions:
                    (arbitrary-payload — see Phase 3 note below).
   - poll         : non-blocking check for buffered messages on an open input
                    handle — a bare-bones placeholder for real-time receive,
-                   NOT the full non-blocking/callback design promised for
-                   Phase 6. Decodes ANY incoming mido message generically
+                   NOT a full event-driven/callback-based design (an idea
+                   discussed at some point but never built — see above).
+                   Decodes ANY incoming mido message generically
                    (str(msg)), so it already reports message types beyond
                    what `send` explicitly constructs — confirmed live during
                    Phase-2-adjacent hardware testing, where `poll` correctly
