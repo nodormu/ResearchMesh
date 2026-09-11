@@ -35,7 +35,7 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 | `str_replace_based_edit_tool` | View, create, and edit files |
 | `web_search` · `web_fetch` | Anthropic's server-side search and page fetch |
 | `memory` | A `/memories` store that **persists across sessions** — the only state that outlives the process |
-| `computer` | Screenshots plus mouse/keyboard control of your desktop. **Needs an X11 session** ([see below](#full-setup-detail)) |
+| `computer` | Screenshots plus mouse/keyboard control of your desktop. **Needs an X11 session** ([see below](#setup-linux)) |
 | `browser_navigate` · `_links` · `_click` · `_fill` · `_extract` · `_back` | Headless [Playwright](https://playwright.dev/) — real DOM surfing: renders JavaScript, follows links, fills forms |
 | `document_convert` | LibreOffice + pandoc. Markdown → `.docx`/`.odt`/`.pdf`, or any office format to any other |
 | `python` | Persistent IPython kernel — **variables survive between calls** |
@@ -50,85 +50,316 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 
 Claude chooses the tools and keeps working until it has an answer.
 
-## Quick start
+## Good to know
 
-You need **Linux**, **Python 3.11+**, and an Anthropic **API key** — this is an API client,
-so a Claude subscription won't work.
+- **There is no approval prompt.** Claude runs commands and file edits as your user, no
+  y/n in between. Built for local development. `trash` exists so deletes are recoverable.
+- It's your API key: one request can fan out into many tool calls (capped at 75 per turn).
+- `bash` forgets everything between calls — `cd`, exports, activated venvs. Chain with `&&`,
+  or use `python`, which keeps state.
+- Ask for files by absolute path. If Claude offers a download link instead, tell it you
+  need the file written to disk.
+- Nothing under `/tmp` can be trashed (tmpfs has no trash), so deletes there are permanent
+  — the tool says so rather than pretending.
+- **`computer` does not work on Wayland.** It drives the screen through X11/XTEST, which
+  Wayland compositors ignore by design. Check with `echo $XDG_SESSION_TYPE`; if it prints
+  `wayland`, the tool refuses up front rather than clicking into the void. Fix with an Xorg
+  session, or `xvfb-run` — see [Setup](#setup-linux). One exception: if the actual app you
+  need to control is itself an XWayland client (common for Qt/GTK/Java desktop apps), Claude
+  can still drive *that one window* directly — see [Setup](#setup-linux) for the recipe.
+- If Sonnet gets inconsistent on a complicated multi-tool request, set `model` to an Opus one.
+- Every per-tool package is installed unconditionally by `requirements.txt` — none of
+  them are meant to be skipped. They're just *imported* lazily, only when that tool
+  runs, so if one's ever missing anyway (a stale venv), it breaks just that tool and
+  tells you what to install rather than crashing the whole client. If a tool reports one
+  missing that `requirements.txt` already lists, your venv just predates that line (no
+  lockfile, floors only) — re-run `pip install -r requirements.txt`, no restart needed.
+- **`ruff check .` and `mypy .` should both pass.** Ruff adds no rules, only turns two
+  off (reasons inline in `pyproject.toml`). Mypy sets one option
+  (`ignore_missing_imports`, since per-tool backing packages are lazily imported).
+  Neither is a dependency — install them yourself if you want them.
+- **`python smoke_test.py` before you commit.** Seconds, no API key, no network. Checks
+  imports, tool-registry shape, that the doc tool-count matches the code, and an MCP
+  handshake. GitHub Actions runs it plus `ruff`/`mypy` on every push/PR to `main`, on
+  Python 3.11 and 3.14.
+- **No unit tests, and CI doesn't exercise the tools themselves** — that needs LibreOffice,
+  a browser, an X11 display, and real API credits.
+- **Two things a linter will flag that are deliberate.** Broad `except Exception`/
+  `BaseException` is the design — every local tool must catch anything and return an error
+  string instead of crashing the chat loop (`BLE001` is off project-wide for this reason).
+  And cleanup paths (`shutdown`, `close`) use a blanket catch plus `print()` on purpose —
+  narrowing one already caused a real bug (`zmq.ZMQError` isn't an `OSError`, so a
+  narrower catch turned an ordinary Ctrl-C into a traceback).
+- **Memory** writes to `./memories` by default (`CLAUDE_MEMORY_DIR` to relocate). Claude
+  sees it as `/memories`; a traversal path like `/memories/../../.ssh/id_rsa` is rejected.
+  Private scratchpad for Claude, not a place for your project files — persists until you
+  delete it.
 
-**MCP servers are optional.** The `[mcp]` block in `config.toml` ships with
-`enabled = false` and every server commented out, so a fresh clone runs on the 23
-local tools alone. The commented entries are kept as worked examples of both entry
-shapes — the addresses and paths in them are machine-specific, so replace them with
-your own before uncommenting and setting `enabled = true`.
+<a id="setup-linux"></a>
 
-mcp_client.py is just a script to connect to your MCP server and pull a list of tools, be sure you change the IP address in the code.
+## Setup (Linux)
+
+You need **Linux**, **Python 3.11+**, and an Anthropic **API key** — this is an API
+client, so a Claude subscription won't work.
+
+### 1) Install system packages and create a venv
 
 ```bash
 sudo apt install python3 python3-venv python3-dev build-essential \
-                 libreoffice pandoc python3-tk scrot
+                 libreoffice pandoc python3-tk scrot libasound2-dev
 
 python3 -m venv ~/claude-chat-plus-more-tools
 source ~/claude-chat-plus-more-tools/bin/activate
 pip install -r requirements.txt
+```
 
-playwright install chromium           # pip installs the package, not the browser
-sudo playwright install-deps chromium
+`libreoffice` + `pandoc` back `document_convert` — `soffice` handles docx/odt/xlsx/pptx/
+html/rtf/txt/pdf, `pandoc` handles markdown (soffice has no dependable markdown import;
+`md → pdf` goes through odt on the way). `libreoffice-writer`/`-calc`/`-impress` alone are
+enough if you don't want the whole suite. `python3-tk` and `scrot` back `computer` — see
+step 3. `libasound2-dev` backs `midi1` — see the table below for why it's a hard
+requirement, not an optional extra.
 
-export ANTHROPIC_API_KEY=sk-ant-...   # add to ~/.bashrc to keep it, and put your N8N API key in .bashrc as well, or you will have to rewrite code to make it elsewhere if not exporting it before runnning main.py
+**Per-tool Python packages** (all installed unconditionally via `requirements.txt` —
+none of these are meant to be skipped; each is only *imported* lazily, at the moment
+its tool actually runs):
 
+| Tool | Needs |
+|---|---|
+| `python` | `jupyter_client>=8.9.1`, `ipykernel>=7` — older works too, just unencrypted (see step 6) |
+| `interactive_run` | `pexpect` |
+| `config_edit` | `ruamel.yaml` (YAML), `tomlkit` (TOML), `jsonpath-ng` (`$…` queries); JSON needs nothing |
+| `sql_query` | `duckdb` |
+| `trash` | `send2trash` |
+| `computer` | `pyautogui`, `pillow` — plus `python3-tk`/`scrot` from apt and an X11 display (step 3) |
+| `memory` | nothing — standard library only |
+| `text_embeddings` · `vision_query` | `httpx` — already pulled in by `anthropic`, normally a no-op install |
+| `speak` | `piper-tts` — **not** `sudo apt install piper` (an unrelated GTK app); playback shells out to `paplay` (`pulseaudio-utils` — on by default on any real desktop install via PipeWire, `sudo apt install pulseaudio-utils` if it's ever missing) |
+| `listen` | `faster-whisper`; capture shells out to `parecord` (same `pulseaudio-utils` package as above) |
+| `midi1` | `mido[ports-rtmidi]` — pulls in `python-rtmidi`, a C extension. No prebuilt Linux wheel exists for every Python version, so `pip` frequently compiles it from source — and its own build script makes ALSA dev headers a **hard requirement** on Linux unless JACK's are present instead. Without `libasound2-dev` (installed above) the build fails with a `meson`/ALSA-related compiler error, not an obvious "MIDI" one |
+
+To drop a tool entirely, remove its module from `MODULES` in `core/local_tools.py` (e.g.
+if you don't want MIDI, also drop `libasound2-dev` from the apt line above and
+`mido[ports-rtmidi]` from `requirements.txt`) — otherwise, install everything as
+written so all 23 tools actually work.
+Everything in `requirements.txt` is a `>=` floor, not a pin — if a tool ever reports a
+package missing that's already listed there, your venv just predates that line; re-run
+`pip install -r requirements.txt` (no restart needed).
+
+### 2) Playwright
+
+```bash
+playwright install chromium            # the browser binary — pip installs the package, not this
+sudo playwright install-deps chromium  # OS libraries (e.g. libmanette)
+```
+
+`playwright install` with no browser name fetches all three engines; this app only
+launches Chromium, so the argument is worth keeping.
+
+### 3) `computer` — extra apt packages, and X11 vs Wayland
+
+`pip install pyautogui` succeeds on its own, so a missing-package failure here is
+misleading — `computer` reports `pyautogui` as missing when it's really one of these two:
+
+- **`python3-tk`** — `pyautogui` pulls in `mouseinfo`, which imports `tkinter` at module
+  level. Without it, `import pyautogui` raises.
+- **`scrot`** — `pyscreeze` needs `gnome-screenshot` (via Pillow's `ImageGrab`) or `scrot`
+  for a screenshot path on X11. Either works; `scrot` is the lighter one.
+
+`computer` also needs a real **X11** display — it synthesises input via X11/XTEST, which
+Wayland compositors ignore by design, so it refuses up front on a Wayland session (check
+`echo $XDG_SESSION_TYPE`) instead of clicking into the void. Options:
+
+```bash
+# 1. Log in to an "Xorg"/"X11" session at your display manager, or
+# 2. Run the whole client inside a nested X server:
+sudo apt install xvfb
+xvfb-run -s '-screen 0 1280x800x24' python main.py
+# 3. XWayland-only setup and you want to try regardless:
+export CLAUDE_COMPUTER_FORCE=1
+```
+
+**Exception: an XWayland-backed target app.** A *whole-desktop* capture genuinely can't
+work on Wayland — no root window to grab. But if the specific app you want to control is
+itself an XWayland client (true for many GUI toolkits not yet ported to native Wayland —
+Qt, GTK, Java/Swing, Unity Editor, JetBrains IDEs, and more), it still has a real X11
+window, and Claude can drive *that one window* directly, bypassing `computer` entirely:
+
+```bash
+# 1. Confirm it's XWayland-backed:
+xwininfo -root -tree | grep -i "<window title>"
+# 2. Find its window id and raise it:
+wmctrl -l
+wmctrl -i -a 0x<id>
+# 3. Screenshot just that window (ImageMagick):
+import -window 0x<id> /tmp/shot.png
+# 4. Send it genuine XTEST input (works even without xdotool):
+python3 -c "
+from Xlib import X, XK, display
+from Xlib.ext import xtest
+d = display.Display()
+xtest.fake_input(d, X.KeyPress, d.keysym_to_keycode(XK.XK_Escape))
+d.sync()
+xtest.fake_input(d, X.KeyRelease, d.keysym_to_keycode(XK.XK_Escape))
+d.sync()
+"
+```
+
+`xdotool` is the usual wrapper for step 4; `python-xlib`'s `Xlib.ext.xtest.fake_input`
+calls the same XTEST extension directly if it isn't installed. One gotcha: a click needs
+to land on a real interactive control — not empty space — before a subsequent injected
+key event reliably reaches the app's own handlers.
+
+`computer` reports a fixed logical screen size (`CLAUDE_DISPLAY_SIZE`, default
+`1280x800`) and downscales every screenshot to it, scaling coordinates back up to your
+real resolution — that's what keeps clicks landing where Claude aims. Accuracy drops
+below roughly `1280x720`.
+
+### 4) Environment variables
+
+`main.py` calls `os.getenv()` directly, so keys must be exported for the account you
+launch as — put them in `~/.bashrc` (interactive shells) or `~/.bash_profile`/`~/.profile`
+(login shells, e.g. SSH). Note `export`, and no spaces around `=` (`VAR = value` is a
+bash syntax error):
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+If you're using any MCP servers with a bearer token, export their `token_env` variable
+the same way (see `config.toml`'s `[mcp]` block). Open a fresh shell (or `source` the
+file) afterward, and check without revealing anything:
+
+```bash
+echo "key: ${ANTHROPIC_API_KEY:+set}"
+```
+
+### 5) Run it
+
+```bash
 python main.py
 ```
 
-Then just type. **`/think <message>`** gives Claude longer to reason on hard problems;
-**`/clear`** drops the conversation without restarting the app; **Ctrl-C** exits and
-shuts everything down cleanly. **`/voice [on|off]`** toggles whether Claude's replies
-also get spoken aloud through your speaker (via the `speak` tool, local Piper TTS);
-**`/listen [N]`** records `N` seconds from your mic (or `[listen].default_duration_seconds`
-if omitted), transcribes it locally (faster-whisper), and auto-submits the transcript as
-your next turn the moment transcription finishes — no separate Enter press needed, and
-this happens regardless of whether `/voice` is on or off. Both require `[speak]`/`[listen]`
-set up in `config.toml` first (see the tools table above and that file's own inline setup
-comments) — without that, `/voice` still toggles but has nothing to speak, and `/listen`
-reports a clear `not_configured`/`disabled` message instead of trying to open the mic.
+**MCP servers are optional** — the `[mcp]` block in `config.toml` ships with
+`enabled = false` and every server commented out, so a fresh clone runs on the 23 local
+tools alone. The commented entries are worked examples of both entry shapes (Streamable
+HTTP and stdio) — replace the machine-specific addresses/paths with your own before
+uncommenting and setting `enabled = true`.
+
+### 6) Kernel encryption (automatic, no action needed)
+
+The `python` tool's ZeroMQ sockets are plaintext by default on four loopback TCP ports.
+ResearchMesh instead provisions a CurveZMQ keypair so both ends talk CURVE — needs
+`jupyter_client>=8.9.1` + `ipykernel>=7` (already in `requirements.txt`) and a pyzmq built
+with libsodium (the wheels are). On older versions it falls back to a Unix socket, then
+plaintext TCP, printing which tier and why each time. Set
+`CLAUDE_KERNEL_ENCRYPTION=required` to make an unencrypted kernel a hard error instead of
+a silent fallback.
+
+### 7) Using it
+
+Just type. **`/think <message>`** gives Claude longer to reason on hard problems;
+**`/clear`** (alias **`/reset`**) drops the conversation without restarting the app;
+**Ctrl-C** exits and
+shuts everything down cleanly. **`/voice [on|off]`** toggles whether Claude's replies are
+also spoken aloud (via `speak`, local Piper TTS); **`/listen [N]`** records `N` seconds
+from your mic (default from `[listen].default_duration_seconds`), transcribes it locally
+(faster-whisper), and auto-submits the transcript as your next turn — no extra Enter
+needed, regardless of whether `/voice` is on. Both need `[speak]`/`[listen]` configured in
+`config.toml` first (see the tools table above); without that, `/voice` toggles but has
+nothing to speak, and `/listen` reports a clear `not_configured`/`disabled` message.
+
+### 8) Test it
+
+Each of these is meant to be copy/pasted as-is directly into the CLI assistant.
+
+a) **Build your own persistent memory of this machine — do this one first, always.**
+```
+Before we do anything else, I want you to build yourself some persistent memory about
+this machine, since /memories is the only state that survives a session reset or a
+restart — everything else (the Python kernel, the browser page, the DuckDB connection)
+resets every time. Figure out what Linux distro and version this actually is first
+(don't assume — check `/etc/os-release`, `uname -a`, etc.), then scan this machine's
+real hardware (CPU, RAM, GPU, disks) and what's actually installed: CLI tools on PATH
+via `command -v`, packages via whichever package manager this distro actually uses
+(`dpkg`/`apt` on Debian/Ubuntu, `rpm`/`dnf` on Fedora, `pacman` on Arch, `zypper` on
+openSUSE, etc. — check which one applies here rather than guessing), plus snap/flatpak
+if either is present. Then write two files: 01_environment_notes.md (hardware specs,
+the distro/OS version you actually found, disk layout, and any quirks or behaviors you
+run into along the way — display server, privilege model, which package manager(s) are
+in play) and 01_system_tool_inventory.md (a categorized inventory of what's already
+installed — GUI apps, CLI tools, dev-assistant tools, reusable scripts you find lying
+around — so you reach for a real local tool instead of writing something from scratch
+every time). In both files, add a short instruction near the top telling your future
+self to re-scan and refresh the file's contents the next time you're asked to read them,
+rather than trusting old data blindly — so this stays accurate as things change on this
+machine over time.
+```
+NOTE: this is the single most useful prompt on this list. Do it once, and every future
+session starts already knowing your machine instead of re-discovering it from scratch.
+
+b) **Understand why any of this is worth doing.**
+```
+Now that you've looked at what's installed on my machine, explain in plain terms why
+it's worth installing extra local command-line tools — like ripgrep, fd, jq, ffmpeg,
+ImageMagick — instead of just having you write a one-off script from scratch every
+time I ask for something similar. What's actually being saved by doing this?
+```
+
+c) **Mouse/keyboard GUI control.**
+```
+Open a text editor (gedit, kate, or whatever opens by default), type "Hello, I am
+controlling your mouse and keyboard," save it to my Desktop, then export that same
+file as a PDF, also saved to my Desktop.
+```
+TIP: don't touch your own mouse and keyboard while it's doing this — fighting it for
+control just makes it harder for the AI. Needs an X11 session — see step 3 above if
+you're on Wayland.
+
+d) **Headless, DOM-based web browsing.**
+```
+Go to news.ycombinator.com using DOM-based browsing — not a visible browser window —
+open the #1 story on the front page, and give me a short summary of it.
+```
+NOTE: this is an example of it reading and surfing the web without ever opening a
+visible browser window or touching your mouse/keyboard.
+
+e) **Write a document, then convert it.**
+```
+Write a short one-page markdown file about the history of the QWERTY keyboard layout,
+then convert it to a PDF and save both the markdown and the PDF to my Desktop.
+```
+
+f) What is the airspeed velocity of an unladen swallow?
+
+### 9) Important
+
+Always make prompt (a) above your literal first message in a new session — reading
+`01_environment_notes.md` and `01_system_tool_inventory.md` first is what lets it
+actually know your machine instead of guessing, and (per that prompt's own instructions)
+triggers it to re-verify and refresh whatever's changed since the last time it looked.
 
 **If it starts returning 400s and won't stop, run `/clear`.** Two failures persist for
 the life of the process — an unanswered `tool_use` block, and a conversation past the
-context window — and both make every later turn fail the same way. The error report
-names which one you hit. `/clear` recovers from either while keeping the browser page,
-the kernel, your MCP connections and `/memories`. You still may have to Control-C out
-of the session and start again though, which is why you want to make sure your requests
-to NOT keep the LLM going for long periods. Pre-building memories and telling the 
-LLM to take pauses and provide status updates while writing progress to a task related
-memory file helps tremendously if a 400 error occurs.
+context window — and both make every later turn fail the same way. The error names which
+one you hit. `/clear` recovers from either while keeping the browser page, the kernel,
+your MCP connections, and `/memories`. You may still need to Ctrl-C and restart, so keep
+requests from running the model for long unsupervised stretches — pre-building memory
+files and having Claude pause for status updates while logging progress to a task memory
+file helps a lot if a 400 does hit.
 
-**MCP servers are optional** — all 23 local tools work without any of them.
-
-## Try it
-
-```
-Run uname -a and tell me what kernel I'm on.
-
-What's the latest stable Python release? Cite your source.
-
-Open news.ycombinator.com, list the top links, then open the first one and summarise it.
-
-Load ~/data.csv and show me the five biggest rows by revenue.
-
-Write a one-page summary of the Raft consensus algorithm as markdown,
-then convert it to a .docx in ~/Documents.
-
-Give me a Cisco IOS 17.15 config for a 9200 24-port switch: VTP client so my VLAN
-database isn't overwritten, two uplinks active/standby at 1 Gbps, all 24 ports up and
-ready for voice + data VLANs pushed from the VLAN server, uplink trunk on VLAN 100.
-Note what I need to change for my environment, then write it to /tmp/switch.txt.
-
-What is the airspeed velocity of an unladen swallow?
-```
+**Built and tested on** Ubuntu 26.04 LTS (kernel 7.0.0), Python 3.14.4, Playwright
+1.61.0. `pyproject.toml` requires 3.11+ (the floor is `tomllib`, used by `main.py`); 3.14
+is just what it was run on. The apt commands above assume a Debian/Ubuntu system.
 
 ## Configuration
 
 Non-secret settings live in `config.toml`. Secrets stay in the environment — the app does
 **not** read a `.env` file.
+
+Below is a filled-in example with MCP turned on and three servers configured — a fresh
+clone instead ships with `enabled = false` and every server commented out (see Setup
+step 5):
 
 ```toml
 [claude]
@@ -166,21 +397,21 @@ servers = [
 ```
 
 A server that's unreachable (http) or fails to launch (stdio) prints a warning and is
-skipped, so one being down doesn't stop the app. Tokens are never written in this file —
+skipped — one being down doesn't stop the app. Tokens are never written in this file,
 only the *name* of the variable that holds them.
 
-`~`, `$USER`, `$HOME` and `${ANY_VAR}` are expanded in `command`, `url` and the *values* of
-`env`, so the checked-in config doesn't have to name your home directory or mount point.
-(`env`'s keys are variable names and are left alone.) An undefined variable is left as
-written rather than expanding to nothing, so a typo shows up in the startup warning instead
-of becoming a silently wrong path. Absolute paths beyond that are still machine-specific —
-those you edit by hand.
+`~`, `$USER`, `$HOME` and `${ANY_VAR}` expand in `command`, `url`, and the *values* of
+`env` (`env`'s own keys are left alone), so the checked-in config doesn't have to name
+your home directory or mount point. An undefined variable is left as written rather than
+expanding to nothing, so a typo shows up as a startup warning instead of a silently wrong
+path. Absolute paths beyond that are machine-specific — edit those by hand.
 
 | Variable | Purpose |
 |---|---|
 | `ANTHROPIC_API_KEY` | Required |
 | *(per server)* | Whatever each `token_env` names, e.g. `N8N_MCP_TOKEN` |
 | *(embeddings server)* | Whatever `[embeddings].api_key_env` names, if your server needs auth |
+| *(vision server)* | Whatever `[vision].api_key_env` names, if your server needs auth |
 | `RESEARCHMESH_MCP_TOKEN` | Bearer token clients must present to `mcp_server.py --transport streamable-http`; unset = no auth |
 | `CLAUDE_MODEL` | Override the model |
 | `CLAUDE_SHOW_USAGE=1` | Print token and prompt-cache counts per request |
@@ -188,11 +419,10 @@ those you edit by hand.
 | `CLAUDE_DISPLAY_SIZE` | Logical screen size `computer` reports, e.g. `1280x800` |
 | `CLAUDE_COMPUTER_FORCE=1` | Let `computer` try anyway on a Wayland session |
 | `CLAUDE_KERNEL_ENCRYPTION` | `auto` (default) encrypts the `python` kernel's sockets with CurveZMQ and falls back if it can't; `required` fails the tool instead of running unencrypted; `off` skips it |
-
 ## MCP, in both directions
 
-ResearchMesh is a client and a server at the same time. The two are independent — use either,
-both, or neither:
+ResearchMesh is a client and a server at the same time — the two are independent, use
+either, both, or neither:
 
 ```
    Claude Code  ──delegate──▶  ResearchMesh  ──▶  n8n / Unreal / Unity / …
@@ -201,11 +431,11 @@ both, or neither:
      mcp_server.py            23 local tools           [mcp] in config.toml
 ```
 
-**As a client**, it connects out to MCP servers and merges their tools with its own — that's
-`[mcp]` in [Configuration](#configuration) above. **As a server**, it hands another client the
-whole agent as one `delegate` tool, so Claude Code can offload what it structurally can't do
-itself: drive GUI apps, answer password / `[y/N]` prompts, keep a live Python kernel between
-steps, surf a real DOM, and reach ResearchMesh's own MCP servers.
+**As a client**, it connects out to MCP servers and merges their tools with its own —
+that's `[mcp]` in [Configuration](#configuration) above. **As a server**, it hands
+another client the whole agent as one `delegate` tool, so Claude Code can offload what
+it structurally can't do itself: drive GUI apps, answer password/`[y/N]` prompts, keep a
+live Python kernel between steps, surf a real DOM, and reach ResearchMesh's own servers.
 
 ### Add it to Claude Code
 
@@ -215,62 +445,62 @@ claude mcp add researchmesh --scope user \
   -- "$HOME/tif-env/bin/python" /path/to/ResearchMesh/mcp_server.py
 ```
 
-That's it — no token, no ports, nothing to start. Claude Code launches the server itself when
-it needs it. Then just ask it to delegate something: *"use researchmesh to take a screenshot
-and tell me what window is focused."*
+That's it — no token, no ports, nothing to start. Claude Code launches the server itself
+when it needs it. Then just ask it to delegate something: *"use researchmesh to take a
+screenshot and tell me what window is focused."*
 
 Two ways it fails, both at the first call:
 
-- **`ANTHROPIC_API_KEY` not set** — a client passes stdio servers only a small safe subset of
-  the environment, so exporting it in your shell isn't enough. That's what `--env` above is
-  for. The server says so at startup rather than failing cryptically later.
-- **Wrong python** — use the venv interpreter that has the dependencies, not bare `python`.
+- **`ANTHROPIC_API_KEY` not set** — a client passes stdio servers only a small safe
+  subset of the environment, so exporting it in your shell isn't enough; that's what
+  `--env` above is for. The server says so at startup rather than failing cryptically.
+- **Wrong python** — use the venv interpreter with the dependencies, not bare `python`.
   The client spawns this with no `PATH` of yours and no activated venv.
 
-A `.mcp.json` ships in the repo as a working equivalent if you'd rather commit the config than
-run the command.
+A `.mcp.json` ships in the repo as a working equivalent if you'd rather commit the
+config than run the command.
 
 <details>
 <summary><b>Streamable HTTP</b> — for clients that connect to an already-running endpoint</summary>
 
 stdio (above) is right whenever the client launches its own server — Claude Code, Claude
-Desktop, most editors. Use HTTP instead to share one agent between several clients, or for a
-client that only speaks HTTP:
+Desktop, most editors. Use HTTP instead to share one agent between several clients, or
+for a client that only speaks HTTP:
 
 ```bash
 python mcp_server.py --transport streamable-http --port 8765
 # point the client at http://127.0.0.1:8765/mcp
 ```
 
-`--host` defaults to **127.0.0.1**, reachable only from this machine. `--path`, `--port` and
-`--json-response` are there too (`--json-response` returns one JSON body instead of an SSE
-stream).
+`--host` defaults to **127.0.0.1**, reachable only from this machine. `--path`, `--port`
+and `--json-response` are there too (`--json-response` returns one JSON body instead of
+an SSE stream).
 
-**Auth is the `token_env` arrangement from `config.toml`, pointed the other way.** Set the
-variable and it's required; leave it unset and the endpoint is unauthenticated, which is
-allowed by design and announced at startup:
+**Auth is the `token_env` arrangement from `config.toml`, pointed the other way.** Set
+the variable and it's required; leave it unset and the endpoint is unauthenticated —
+allowed by design, and announced at startup:
 
 ```bash
 export RESEARCHMESH_MCP_TOKEN=<token>          # see Tokens below
 python mcp_server.py --transport streamable-http --host 0.0.0.0
 ```
 
-Clients send `Authorization: Bearer <token>` — exactly what a `token_env` entry produces, so
-another ResearchMesh consumes this one with a plain `config.toml` line. Same token, same
-variable name, set on both machines:
+Clients send `Authorization: Bearer <token>` — exactly what a `token_env` entry
+produces, so another ResearchMesh consumes this one with a plain `config.toml` line.
+Same token, same variable name, set on both machines:
 
 ```toml
 { name = "desktop", url = "http://192.168.2.5:8765/mcp", token_env = "RESEARCHMESH_MCP_TOKEN" }
 ```
 
-Unauthenticated *and* bound off-loopback prints a warning, because at that point anyone who
-can reach the port has unrestricted shell and desktop control of the machine. The token is
-read from the environment, never passed as an argument, so it stays out of `ps` and shell
-history. `--token-env VAR` renames the variable.
+Unauthenticated *and* bound off-loopback prints a warning — at that point anyone who can
+reach the port has unrestricted shell and desktop control of the machine. The token is
+read from the environment, never passed as an argument, so it stays out of `ps` and
+shell history. `--token-env VAR` renames the variable.
 
-**TLS is a pair of paths, not a mode.** Without them the endpoint is plain HTTP — the bearer
-token and every task and result cross the network in the clear, which is called out at startup
-on a non-loopback bind:
+**TLS is a pair of paths, not a mode.** Without them the endpoint is plain HTTP — the
+bearer token and every task/result cross the network in the clear, called out at
+startup on a non-loopback bind:
 
 ```bash
 python mcp_server.py --transport streamable-http --host 0.0.0.0 \
@@ -278,30 +508,30 @@ python mcp_server.py --transport streamable-http --host 0.0.0.0 \
     --ssl-keyfile  /etc/ssl/private/worker.key
 ```
 
-The startup line then says `https://`. Give `--ssl-certfile` the **full chain** — leaf first,
-then intermediates — which is what a company CA or a public issuer hands you; a leaf-only file
-verifies on the box that has the intermediate cached and fails everywhere else. The two must be
-given together (uvicorn quietly serves plain HTTP with only one, so this refuses instead), and
-both paths are checked to exist before the port opens.
+The startup line then says `https://`. Give `--ssl-certfile` the **full chain** — leaf
+first, then intermediates — since a leaf-only file verifies on the box that has the
+intermediate cached and fails everywhere else. Both flags must be given together
+(uvicorn quietly serves plain HTTP with only one, so this refuses instead), and both
+paths are checked to exist before the port opens.
 
-The client does not do any app-specific certificate setup: the URL becomes `https://…` and the
-underlying HTTP client verifies certificates using its normal trust configuration for that runtime.
-A company CA or private certificate therefore works only if that CA is already trusted by the
-client environment, or if `SSL_CERT_FILE=/path/ca.pem` / `SSL_CERT_DIR=/path/to/certs` is set
+The client does no app-specific certificate setup: the URL becomes `https://…` and the
+underlying HTTP client verifies certificates against its runtime's normal trust
+configuration. A company CA or private certificate works only if that CA is already
+trusted there, or `SSL_CERT_FILE=/path/ca.pem` / `SSL_CERT_DIR=/path/to/certs` is set
 for that process.
 
-Both transports are the same server object — no separate build, no high-level-server rewrite. Under HTTP
-the stdout guard is skipped (fd 1 isn't the wire there) so the app's messages become ordinary
-service logs, line-buffered so a redirected log fills in live rather than on exit. Running the
-stdio form by hand just waits on stdin, which is a healthy stdio server behaving normally.
+Both transports are the same server object — no separate build. Under HTTP the stdout
+guard is skipped (fd 1 isn't the wire there), so the app's messages become ordinary
+line-buffered service logs. Running the stdio form by hand just waits on stdin — a
+healthy stdio server behaving normally.
 
 </details>
 
 <details>
 <summary><b>Tokens</b> — generating one, and where it actually has to live</summary>
 
-**Only needed for `--transport streamable-http`.** Under stdio there's no port and nothing to
-authenticate.
+**Only needed for `--transport streamable-http`.** Under stdio there's no port and
+nothing to authenticate.
 
 Generate one with the interpreter this project already requires — no `openssl` needed:
 
@@ -309,12 +539,12 @@ Generate one with the interpreter this project already requires — no `openssl`
 python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-256 bits from the OS CSPRNG. There's deliberately no `generate_token.py` here: a file wrapping
-one line of stdlib would be the same mistake as a tool wrapping a command `bash` could already
-run.
+256 bits from the OS CSPRNG. There's deliberately no `generate_token.py` here — wrapping
+one stdlib line in a file would be the same mistake as a tool wrapping a command `bash`
+could already run.
 
-The value lives in an environment variable; only its *name* goes in a file. Which file depends
-on how the process starts, and this is the part that catches people:
+The value lives in an environment variable; only its *name* goes in a file. Which file
+depends on how the process starts — this is the part that catches people:
 
 | How it starts | Where the token has to be |
 |---|---|
@@ -324,244 +554,33 @@ on how the process starts, and this is the part that catches people:
 
 Two things to get right:
 
-- **Never put the literal token in a committed file.** `.mcp.json` and `config.toml` are both
-  in git — use `${RESEARCHMESH_MCP_TOKEN}` and `token_env` respectively.
-- **One name is normally right.** It's one token, and each end reads the variable from its own
-  environment, so both machines can call it `RESEARCHMESH_MCP_TOKEN`. You only need a second
-  name if a *single* machine both serves an endpoint and consumes someone else's — then one
-  variable would have to mean two different secrets. Rename either end with `--token-env VAR`
-  or `token_env = "VAR"`.
+- **Never put the literal token in a committed file.** `.mcp.json` and `config.toml` are
+  both in git — use `${RESEARCHMESH_MCP_TOKEN}` and `token_env` respectively.
+- **One name is normally right.** It's one token, and each end reads it from its own
+  environment, so both machines can call it `RESEARCHMESH_MCP_TOKEN`. You only need a
+  second name if a *single* machine both serves an endpoint and consumes someone else's
+  — then one variable would have to mean two different secrets. Rename either end with
+  `--token-env VAR` or `token_env = "VAR"`.
 
-**Can you just ask ResearchMesh to set it up?** Mostly. It can generate the token, append the
-export to `~/.bashrc`, write a systemd `EnvironmentFile`, and update a consuming
-`config.toml`. It *cannot* set the variable in your shell — the `bash` tool is a fresh
-subprocess per call, and a child can't alter its parent's environment anyway — so you still
-need a new shell (or `source ~/.bashrc`) and a server restart. Tell it not to write the
-literal token into anything in the repo.
-
-</details>
-
-## Good to know
-
-- **There is no approval prompt.** Claude runs the commands and file edits it decides on, as
-  your user, with no y/n in between. Built for local development. `trash` exists so deletes
-  are at least recoverable.
-- It's your API key: one request can fan out into many tool calls (capped at 30 per turn).
-- `bash` forgets everything between calls — `cd`, exports, activated venvs. Chain with `&&`,
-  or use `python`, which keeps state.
-- Ask for files by absolute path. If Claude offers a download link instead, tell it you need
-  the file written to disk.
-- Nothing under `/tmp` can be trashed (tmpfs has no trash), so deletes there would be
-  permanent — the tool says so rather than pretending.
-- **`computer` does not work on Wayland.** It drives the screen through X11/XTEST, which
-  Wayland compositors ignore by design, so clicks and keystrokes never reach native windows
-  and screenshots come back blank. Check with `echo $XDG_SESSION_TYPE`; if it prints
-  `wayland`, the tool refuses up front and tells you why rather than clicking into the void.
-  Fix it with an Xorg session or `xvfb-run -s '-screen 0 1280x800x24' python main.py` —
-  details under [Full setup detail](#full-setup-detail). Every other tool is unaffected.
-  There's a real, narrower exception if the actual application you need to control is itself
-  an XWayland client (common — many Qt/GTK/Java desktop apps still run this way even on a
-  Wayland desktop): Claude can drive *that one window* directly with plain X11-protocol
-  calls, entirely outside the `computer` tool. See [Full setup
-  detail](#full-setup-detail) for the recipe.
-- If Sonnet gets inconsistent on a complicated multi-tool request, set `model` to an Opus one.
-- Optional packages are imported only when a tool is used, so a missing one breaks just that
-  tool and tells you what to install.
-- If a tool reports a missing package that `requirements.txt` already lists (e.g.
-  `sql_query`'s `duckdb`, or `config_edit`'s `ruamel.yaml`/`jsonpath-ng`), that's not a docs
-  gap — your venv just predates that line. Everything in `requirements.txt` is a `>=` floor
-  rather than a pin (there's no lockfile), so a venv can satisfy it and still miss a package
-  added later. Re-run `pip install -r requirements.txt`; you don't need to restart the app,
-  because each optional package is imported at the moment its tool is called.
-- **Linting: one linter is configured, `ruff`, and `ruff check .` should pass.**
-  `pyproject.toml` has a `[tool.ruff.lint]` section. It adds no rules — it only switches
-  three *off*, each with its reason written next to it, so a clean run is the expected
-  baseline and any finding you do see is genuinely new: your own code, or a rule a newer
-  ruff added. (The rule selection is left at ruff's defaults, which do shift between
-  versions.) Ruff is **not** a dependency and nothing runs it for you — install it yourself
-  if you want it. There's no `[tool.black]` and no `.pylintrc`.
-- **Type checking: `mypy .` should pass too.** `pyproject.toml` has a `[tool.mypy]` section
-  setting exactly one option (`ignore_missing_imports`, because the optional tool backings
-  are lazily imported and legitimately absent from a bare venv); strictness stays at mypy's
-  defaults, so unannotated function bodies aren't checked. It's worth having here because
-  mypy checks against the packages you actually have installed, which makes it the gate that
-  catches a dependency changing shape under you — it named every mcp 1.x → 2.x rename in one
-  run, including the ones in `core/tools.py` that the smoke test can't reach.
-- **`python smoke_test.py` before you commit.** Seconds, no API key, no network, no optional
-  packages. It checks that everything imports, that the tool registry is well-formed, that the
-  tool count in the docs still matches the code, and that `mcp_server.py` completes an MCP
-  handshake. GitHub Actions runs it plus `ruff` and `mypy` on every push and PR to `main`
-  (`.github/workflows/ci.yml`), on Python 3.11 and 3.14.
-- **There are still no unit tests**, and CI deliberately doesn't exercise the tools themselves
-  — that would need LibreOffice, a browser, an X11 display and real API credits. If your venv
-  happens to have `pylint`/`black` installed (neither is a project dependency) or the system
-  has `shellcheck`, they're safe to run by hand — expect plenty of output, since nothing is
-  configured for them.
-- **Two things a linter will fight you on here** — worth knowing before you "fix" them.
-  Broad `except Exception`/`except BaseException` is the design, not sloppiness: every local
-  tool must catch anything and return an error string rather than crash the chat loop, which
-  is why `BLE001` is switched off project-wide. And cleanup paths (`shutdown`, `close`) must
-  not be able to fail *or* fail silently — narrowing one has already caused a real bug, since
-  `zmq.ZMQError` isn't an `OSError` and escaping `shutdown()` turns an ordinary Ctrl-C into a
-  traceback. Blanket catch plus a `print()` is the pattern.
-
-<a id="full-setup-detail"></a>
-
-<details>
-<summary><b>Full setup detail</b> — OS libraries, document tools, which package backs which tool</summary>
-
-**Playwright.** `pip` installs the Python package but not the browser or its OS libraries:
-
-```bash
-playwright install chromium            # the browser binary
-sudo playwright install-deps chromium  # OS libraries (e.g. libmanette)
-```
-
-`playwright install` with no browser name fetches all three engines; this app only launches
-Chromium, so the argument is worth keeping.
-
-**Document conversion.** `soffice` (LibreOffice) handles docx/odt/xlsx/pptx/html/rtf/txt and
-PDF output, each call in a throwaway user profile so two conversions can't collide on the
-profile lock. `pandoc` handles markdown, because `soffice` has no dependable markdown
-import; `md → pdf` goes through odt on the way, since pandoc's own PDF writer would need a
-LaTeX engine. `libreoffice-writer`/`-calc`/`-impress` alone are enough if you don't want the
-whole suite.
-
-**Computer use needs two apt packages that pip won't install.** `pip install pyautogui`
-succeeds without them, so the failure is misleading — the tool reports pyautogui as missing
-when it is right there:
-
-- **`python3-tk`** — `pyautogui` pulls in `mouseinfo`, which imports `tkinter` at module
-  level. Without it, `import pyautogui` raises and `computer` returns its install hint for a
-  package you already have.
-- **`scrot`** — `pyscreeze` only has a screenshot path if `gnome-screenshot` is present (which
-  lets it use Pillow's `ImageGrab`) or `scrot` is. With neither, capture fails on X11 even
-  though every Python package is installed. Either works; `scrot` is the lighter one.
-
-**Computer use also needs X11.** The `computer` tool synthesises input through X11/XTEST, which
-Wayland compositors deliberately ignore — on a Wayland session clicks and keystrokes never
-reach native windows and screenshots come back blank, so the tool refuses up front and says
-so instead of failing silently. Check with `echo $XDG_SESSION_TYPE`. Options:
-
-```bash
-# 1. Log in to an "Xorg"/"X11" session at your display manager, or
-# 2. Run the whole client inside a nested X server:
-sudo apt install xvfb
-xvfb-run -s '-screen 0 1280x800x24' python main.py
-# 3. XWayland-only setup and you want to try regardless:
-export CLAUDE_COMPUTER_FORCE=1
-```
-
-**A real exception: an XWayland-backed target application.** The refusal above is about
-`computer`'s own generic approach — `pyautogui`'s screenshot backend needs a real X11 root
-window to grab and a Wayland compositor doesn't expose one, so a *whole-desktop* capture
-genuinely can't be made to work this way, full stop. But if the specific application you're
-trying to control is itself an XWayland client — true for many desktop GUI toolkits that
-haven't been ported to native Wayland (Qt, GTK, Java/Swing, Unity Editor, JetBrains IDEs, and
-more) — it still has a real, addressable X11 window underneath, and Claude can drive *that one
-window* directly with plain X11-protocol tools via `bash`/`python`, bypassing
-`computer`/`pyautogui` entirely:
-
-```bash
-# 1. Confirm the target really is XWayland-backed (a normal X11 window entry, not absent):
-xwininfo -root -tree | grep -i "<window title>"
-
-# 2. Find its window id and raise it:
-wmctrl -l
-wmctrl -i -a 0x<id>
-
-# 3. Screenshot just that window (a whole-screen grab still won't work):
-import -window 0x<id> /tmp/shot.png     # ImageMagick
-
-# 4. Send it genuine XTEST input -- works even without xdotool installed:
-python3 -c "
-from Xlib import X, XK, display
-from Xlib.ext import xtest
-d = display.Display()
-xtest.fake_input(d, X.KeyPress, d.keysym_to_keycode(XK.XK_Escape))
-d.sync()
-xtest.fake_input(d, X.KeyRelease, d.keysym_to_keycode(XK.XK_Escape))
-d.sync()
-"
-```
-
-`xdotool` is the usual convenience wrapper for step 4, but if it isn't installed (and there's
-no sudo to `apt install` it), `python-xlib` calls the exact same XTEST extension directly —
-`Xlib.ext.xtest.fake_input` — so it's a full substitute, not a downgrade. One real gotcha
-worth knowing up front: a mouse click has to land on an actual interactive control (a real
-button, not empty space or a plain label) before a *subsequent* injected key event reliably
-reaches the target app's own event handlers — clicking blank space to "just establish focus"
-does not reliably work the same way. This does **not** make `computer` itself work on
-Wayland — the refusal above still stands, and a full-desktop screenshot genuinely isn't
-possible this way. It's a separate, manual technique for one already-identified XWayland
-window, useful whenever a task needs to drive or inspect one specific already-running GUI
-application from a Wayland session.
-
-The tool reports a fixed logical screen size (`CLAUDE_DISPLAY_SIZE`, default `1280x800`)
-and downscales every screenshot to exactly that, scaling Claude's coordinates back up to
-your real resolution. That's what keeps clicks landing where Claude aims — the declared
-size and the image it sees can never drift apart. Below roughly `1280x720`, accuracy drops.
-
-**Memory** writes to `./memories` by default (`CLAUDE_MEMORY_DIR` to relocate). Claude sees
-it as `/memories`; every command is confined to that directory, so a traversal path like
-`/memories/../../.ssh/id_rsa` is rejected rather than served. It's a private scratchpad for
-Claude, not a place for your project files — and it persists until you delete it.
-
-**Optional Python packages** (all in `requirements.txt`; each is imported lazily):
-
-| Tool | Needs |
-|---|---|
-| `python` | `jupyter_client>=8.9.1`, `ipykernel>=7` — older versions work, but unencrypted (see below) |
-| `interactive_run` | `pexpect` |
-| `config_edit` | `ruamel.yaml` (YAML), `tomlkit` (TOML), `jsonpath-ng` (`$…` queries); JSON needs nothing |
-| `sql_query` | `duckdb` |
-| `trash` | `send2trash` |
-| `computer` | `pyautogui`, `pillow` — **plus `python3-tk` and `scrot` from apt, and an X11 display** (see below) |
-| `memory` | nothing — standard library only |
-| `text_embeddings` | `httpx` — already pulled in by `anthropic`, so this is normally a no-op install |
-| `vision_query` | `httpx` — same as `text_embeddings`, normally a no-op install |
-| `speak` | `piper-tts` — **not** `sudo apt install piper` (an unrelated GTK app); playback shells out to `paplay` |
-| `listen` | `faster-whisper`; capture shells out to `parecord` |
-| `midi1` | `mido[ports-rtmidi]` |
-
-To drop a tool entirely, remove its module from `MODULES` in `core/local_tools.py`.
-
-**The `python` kernel's sockets are encrypted.** Everything that tool does — your code, your
-data, the results — travels over ZeroMQ, which by default is plaintext on four loopback TCP
-ports; `ipykernel` says so itself, warning on every start that the link "is susceptible to
-eavesdropping". ResearchMesh has the kernel manager provision a CurveZMQ keypair instead, so
-both ends talk CURVE. That needs `jupyter_client>=8.9.1` and `ipykernel>=7` (and a pyzmq built
-with libsodium, which the wheels are); on anything older it falls back to a Unix socket in the
-Jupyter runtime dir, and then to plaintext TCP, printing which and why each time it drops a
-tier. Set `CLAUDE_KERNEL_ENCRYPTION=required` to make an unencrypted kernel a hard error
-rather than a fallback — if you see that error, `pip install -U 'jupyter_client>=8.9.1'
-'ipykernel>=7'` is the fix.
-
-**Environment variables** must be exported for the user account you launch as — `main.py`
-calls `os.getenv()` directly. Put them in `~/.bashrc` for interactive shells, or
-`~/.bash_profile` / `~/.profile` for login shells (e.g. SSH). Note `export`, and **no spaces**
-around `=`; `VAR = value` is a bash syntax error. Then open a fresh shell or `source` it, and
-check without revealing anything:
-
-```bash
-echo "key: ${ANTHROPIC_API_KEY:+set}  token: ${N8N_MCP_TOKEN:+set}"   # per your token_env names
-```
-
-**Built and tested on** Ubuntu 26.04 LTS (kernel 7.0.0), Python 3.14.4, Playwright 1.61.0.
-`pyproject.toml` requires 3.11+ (the floor is `tomllib`, used by `main.py`); 3.14 is just what
-it was run on. The `install-deps` step assumes a Debian/Ubuntu `apt` system.
+**Can you just ask ResearchMesh to set it up?** Mostly — it can generate the token,
+append the export to `~/.bashrc`, write a systemd `EnvironmentFile`, and update a
+consuming `config.toml`. It *cannot* set the variable in your current shell (`bash` is a
+fresh subprocess per call, and a child can't alter its parent's environment anyway), so
+you still need a new shell (or `source ~/.bashrc`) and a server restart. Tell it not to
+write the literal token into anything in the repo.
 
 </details>
 
 <details>
 <summary><b>HTTPS and TLS</b> — for an MCP server with a self-signed or private-CA certificate</summary>
 
-A server URL may be `http://` or `https://`. TLS is verified by the `httpx` client inside
-`mcp_client.py`, offline, against a local CA bundle — the CA is not contacted at connect time.
+A server URL may be `http://` or `https://`. TLS is verified by the `httpx` client
+inside `mcp_client.py`, offline, against a local CA bundle — the CA isn't contacted at
+connect time.
 
-A publicly-signed certificate (Let's Encrypt, DigiCert, …) works with no configuration. A
-self-signed or internal-CA certificate isn't in `certifi`, so point `httpx` at a bundle that
-contains your CA:
+A publicly-signed certificate (Let's Encrypt, DigiCert, …) works with no configuration.
+A self-signed or internal-CA certificate isn't in `certifi`, so point `httpx` at a bundle
+that contains your CA:
 
 ```bash
 export SSL_CERT_FILE=/path/to/your-ca-chain.pem   # or SSL_CERT_DIR for a hashed dir
@@ -569,12 +588,12 @@ export SSL_CERT_FILE=/path/to/your-ca-chain.pem   # or SSL_CERT_DIR for a hashed
 
 Two things that catch people out:
 
-- `SSL_CERT_FILE` **replaces** the default trust store rather than adding to it. If the same
-  process also needs public HTTPS hosts, concatenate:
+- `SSL_CERT_FILE` **replaces** the default trust store rather than adding to it. If the
+  same process also needs public HTTPS hosts, concatenate:
   `cat "$(python -m certifi)" your-ca.pem > combined-ca.pem`
-- Your server (or its reverse proxy) must present its **full chain**. A missing
-  intermediate is the most common "the cert is valid but it still won't connect" cause, and
-  the fix is on the server — the client only needs the root.
+- Your server (or reverse proxy) must present its **full chain** — a missing
+  intermediate is the most common "the cert is valid but it still won't connect" cause,
+  and the fix is on the server side; the client only needs the root.
 
 The OS trust store (`/etc/ssl/certs`) does not affect this app.
 
@@ -619,40 +638,152 @@ core/
 ```
 
 - **Add an MCP server:** add an entry under `[mcp].servers` in `config.toml` — see
-  "Configuration" above for both entry shapes (`url` for Streamable HTTP, `command` for a
-  local stdio server main.py launches itself). Its tools appear to Claude automatically once
-  it connects. A one-off Python stdio script can also be passed as an argument instead
-  (`python main.py path/to/server.py`) without touching config.toml.
+  [Configuration](#configuration) above for both entry shapes. Its tools appear to
+  Claude automatically once it connects. A one-off Python stdio script can also be
+  passed as an argument instead (`python main.py path/to/server.py`), no config edit
+  needed.
 - **Add a local tool:** write a module exposing `TOOLS`, `handles(name)`, and
-  `async execute(name, tool_input)`, then add it to `MODULES` in `core/local_tools.py`.
-  That's the only registration step. Update `SYSTEM_PROMPT` in `core/chat.py` too — it
+  `async execute(name, tool_input)`, then add it to `MODULES` in `core/local_tools.py` —
+  the only registration step. Update `SYSTEM_PROMPT` in `core/chat.py` too, since it
   describes the tool set to Claude.
-- **Keep the list lean.** Tool-selection accuracy degrades past roughly 30–50 tools, so prefer
-  one tool with a mode parameter over several near-duplicates, and don't wrap a command
-  `bash` could already run.
+- **Keep the list lean.** Tool-selection accuracy degrades past roughly 30–50 tools, so
+  prefer one tool with a mode parameter over several near-duplicates, and don't wrap a
+  command `bash` could already run.
 
-Check every configured server on its own with `python mcp_client.py` — it connects to each
-in turn, lists its tools, and reports failures without starting the chat.
+Check every configured server on its own with `python mcp_client.py` — it connects to
+each in turn, lists its tools, and reports failures without starting the chat.
 
 </details>
 
 <details>
 <summary><b>Optional: MCP Inspector</b> — for debugging an MCP server</summary>
 
-This project is **Python-first**, but the full-feature setup requires Node.js. The repo supports
-Node-based MCP servers in `config.toml` (for example `command = ["node", ...]`), and the browser
-tooling uses Playwright, which is a Node-backed runtime in practice. In other words: if you want
-the full MCP + browser workflow, install Node.js and keep it on PATH.
+This project is **Python-first**, but the full-feature setup needs Node.js — the repo
+supports Node-based MCP servers in `config.toml` (e.g. `command = ["node", ...]`), and
+the browser tooling's Playwright is Node-backed in practice. So: for the full MCP +
+browser workflow, install Node.js and keep it on PATH.
 
-The [MCP Inspector](https://github.com/modelcontextprotocol/inspector) is optional but also Node-based:
+The [MCP Inspector](https://github.com/modelcontextprotocol/inspector) is optional but
+also Node-based:
 
 ```bash
 npx @modelcontextprotocol/inspector@latest
 ```
 
-It is a separate debugging aid, not the core of the project runtime.
+A separate debugging aid, not the core of the project runtime.
 
 </details>
+
+## Recommended local tools (optional — saves tokens)
+
+None of these are dependencies — nothing here breaks without them. They're suggested
+purely so Claude reaches for a fast, purpose-built local binary via `bash` instead of
+burning tokens re-implementing the same job in `python`, or reading whole files through
+the file editor just to search them. Install whichever are useful to you; skip the rest.
+Everything below is `apt`/`snap`/`flatpak`, or (for Rust) the official `rustup`
+installer — commands as written are Debian/Ubuntu-specific. On another distro, the
+tool names are the same; swap in your own package manager (`dnf`, `pacman`, `zypper`,
+etc.) yourself. `apt`/`flatpak` lines include `-y` since Claude may run these itself via
+`bash`, which has no terminal for either to prompt against; drop it if running by hand
+and you'd rather review each one first.
+
+```bash
+# --- Search, text & structured data -----------------------------------------------
+sudo apt install -y ripgrep       # rg — recursive search, instead of reading whole files to grep them
+sudo apt install -y fd-find       # fd — fast, .gitignore-aware find. NOTE: the binary is `fdfind`,
+                                # not `fd` (Debian name clash with an unrelated package)
+sudo apt install -y bat           # cat with syntax highlighting + line numbers. NOTE: the binary is
+                                # `batcat`, not `bat` (same kind of Debian name clash as fd-find)
+sudo apt install -y jq            # jq — query/reshape JSON from the shell
+sudo apt install -y yq            # yq, but for YAML. NOTE: Debian's `yq` is the OLD Python
+                                # jq-wrapper-for-YAML (`yq '.filter' file.yaml`), NOT the popular
+                                # Go-based mikefarah/yq most online docs assume (`yq e '.path' file`)
+sudo apt install -y miller         # mlr — CSV/TSV/JSON reshape/filter/stats from the shell
+sudo apt install -y fzf            # fuzzy finder; use `--filter` for non-interactive/scripted matching
+
+# --- File search & disk usage ------------------------------------------------------
+sudo apt install -y plocate        # modern `locate` — instant filename search across the whole disk,
+                                 # from a background-updated index (run `sudo updatedb` once first)
+sudo apt install -y tree           # directory-structure dumps
+sudo apt install -y ncdu            # interactive, curses-based disk usage — see what's eating space
+sudo snap install dust           # fast, visual `du` — not in the default apt repos, snap only
+sudo apt install -y duf             # nicer `df`, disk-space-by-volume at a glance
+
+# --- Archives & binary inspection ---------------------------------------------------
+# tar/gzip already exist on every Debian/Ubuntu system (Essential: yes — no install
+# possible even if you wanted to skip them), and zip/unzip/xz-utils ship as part of the
+# standard Ubuntu task. Between those four, "basically every format" is already covered
+# before you install anything — unlike Windows, which has no built-in CLI archiver at
+# all. The one real gap:
+sudo apt install -y unrar            # RAR extraction — the one common format Linux has
+                                   # nothing built in for (RAR itself is proprietary)
+# 7-Zip's own .7z format is the other thing genuinely missing — worth adding only if you
+# actually receive .7z files, not as a general-purpose necessity:
+sudo apt install -y 7zip             # NOTE: this used to be `p7zip-full` — that package no
+                                   # longer exists on current Ubuntu, replaced by the
+                                   # upstream-maintained `7zip` package (still gives `7z`)
+sudo apt install -y hexyl            # colorized hex+ASCII dump, e.g. for raw SysEx/firmware bytes
+sudo apt install -y binwalk          # scans a binary for embedded file signatures/firmware images —
+                                   # the closest apt-packaged equivalent to a deep file-type identifier
+
+# --- Git / GitHub / diffing ---------------------------------------------------------
+sudo apt install -y gh              # GitHub CLI — PRs/issues/releases from the shell
+sudo apt install -y git-delta       # syntax-highlighted, side-by-side git diff pager. NOTE: the plain
+                                  # `delta` apt package is a DIFFERENT, unrelated 2006 tool and
+                                  # installs no `delta` binary at all — `git-delta` is the one that
+                                  # actually provides the `delta` command
+
+# --- HTTP / API testing --------------------------------------------------------------
+sudo apt install -y httpie          # much more readable than raw curl for poking at APIs. NOTE: the
+                                  # request-sending command is `http`, not `httpie` — the bare
+                                  # `httpie` command is a separate plugin-manager subcommand
+
+# --- C / C++ / Rust toolchains --------------------------------------------------------
+# gcc/g++/make (build-essential) are already installed if you followed Setup step 1 —
+# nothing missing there. clang is a genuine alternative compiler worth having on top:
+sudo apt install -y clang            # self-contained C/C++ compiler, alternative to gcc
+sudo apt install -y cmake            # build system generator
+sudo apt install -y ninja-build      # fast build backend, pairs with cmake
+# Rust: use the official rustup installer, not a distro package — apt's rustc/cargo lag well
+# behind upstream and can't be updated independently of the whole system:
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# --- System diagnostics ---------------------------------------------------------------
+# strace and lsof are already on any standard Ubuntu install (both are part of the
+# `ubuntu-standard` task) — nothing to add there, they're just worth knowing about:
+# `strace <cmd>` traces a process's syscalls (first move for "why is this hanging"),
+# `lsof` shows what has a given file/port open.
+sudo apt install -y htop            # interactive process viewer, nicer than plain `top`
+sudo apt install -y procs           # modern `ps` replacement, colorized/tree-aware output
+sudo apt install -y hyperfine       # benchmarking — compare two commands' real run time
+
+# --- Audio production & media metadata ------------------------------------------------
+sudo apt install -y ffmpeg                    # ffmpeg/ffprobe — audio/video transcoding and inspection
+sudo apt install -y sox                       # CLI audio conversion/trim/resample, complements ffmpeg
+sudo apt install -y mediainfo                 # instant codec/bitrate/duration metadata
+sudo apt install -y libimage-exiftool-perl    # exiftool — metadata on images/audio/PDFs/almost anything
+                                            # (package name differs from the `exiftool` command it installs)
+
+# --- Images & graphic design -----------------------------------------------------------
+sudo apt install -y imagemagick     # convert/mogrify/compare — image conversion & editing from the shell
+sudo apt install -y krita           # digital painting/illustration, distinct from GIMP (raster) and
+                                  # Inkscape (vector)
+sudo apt install -y webp            # cwebp/dwebp — encode/decode the WebP image format from the shell
+
+# --- Video editing -----------------------------------------------------------------------
+sudo apt install -y handbrake-cli   # video transcoding with sane presets, complements ffmpeg
+sudo flatpak install -y flathub org.shotcut.Shotcut   # free timeline-based video editor, not
+                                                     # reliably in the default apt repos
+# DaVinci Resolve (the other obvious free NLE) has no apt/snap/flatpak package — Blackmagic
+# only distributes it via a manual download + free account signup from their own site.
+
+# --- Documents & writing -----------------------------------------------------------------
+sudo apt install -y poppler-utils   # pdftotext/pdftoppm/pdfinfo/pdfimages — pull just the pages you
+                                  # need out of a PDF as text, without going through LibreOffice
+sudo apt install -y calibre         # ebook-convert (CLI) — epub/mobi/azw3/etc., more formats than
+                                  # document_convert reaches
+sudo apt install -y hunspell        # command-line spell-checking
+```
 
 ## License
 
