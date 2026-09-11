@@ -31,13 +31,17 @@ This project is Python-first, but the full-feature setup requires Node.js: the r
 
 Connect additional stdio MCP servers by passing their scripts as argv: `python main.py path/to/other_server.py`.
 
-**Full install walkthrough lives in `README.md`'s "Setup (Linux)" section — 9 numbered
-steps covering the apt/pip install, Playwright, the `computer` tool's X11/Wayland
-requirement and its two easy-to-misdiagnose apt-only dependencies (`python3-tk`,
-`scrot`), environment variables, and the per-tool package table.** (`SETUP.md` was
-merged into it; the two duplicated ~60% of their content and drifted apart.) Don't
-re-derive that walkthrough here — this section is for what to run, not how to set up
-a fresh machine.
+```bash
+pip install -r requirements.txt
+playwright install chromium   # pip installs the package, not the browser itself
+```
+
+**Full install walkthrough (the apt packages `document_convert`/`computer` need,
+Playwright's own OS-library step, X11/Wayland, environment variables, the per-tool
+package table) lives in `README.md`'s "Setup (Linux)" section — 9 numbered steps.**
+(`SETUP.md` was merged into it; the two duplicated ~60% of their content and drifted
+apart.) Don't re-derive that walkthrough here — the two commands above are what get a
+working dev environment; everything else there is one-time OS-package setup.
 
 One thing worth restating because it changes what you should touch when editing code,
 not just how to install: **`computer`'s Wayland refusal is about its own generic,
