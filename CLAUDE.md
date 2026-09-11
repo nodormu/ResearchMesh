@@ -48,19 +48,19 @@ That refusal is about `computer`'s own generic, whole-screen `pyautogui` approac
 
 It also has two **apt** dependencies that `pip install pyautogui` does not bring, and whose absence is easy to misdiagnose because the failure names a package that *is* installed: `mouseinfo` imports `tkinter` at module level, so without **`python3-tk`** the `import pyautogui` inside `computer` raises and the tool reports pyautogui as missing when it isn't. And `pyscreeze` only has a screenshot path if either `gnome-screenshot` (which lets it use Pillow's `ImageGrab`) or **`scrot`** is on PATH — with neither, capture fails on X11 even though every Python package is present. `scrot` is the one to install, since this tool is X11-only by design.
 
-Optional tool dependencies are imported **lazily, inside the tool that needs them**, so a missing package only breaks that one tool — it still gets declared to Claude and returns an install hint if used. To drop a tool entirely, remove its module from `MODULES` in `core/local_tools.py`.
+Per-tool dependencies are imported **lazily, inside the tool that needs them**, rather than being optional to install — `requirements.txt` installs every one of them unconditionally. The lazy import just means that if a package were ever missing anyway (e.g. a stale venv), only that one tool breaks — it still gets declared to Claude and returns an install hint if used, instead of crashing the whole client at startup. To drop a tool entirely, remove its module from `MODULES` in `core/local_tools.py`.
 
 If a tool's install hint names a package that `requirements.txt` already lists (e.g.
 `sql_query`'s `duckdb`, or `config_edit`'s `ruamel.yaml`/`jsonpath-ng`), the docs aren't
 incomplete — the active venv predates that line. There is no lockfile here: every entry in
 `requirements.txt` is a `>=` floor rather than a pin, so a venv can still satisfy the file as
 it stood when it was built and lack a package added to it since. Re-running
-`pip install -r requirements.txt` fixes it **without restarting the app** — every optional
+`pip install -r requirements.txt` fixes it **without restarting the app** — every per-tool
 backing is imported inside the function that needs it, and a failed import leaves no cached
 sentinel behind (`core/data.py` assigns `_connection` only on success), so the next tool call
 simply retries the import.
 
-See **`README.md`** for the full environment setup — the quick start is at the top, and the collapsed "Full setup detail" section covers browser system libraries, the optional per-tool packages, and environment variables. (`SETUP.md` was merged into it; the two duplicated ~60% of their content and drifted apart.)
+See **`README.md`** for the full environment setup — step-by-step install is its own "Setup (Linux)" section, which also covers the per-tool backing packages and environment variables. (`SETUP.md` was merged into it; the two duplicated ~60% of their content and drifted apart.)
 
 **One linter is configured: `ruff`.** `pyproject.toml` has a `[tool.ruff.lint]` section, so
 **`ruff check .` should come back clean** — treat that as the bar for an edit. It adds no
@@ -79,13 +79,13 @@ well-formed with no duplicate names, **the tool count claimed in the docs still 
 `delegate`. That third check exists because this repo states its tool count in five places
 across two files; the fourth because a stray byte on stdout desynchronising JSON-RPC is
 invisible until a client connects. It needs no API key (a placeholder satisfies
-`_require_api_key`, and listing tools never reaches the API) and no optional packages, since
-every optional backing is imported lazily — which is why CI installs only the five
+`_require_api_key`, and listing tools never reaches the API) and no per-tool packages, since
+every per-tool backing is imported lazily — which is why CI installs only the five
 module-level dependencies and finishes in seconds.
 
 **`mypy .` is the third gate**, configured in `pyproject.toml`'s `[tool.mypy]` and run by CI
 alongside `ruff`. It should come back clean. Only one option is set —
-`ignore_missing_imports`, because the optional tool backings are lazily imported and
+`ignore_missing_imports`, because the per-tool backing packages are lazily imported and
 legitimately absent from a bare environment — and strictness is left at mypy's defaults, so
 bodies of unannotated functions go unchecked and annotating a function is what opts it in.
 It earns its slot for a specific reason: **mypy checks against the packages actually
@@ -237,7 +237,7 @@ lies or a prompt that names a tool Claude doesn't have. Touch them all:
 3. `requirements.txt` and `pyproject.toml`, if it has a third-party dependency.
 4. `SYSTEM_PROMPT` in `core/chat.py` — both the explicit roster **and** any tool-choice
    guidance, which is the half no automation can generate.
-5. `README.md` — the tool table, the optional-package table, the project layout, and the
+5. `README.md` — the tool table, the per-tool package table, the project layout, and the
    tool count (stated more than once).
 6. `CLAUDE.md` — the module bullet in Architecture, the count in Overview, and the count in
    Key conventions.
