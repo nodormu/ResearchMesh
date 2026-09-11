@@ -17,8 +17,8 @@ python main.py
 Requires two environment variables (both read from the shell — the app does not load `.env`):
 
 ```bash
-export ANTHROPIC_API_KEY=...   # in practice lives in ~/.bashrc
-export N8N_MCP_TOKEN=...        # one per server, named by its token_env in config.toml
+export ANTHROPIC_API_KEY=...      # in practice lives in ~/.bashrc
+export YOUR_SERVER_MCP_TOKEN=...  # one per server, named by its token_env in config.toml
 ```
 
 Check every configured MCP server standalone (connects to each, lists tools, reports failures, exits):
@@ -31,36 +31,30 @@ This project is Python-first, but the full-feature setup requires Node.js: the r
 
 Connect additional stdio MCP servers by passing their scripts as argv: `python main.py path/to/other_server.py`.
 
-One-time setup for the browser tool (headless Chromium via Playwright — `pip` installs the package but not the browser binary or its OS libraries), plus the two system binaries `document_convert` shells out to:
+**Full install walkthrough lives in `README.md`'s "Setup (Linux)" section — 9 numbered
+steps covering the apt/pip install, Playwright, the `computer` tool's X11/Wayland
+requirement and its two easy-to-misdiagnose apt-only dependencies (`python3-tk`,
+`scrot`), environment variables, and the per-tool package table.** (`SETUP.md` was
+merged into it; the two duplicated ~60% of their content and drifted apart.) Don't
+re-derive that walkthrough here — this section is for what to run, not how to set up
+a fresh machine.
 
-```bash
-pip install -r requirements.txt
-playwright install chromium
-sudo playwright install-deps chromium   # Linux: OS libraries the browser needs (e.g. libmanette)
-sudo apt install libreoffice pandoc     # document_convert: soffice + the markdown path
-sudo apt install python3-tk scrot       # computer: see below — both are apt, not pip
-sudo apt install xvfb                   # computer: only if you're on Wayland or headless
-```
+One thing worth restating because it changes what you should touch when editing code,
+not just how to install: **`computer`'s Wayland refusal is about its own generic,
+whole-screen `pyautogui` approach specifically** — a real, narrower XWayland exception
+exists for driving one already-identified target window directly (see the
+`core/computer.py` bullet under Architecture for the mechanism, README's Setup step 3
+for the copy-paste recipe). Don't assume "Wayland" means "no GUI automation is
+possible" when editing this tool or answering questions about it.
 
-The `computer` tool needs an **X11** display — Wayland ignores the XTEST input it synthesises, so it refuses there rather than failing silently. On a Wayland box, run the client under a nested X server instead: `xvfb-run -s '-screen 0 1280x800x24' python main.py`.
-
-That refusal is about `computer`'s own generic, whole-screen `pyautogui` approach — a full-desktop capture genuinely cannot work under a Wayland compositor. A *specific* target application that is itself an XWayland client (many Qt/GTK/Java desktop apps still are, even on a Wayland desktop) is a real, narrower exception: it can be driven directly with plain X11-protocol calls — `wmctrl` to find/raise its window, `python-xlib`'s `Xlib.ext.xtest.fake_input` for genuine key/mouse events (a full substitute for `xdotool` if it isn't installed), `import -window <id>` (ImageMagick) for a per-window screenshot — entirely outside `computer`/`pyautogui`, and needing neither an Xorg session nor `CLAUDE_COMPUTER_FORCE=1`. See the README's [Full setup detail](README.md#full-setup-detail) for the full recipe and its one real gotcha (a click must land on an actual interactive control to establish focus — clicking blank space does not reliably work).
-
-It also has two **apt** dependencies that `pip install pyautogui` does not bring, and whose absence is easy to misdiagnose because the failure names a package that *is* installed: `mouseinfo` imports `tkinter` at module level, so without **`python3-tk`** the `import pyautogui` inside `computer` raises and the tool reports pyautogui as missing when it isn't. And `pyscreeze` only has a screenshot path if either `gnome-screenshot` (which lets it use Pillow's `ImageGrab`) or **`scrot`** is on PATH — with neither, capture fails on X11 even though every Python package is present. `scrot` is the one to install, since this tool is X11-only by design.
-
-Per-tool dependencies are imported **lazily, inside the tool that needs them**, rather than being optional to install — `requirements.txt` installs every one of them unconditionally. The lazy import just means that if a package were ever missing anyway (e.g. a stale venv), only that one tool breaks — it still gets declared to Claude and returns an install hint if used, instead of crashing the whole client at startup. To drop a tool entirely, remove its module from `MODULES` in `core/local_tools.py`.
-
-If a tool's install hint names a package that `requirements.txt` already lists (e.g.
-`sql_query`'s `duckdb`, or `config_edit`'s `ruamel.yaml`/`jsonpath-ng`), the docs aren't
-incomplete — the active venv predates that line. There is no lockfile here: every entry in
-`requirements.txt` is a `>=` floor rather than a pin, so a venv can still satisfy the file as
-it stood when it was built and lack a package added to it since. Re-running
-`pip install -r requirements.txt` fixes it **without restarting the app** — every per-tool
-backing is imported inside the function that needs it, and a failed import leaves no cached
-sentinel behind (`core/data.py` assigns `_connection` only on success), so the next tool call
-simply retries the import.
-
-See **`README.md`** for the full environment setup — step-by-step install is its own "Setup (Linux)" section, which also covers the per-tool backing packages and environment variables. (`SETUP.md` was merged into it; the two duplicated ~60% of their content and drifted apart.)
+Per-tool dependencies are imported **lazily, inside the tool that needs them**, rather
+than being optional to install — `requirements.txt` installs every one of them
+unconditionally; only the *import* is deferred. If a tool's install hint names a
+package `requirements.txt` already lists, the active venv just predates that line (no
+lockfile here, every entry is a `>=` floor) — `pip install -r requirements.txt` fixes
+it without restarting the app, since a failed import leaves no cached sentinel behind
+(`core/data.py` assigns `_connection` only on success). To drop a tool entirely,
+remove its module from `MODULES` in `core/local_tools.py`.
 
 **One linter is configured: `ruff`.** `pyproject.toml` has a `[tool.ruff.lint]` section, so
 **`ruff check .` should come back clean** — treat that as the bar for an edit. It adds no
@@ -76,8 +70,10 @@ behaviour, because that would need LibreOffice, a browser, an X11 display and re
 It checks the four things that break silently — everything imports, the tool registry is
 well-formed with no duplicate names, **the tool count claimed in the docs still equals
 `len(local_tools.TOOLS)`**, and `mcp_server.py` completes an MCP handshake advertising
-`delegate`. That third check exists because this repo states its tool count in five places
-across two files; the fourth because a stray byte on stdout desynchronising JSON-RPC is
+`delegate`. That third check exists because this repo states its tool count in enough
+places across both files (currently 7 — 2 in this file, 5 in README.md — and growing
+with every tool added) that hand-checking them drifts; the fourth because a stray byte
+on stdout desynchronising JSON-RPC is
 invisible until a client connects. It needs no API key (a placeholder satisfies
 `_require_api_key`, and listing tools never reaches the API) and no per-tool packages, since
 every per-tool backing is imported lazily — which is why CI installs only the five
@@ -102,7 +98,9 @@ core.chat"`) are what `smoke_test.py` automates.
 
 Two rules about this codebase that a linter will fight you on, both learned the hard way:
 
-- **Blanket `except` is the architecture, not an oversight** (`BLE001`, ~32 sites). Every
+- **Blanket `except` is the architecture, not an oversight** (`BLE001`, 50 sites as of
+  this writing — re-run `ruff check . --select BLE001 --statistics` rather than
+  trusting this number, it grows with every new tool). Every
   local tool must catch anything and return an error string rather than crash the chat loop
   (see `core/chat.py`'s `_run_tool_uses` / `_resolve_pending_tool_uses`); the ones in
   `core/cli.py`, `core/tools.py`, `core/chat.py` and `main.py` are the equivalent guards for
@@ -152,7 +150,7 @@ The blow-by-blow of how these were triaged lives in `git log`, not here.
 - `CLAUDE_MEMORY_DIR` — where the `memory` tool's virtual `/memories` tree actually lives (default `./memories`, relative to the repo root the app must run from).
 - `CLAUDE_KERNEL_ENCRYPTION` — `auto` (default), `required`, or `off`, controlling the first tier of `core/kernel.py`'s transport ladder. `auto` tries CurveZMQ and falls back with a printed reason; `required` turns a failure into a tool error instead of an unencrypted kernel (useful when you want to *know*, since every tier still works and only the printed line distinguishes them); `off` skips straight to IPC. An unrecognised value is reported and treated as `auto`.
 - `CLAUDE_DISPLAY_SIZE` — the logical screen size `computer` declares and downscales to, e.g. `1280x800` (default). Below ~1280x720 accuracy drops; it must never be set to something the module doesn't also resize screenshots to.
-- `CLAUDE_COMPUTER_FORCE=1` — bypass the Wayland refusal in `computer`. Only useful on an XWayland-only setup; the real fix is an Xorg session or `xvfb-run`. A fully separate manual technique (plain X11-protocol calls — `wmctrl` + `python-xlib`'s XTEST + ImageMagick `import -window` — against one already-identified XWayland-backed target window) needs neither this flag nor `computer` at all; see the Commands section above.
+- `CLAUDE_COMPUTER_FORCE=1` — bypass the Wayland refusal in `computer`. Only useful on an XWayland-only setup; the real fix is an Xorg session or `xvfb-run`. A fully separate manual technique needs neither this flag nor `computer` at all — see the `core/computer.py` bullet under Architecture.
 - Python 3.11+ (`pyproject.toml`) — the floor is `tomllib`, used by `main.py`.
 
 ## Architecture
@@ -169,7 +167,7 @@ Request flow: **CLI input → Chat.run() agentic loop → Claude API + (local to
 
 - **`core/memory.py`** — `memory` (`memory_20250818`), Anthropic's client-executed memory tool. A learned schema, so no description. `/memories` is a **virtual prefix**, not a real path: `_resolve()` maps it onto one real directory (`CLAUDE_MEMORY_DIR`, default `./memories`) and canonicalises *before* testing containment, so `..` segments and escaping symlinks are both caught — that confinement is the one hard requirement Anthropic places on the client, since `/memories/../../.ssh/id_rsa` is otherwise a key read. The return strings deliberately match the reference wording in Anthropic's docs; Claude was trained against it, so rewording them makes it misread ordinary outcomes as failures. Two deliberate deviations: `create` overwrites rather than erroring (Claude's own description says "creates or overwrites"), and `view` on a `.png`/`.jpg` returns an `image_result` marker. **This is the only local state that survives process exit** — the kernel, browser page, and DuckDB connection are all per-session.
 
-- **`core/computer.py`** — `computer` (`computer_20251124`), Anthropic's client-executed computer use tool: screen capture plus mouse/keyboard via `pyautogui` (both imported lazily). Two things dominate the design. **Coordinates:** Claude answers in the coordinate space of the image it was sent, so a declared `display_width_px`/`display_height_px` that disagrees with the screenshot offsets every click. The module therefore declares one fixed logical size (`CLAUDE_DISPLAY_SIZE`, default 1280x800), always resizes captures to exactly that, and scales coordinates back to native in `_to_native()` — declared size and sent image cannot drift. **Beta gating:** `computer_20251124` needs the `computer-use-2025-11-24` header, exported here as `BETA_FLAG` and consumed by `core/claude.py`, which is why the whole app posts to the beta endpoint. On Wayland the tool refuses with an explanation instead of clicking into the void (XTEST is ignored there); `CLAUDE_COMPUTER_FORCE=1` overrides. Actions other than `wait` return a screenshot, matching the reference implementation Claude was trained against. **This refusal is specifically about the module's own whole-screen approach, not an absolute claim about XTEST under Wayland** — its own docstring already notes XTEST "reaches XWayland clients at best," and that exception is real and confirmed in practice: a separate, manual X11-protocol technique (`wmctrl` + `python-xlib`'s XTEST + ImageMagick `import -window`) can reach one already-identified XWayland-backed target application directly when this module refuses — see the Commands section above. That path bypasses this module entirely rather than extending it, so no code change here is implied.
+- **`core/computer.py`** — `computer` (`computer_20251124`), Anthropic's client-executed computer use tool: screen capture plus mouse/keyboard via `pyautogui` (both imported lazily). Two things dominate the design. **Coordinates:** Claude answers in the coordinate space of the image it was sent, so a declared `display_width_px`/`display_height_px` that disagrees with the screenshot offsets every click. The module therefore declares one fixed logical size (`CLAUDE_DISPLAY_SIZE`, default 1280x800), always resizes captures to exactly that, and scales coordinates back to native in `_to_native()` — declared size and sent image cannot drift. **Beta gating:** `computer_20251124` needs the `computer-use-2025-11-24` header, exported here as `BETA_FLAG` and consumed by `core/claude.py`, which is why the whole app posts to the beta endpoint. On Wayland the tool refuses with an explanation instead of clicking into the void (XTEST is ignored there); `CLAUDE_COMPUTER_FORCE=1` overrides. Actions other than `wait` return a screenshot, matching the reference implementation Claude was trained against. **This refusal is specifically about the module's own whole-screen approach, not an absolute claim about XTEST under Wayland** — its own docstring already notes XTEST "reaches XWayland clients at best," and that exception is real and confirmed in practice: a separate, manual X11-protocol technique (`wmctrl` to find/raise the window, `python-xlib`'s `Xlib.ext.xtest.fake_input` for genuine key/mouse events — a full substitute for `xdotool` if it isn't installed, ImageMagick's `import -window <id>` for a per-window screenshot) can reach one already-identified XWayland-backed target application directly when this module refuses. That path bypasses this module entirely rather than extending it, so no code change here is implied. One real gotcha: a click must land on an actual interactive control to establish focus — clicking blank space does not reliably work. README's Setup (Linux) step 3 has the copy-paste recipe.
 
 - **`core/browser.py`** — a custom **Playwright** browser tool (`browser_navigate` / `_extract` / `_click` / `_fill` / `_links` / `_back`). Fully custom schemas (Claude learns them from descriptions). A single headless page is kept alive across calls (lazy-launched — `playwright` is imported only on first use, so the module imports fine without it), and each tool trims its output to avoid context bloat. `shutdown()` closes the browser on exit. The point of this tool is **DOM-based surfing**, so `browser_navigate` is described as the primary way to read the web and every page-changing call reports the current URL — there is deliberately no separate "current URL" tool. `_trim()` flattens newlines and is for prose only; element lists use `clip()` so their line structure survives.
 
