@@ -7,7 +7,7 @@ from prompt_toolkit.styles import Style
 
 from core import listen, speak
 from core.chat import Chat
-from core.claude import load_claude_models, resolve_model_switch
+from core.claude import load_claude_models, resolve_model_swap
 
 
 class CliApp:
@@ -140,7 +140,7 @@ class CliApp:
                 # /model lists config.toml's claude_models (re-read fresh
                 # each call, see core/claude.py's load_claude_models — an
                 # edit to config.toml shows up without a restart). /model
-                # switch <name/index> is the actual swap: session-only, it
+                # swap <name/index> actually changes it: session-only, it
                 # never writes config.toml, so a new session always starts
                 # back on claude_models[0]. An invalid name/index rejects
                 # with an error and the valid list, same reject-don't-crash
@@ -166,11 +166,11 @@ class CliApp:
                         print("[model: available]\n" + "\n".join(lines))
                         continue
 
-                    if sub == "switch":
+                    if sub == "swap":
                         if not arg:
-                            print("[usage: /model switch <name or index>]")
+                            print("[usage: /model swap <name or index>]")
                             continue
-                        chosen = resolve_model_switch(models, arg)
+                        chosen = resolve_model_swap(models, arg)
                         if chosen is None:
                             print(
                                 f"[model: {arg!r} not recognized — "
@@ -178,12 +178,12 @@ class CliApp:
                             )
                             continue
                         self.agent.claude_service.model = chosen
-                        print(f"[model: switched to {chosen}]")
+                        print(f"[model: swapped to {chosen}]")
                         continue
 
                     print(
                         f"[model: unrecognized subcommand {sub!r} — "
-                        "use /model or /model switch <name/index>]"
+                        "use /model or /model swap <name/index>]"
                     )
                     continue
 

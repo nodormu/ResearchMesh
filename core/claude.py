@@ -40,8 +40,8 @@ def load_claude_models() -> list[str]:
     return models or ["claude-sonnet-5"]
 
 
-def resolve_model_switch(models: list[str], arg: str) -> str | None:
-    """Match `arg` (from `/model switch <arg>`) against `models`.
+def resolve_model_swap(models: list[str], arg: str) -> str | None:
+    """Match `arg` (from `/model swap <arg>`) against `models`.
 
     `arg` may be a 1-based index into the list (as shown by `/model`'s own
     listing) or the model name itself, matched case-insensitively since
@@ -50,7 +50,7 @@ def resolve_model_switch(models: list[str], arg: str) -> str | None:
     already would. Returns the canonical (as-configured) name, or None if
     `arg` matches nothing — the caller is responsible for the reject
     message, this function only ever returns a name from `models` or None,
-    never raises, so a bad /model switch can't be a crash.
+    never raises, so a bad /model swap can't be a crash.
     """
     arg = arg.strip()
     if arg.isdigit():

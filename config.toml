@@ -4,14 +4,14 @@
 # names the environment variable that holds its token (see README.md).
 
 [claude]
-# Anthropic models available to use/switch to via /model. This array is a
+# Anthropic models available to use/swap to via /model. This array is a
 # CACHE, not hand-typed — core/claude.py's refresh_claude_models() live-scans
 # Anthropic's own /v1/models roughly once a day (see model_scan_ttl_hours
 # below) and rewrites it here, one entry per model family (sonnet/opus/
 # haiku/...), newest release first — except sonnet is always placed first
 # when present, matching Anthropic's own documented default recommendation.
-# A new session always starts on the FIRST model in this list. Switch
-# mid-session with /model switch <name/index>; that switch is session-only
+# A new session always starts on the FIRST model in this list. Swap
+# mid-session with /model swap <name/index>; that swap is session-only
 # and does not edit this file. Hand-editing this array still works (e.g. to
 # pin a specific dated snapshot) — it just gets overwritten on the next scan
 # once claude_models_checked_at goes stale.

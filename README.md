@@ -299,7 +299,7 @@ needed, regardless of whether `/voice` is on. Both need `[speak]`/`[listen]` con
 `config.toml` first (see the tools table above); without that, `/voice` toggles but has
 nothing to speak, and `/listen` reports a clear `not_configured`/`disabled` message.
 **`/model`** lists the models in `config.toml`'s `[claude] claude_models`, each with an
-index; **`/model switch <name or index>`** swaps the model for the rest of this session
+index; **`/model swap <name or index>`** swaps the model for the rest of this session
 only — it never edits `config.toml`, so the next new session always starts back on the
 first entry in the list. That list itself is a live-refreshed cache, not hand-typed:
 roughly once a day (`model_scan_ttl_hours`, default 24) it re-scans Anthropic's actual
@@ -410,8 +410,8 @@ step 5):
 
 ```toml
 [claude]
-# First entry is what a new session starts on; switch mid-session with
-# /model switch <name/index> (session-only, does not edit this file).
+# First entry is what a new session starts on; swap mid-session with
+# /model swap <name/index> (session-only, does not edit this file).
 # This array is a live-refreshed cache (see core/claude.py
 # refresh_claude_models), not hand-typed — shown here already populated.
 claude_models = ["claude-sonnet-5", "claude-fable-5-1", "claude-opus-5", "claude-haiku-4-5-20251001"]
@@ -485,9 +485,12 @@ either, both, or neither:
 
 **As a client**, it connects out to MCP servers and merges their tools with its own —
 that's `[mcp]` in [Configuration](#configuration) above. **As a server**, it hands
-another client the whole agent as one `delegate` tool, so Claude Code can offload what
-it structurally can't do itself: drive GUI apps, answer password/`[y/N]` prompts, keep a
-live Python kernel between steps, surf a real DOM, and reach ResearchMesh's own servers.
+another client two tools: `delegate`, the whole agent in one call, so Claude Code can
+offload what it structurally can't do itself — drive GUI apps, answer password/`[y/N]`
+prompts, keep a live Python kernel between steps, surf a real DOM, and reach
+ResearchMesh's own servers — and `model`, a direct list/swap of which Claude model
+*this* worker uses, the same mechanism as its own `/model` command but reachable
+remotely (no agent turn spent, no API call made just to check or change it).
 
 ### Add it to Claude Code
 

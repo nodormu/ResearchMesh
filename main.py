@@ -34,8 +34,8 @@ _config = _load_config()
 # scan (see core/claude.py): most process starts just read the cached array
 # below with no network call at all; roughly once a day it re-scans
 # Anthropic's real /v1/models and updates config.toml's cache in place. No
-# env var override — config.toml is the single source of truth (switching
-# mid-session is /model switch's job, not an env var's; see core/cli.py).
+# env var override — config.toml is the single source of truth (swapping
+# mid-session is /model swap's job, not an env var's; see core/cli.py).
 # mcp_server.py does `import main as app` and reads `app.claude_model`
 # straight off this module, so a Router-spawned worker gets this same
 # live-verified default with no separate code path.

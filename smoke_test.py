@@ -159,6 +159,93 @@ def check_mcp_server() -> None:
 
     check("handshake completes", True)
     check("advertises `delegate`", "delegate" in names, f"got {names}")
+    check("advertises `model`", "model" in names, f"got {names}")
+
+
+def check_model_tool_over_mcp() -> None:
+    """The `model` tool's actual list/swap/reject behavior, over a real
+    stdio MCP round trip — not just that it's advertised (check_mcp_server()
+    above only checks the name is in the list).
+
+    Same placeholder-key posture as check_mcp_server(): `model` never calls
+    the Anthropic API at all (see mcp_server.py's `_model_tool_result` — it
+    only touches config.toml's claude_models array and the in-process
+    `_claude.model` attribute), so this needs no real key and no network,
+    same as every other check in this file. Exercises the exact same
+    reject-don't-crash paths core/cli.py's local `/model` command has —
+    covering the MCP-facing wrapper this worker adds specifically so a
+    caller like ResearchMesh-Router can swap this worker's model remotely,
+    per adding-model-command-to-swap-between-Anthropic-models.md in
+    /memories (Phase R2 of that plan).
+    """
+    print("model tool (over stdio MCP)")
+    from mcp_client import MCPClient
+
+    env = dict(os.environ)
+    env.setdefault("ANTHROPIC_API_KEY", "placeholder-not-used-for-model-tool")
+
+    async def go() -> dict[str, tuple[str, bool]]:
+        results: dict[str, tuple[str, bool]] = {}
+        async with MCPClient(
+            command=sys.executable,
+            args=[str(ROOT / "mcp_server.py")],
+            env=env,
+            transport="stdio",
+        ) as client:
+
+            async def call(label: str, arguments: dict) -> None:
+                r = await client.call_tool("model", arguments)
+                text = r.content[0].text if r and r.content else ""  # type: ignore[union-attr]
+                is_error = bool(r.is_error) if r else True
+                results[label] = (text, is_error)
+
+            await call("list", {"action": "list"})
+            # index "2", deliberately NOT "1" — a fresh worker process starts
+            # on claude_models[0] (index 1), so swapping to that same index
+            # would be a no-op and the "current entry moved" check below
+            # would false-fail for a reason that has nothing to do with the
+            # tool actually working.
+            await call("swap valid", {"action": "swap", "arg": "2"})
+            await call("list after swap", {"action": "list"})
+            await call("swap bogus", {"action": "swap", "arg": "not-a-real-model"})
+            await call("swap no arg", {"action": "swap"})
+            await call("bad action", {"action": "nonsense"})
+        return results
+
+    try:
+        results = asyncio.run(asyncio.wait_for(go(), timeout=120))
+    except Exception as e:
+        check("model tool round trip completes", False, f"{type(e).__name__}: {e}")
+        return
+
+    check("model tool round trip completes", True)
+
+    list_text, list_err = results["list"]
+    check("list: not an error", not list_err, list_text)
+    check("list: shows available models", "[model: available]" in list_text, list_text)
+    check("list: marks a current entry", "(current)" in list_text, list_text)
+
+    swap_text, swap_err = results["swap valid"]
+    check("swap index 2: not an error", not swap_err, swap_text)
+    check("swap index 2: confirms the swap", "swapped to" in swap_text, swap_text)
+
+    relist_text, relist_err = results["list after swap"]
+    check("list after swap: not an error", not relist_err, relist_text)
+    check(
+        "list after swap: current entry moved",
+        relist_text != list_text,
+        relist_text,
+    )
+
+    bogus_text, bogus_err = results["swap bogus"]
+    check("swap bogus name: reports an error", bogus_err, bogus_text)
+    check("swap bogus name: names the bad arg", "not-a-real-model" in bogus_text, bogus_text)
+
+    noarg_text, noarg_err = results["swap no arg"]
+    check("swap with no arg: reports an error", noarg_err, noarg_text)
+
+    badaction_text, badaction_err = results["bad action"]
+    check("bad action: reports an error", badaction_err, badaction_text)
 
 
 def check_compiles() -> None:
@@ -247,10 +334,10 @@ def check_clear_and_diagnostics() -> None:
 
 
 def check_model_command() -> None:
-    """`/model` / `/model switch` — config.toml wiring and index/name matching.
+    """`/model` / `/model swap` — config.toml wiring and index/name matching.
 
     No API call and no CliApp/prompt_toolkit involved: `load_claude_models`
-    and `resolve_model_switch` (core/claude.py) are pure enough to check
+    and `resolve_model_swap` (core/claude.py) are pure enough to check
     directly, the same way check_clear_and_diagnostics() above checks
     core/chat.py's diagnostics without a real conversation. core/cli.py's
     `/model` branch is a thin print/continue wrapper around these two calls,
@@ -258,7 +345,7 @@ def check_model_command() -> None:
     index/name could otherwise silently mismatch.
     """
     print("/model command")
-    from core.claude import load_claude_models, resolve_model_switch
+    from core.claude import load_claude_models, resolve_model_swap
 
     models = load_claude_models()
     check("claude_models is non-empty", len(models) > 0, str(models))
@@ -269,36 +356,36 @@ def check_model_command() -> None:
     )
 
     # Index matching (1-based, as shown in /model's own listing).
-    check("index 1 resolves to the first entry", resolve_model_switch(models, "1") == models[0])
+    check("index 1 resolves to the first entry", resolve_model_swap(models, "1") == models[0])
     last = str(len(models))
     check(
         f"index {last} resolves to the last entry",
-        resolve_model_switch(models, last) == models[-1],
+        resolve_model_swap(models, last) == models[-1],
     )
-    check("index 0 is out of range", resolve_model_switch(models, "0") is None)
+    check("index 0 is out of range", resolve_model_swap(models, "0") is None)
     check(
         "an index past the end is out of range",
-        resolve_model_switch(models, str(len(models) + 1)) is None,
+        resolve_model_swap(models, str(len(models) + 1)) is None,
     )
 
     # Name matching, case-insensitive, whitespace-tolerant.
     check(
         "exact name matches",
-        resolve_model_switch(models, models[0]) == models[0],
+        resolve_model_swap(models, models[0]) == models[0],
     )
     check(
         "matching is case-insensitive",
-        resolve_model_switch(models, models[0].upper()) == models[0],
+        resolve_model_swap(models, models[0].upper()) == models[0],
     )
     check(
         "matching tolerates surrounding whitespace",
-        resolve_model_switch(models, f"  {models[0]}  ") == models[0],
+        resolve_model_swap(models, f"  {models[0]}  ") == models[0],
     )
     check(
         "an unrecognized name resolves to None",
-        resolve_model_switch(models, "not-a-real-model") is None,
+        resolve_model_swap(models, "not-a-real-model") is None,
     )
-    check("an empty arg resolves to None", resolve_model_switch(models, "") is None)
+    check("an empty arg resolves to None", resolve_model_swap(models, "") is None)
 
 
 def check_model_refresh() -> None:
@@ -306,7 +393,7 @@ def check_model_refresh() -> None:
     behind config.toml's claude_models array.
 
     Neither function is exercised by check_model_command() above (that one
-    only covers the pre-existing load_claude_models()/resolve_model_switch()).
+    only covers the pre-existing load_claude_models()/resolve_model_swap()).
     Both accept fake collaborators for exactly this reason — fetch_live_models
     takes a `client`, refresh_claude_models takes `config_path`/`fetch_fn` —
     the same dependency-injection shape check_clear_and_diagnostics() above
@@ -519,6 +606,7 @@ def main() -> int:
         check_tool_registry,
         check_docs_match_code,
         check_mcp_server,
+        check_model_tool_over_mcp,
         check_clear_and_diagnostics,
         check_model_command,
         check_model_refresh,
