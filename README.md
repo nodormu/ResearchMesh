@@ -6,6 +6,7 @@
                     ├── /clear
                     ├── /voice
                     ├── /listen
+                    ├── /model
                     │
                     ├── Bash / Linux
                     ├── Filesystem
@@ -297,6 +298,15 @@ from your mic (default from `[listen].default_duration_seconds`), transcribes it
 needed, regardless of whether `/voice` is on. Both need `[speak]`/`[listen]` configured in
 `config.toml` first (see the tools table above); without that, `/voice` toggles but has
 nothing to speak, and `/listen` reports a clear `not_configured`/`disabled` message.
+**`/model`** lists the models in `config.toml`'s `[claude] claude_models`, each with an
+index; **`/model switch <name or index>`** swaps the model for the rest of this session
+only — it never edits `config.toml`, so the next new session always starts back on the
+first entry in the list. That list itself is a live-refreshed cache, not hand-typed:
+roughly once a day (`model_scan_ttl_hours`, default 24) it re-scans Anthropic's actual
+`/v1/models` and rewrites `claude_models` to one entry per model family, newest release
+first — sonnet is always placed first when present, matching Anthropic's own documented
+default recommendation. A failed scan (offline, bad key) changes nothing on disk; the
+existing cached list is used as-is.
 
 ### 8) Test it
 
@@ -400,7 +410,13 @@ step 5):
 
 ```toml
 [claude]
-model = "claude-sonnet-5"   # CLAUDE_MODEL overrides this
+# First entry is what a new session starts on; switch mid-session with
+# /model switch <name/index> (session-only, does not edit this file).
+# This array is a live-refreshed cache (see core/claude.py
+# refresh_claude_models), not hand-typed — shown here already populated.
+claude_models = ["claude-sonnet-5", "claude-fable-5-1", "claude-opus-5", "claude-haiku-4-5-20251001"]
+model_scan_ttl_hours = 24
+claude_models_checked_at = "2026-01-01T00:00:00+00:00"
 
 [mcp]
 enabled = true              # false skips every server; local tools still work
@@ -450,7 +466,6 @@ path. Absolute paths beyond that are machine-specific — edit those by hand.
 | *(embeddings server)* | Whatever `[embeddings].api_key_env` names, if your server needs auth |
 | *(vision server)* | Whatever `[vision].api_key_env` names, if your server needs auth |
 | `RESEARCHMESH_MCP_TOKEN` | Bearer token clients must present to `mcp_server.py --transport streamable-http`; unset = no auth |
-| `CLAUDE_MODEL` | Override the model |
 | `CLAUDE_SHOW_USAGE=1` | Print token and prompt-cache counts per request |
 | `CLAUDE_MEMORY_DIR` | Where `memory` stores `/memories` (default `./memories`) |
 | `CLAUDE_DISPLAY_SIZE` | Logical screen size `computer` reports, e.g. `1280x800` |
