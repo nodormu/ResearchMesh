@@ -9,6 +9,15 @@ from mcp_client import MCPClient
 
 MAX_TOOL_ITERATIONS = 75
 
+# A separate, much smaller budget used only to close out an in-flight server
+# tool (web_search / web_fetch) if MAX_TOOL_ITERATIONS runs out while the last
+# response's stop_reason is still "pause_turn". Anthropic's own docs state
+# server tools cap themselves at "10 iterations per request" internally, so a
+# handful of extra resends should be enough to let one finish; this is
+# deliberately NOT the same knob as MAX_TOOL_ITERATIONS so that budget can't
+# quietly become unbounded. See _drain_pause_turn.
+PAUSE_TURN_DRAIN_LIMIT = 10
+
 # Set CLAUDE_SHOW_USAGE=1 to print token and cache counters per request. Prompt
 # caching fails *silently* (a too-short prefix or a changed byte early in the
 # prefix just means no hit, with no error), so this is the only way to confirm
@@ -358,8 +367,53 @@ class Chat:
         ]
         self.claude_service.add_user_message(self.messages, results)
 
+    def _drain_pause_turn(self, response, tool_defs, thinking):
+        """Resend-as-is until stop_reason leaves "pause_turn", within a small
+        extra budget (PAUSE_TURN_DRAIN_LIMIT), not the main tool-iteration one.
+
+        Reaching MAX_TOOL_ITERATIONS while the last response is still
+        "pause_turn" is not safe to treat like the ordinary "tool_use" cutoff:
+        a dangling server_tool_use block (Anthropic's own web_search/
+        web_fetch) has no synthetic client-side fix the way an unresolved
+        client tool_use does (see _orphaned_tool_uses's docstring, and the
+        docs quote it cites) — the *only* way to close it is to keep
+        resending the conversation unchanged until the server itself moves
+        past pause_turn. This gives that a small, separately-bounded chance
+        to happen before the caller gives up, instead of silently leaving
+        every later turn in the session poisoned with an unresolvable 400.
+
+        Returns the resolved response (whatever stop_reason it ends on), or
+        None if a chat() call in here raised — in which case
+        _report_api_failure has already been called on it, same as the main
+        loop does for its own chat() calls.
+        """
+        for _ in range(PAUSE_TURN_DRAIN_LIMIT):
+            if response.stop_reason != "pause_turn":
+                return response
+            try:
+                response = self.claude_service.chat(
+                    messages=self.messages,
+                    system=SYSTEM_PROMPT,
+                    tools=tool_defs,
+                    thinking=thinking,
+                )
+            except Exception as e:
+                self._report_api_failure(e)
+                return None
+            if SHOW_USAGE:
+                _report_usage(response)
+            self.claude_service.add_assistant_message(self.messages, response)
+        return response
+
     async def run(self, query: str, thinking: bool=False) -> str:
         final_text_response = ""
+        # Recorded so a turn that can't be safely closed out (see the
+        # pause_turn-drain-exhausted case in the MAX_TOOL_ITERATIONS branch
+        # below) can be rolled back to exactly this point instead of forcing
+        # a whole-conversation /clear — /clear wipes every earlier turn too,
+        # which is just as costly to the user as restarting the session; a
+        # targeted rollback of only the turn that broke is strictly better.
+        turn_start = len(self.messages)
         self.claude_service.add_user_message(self.messages, query)
 
         # The MCP tool list is fetched once per user turn, not once per
@@ -384,6 +438,45 @@ class Chat:
                 # self.messages with nothing after them — resolve them before
                 # breaking, or the *next* user turn's first chat() call fails
                 # immediately with a 400, however many messages later.
+                #
+                # stop_reason == "pause_turn" is the other way this budget can
+                # run out mid-turn, and it can't be resolved the same way —
+                # give it a small, separately-bounded chance to finish first
+                # (see _drain_pause_turn for why a synthetic fix won't work
+                # here the way it does for a plain client tool_use).
+                if response.stop_reason == "pause_turn":
+                    response = self._drain_pause_turn(response, tool_defs, thinking)
+                if response is None or response.stop_reason == "pause_turn":
+                    # Either the drain's own chat() call failed
+                    # (_report_api_failure already ran on it inside
+                    # _drain_pause_turn), or it ran out of its own budget
+                    # with the server tool STILL mid-flight. Either way there
+                    # is no synthetic fix for a dangling server_tool_use
+                    # block (unlike a plain client tool_use) — so instead of
+                    # leaving it in self.messages to poison every later turn
+                    # (which would otherwise only be fixable with a
+                    # whole-conversation /clear, just as costly to the user
+                    # as restarting), roll this ENTIRE turn back to before it
+                    # started. Every earlier turn is left completely intact;
+                    # only the query that triggered this gets undone, and the
+                    # user can just ask again.
+                    del self.messages[turn_start:]
+                    final_text_response = (
+                        "[this request couldn't be completed — an in-flight "
+                        "search/fetch never finished after the tool-iteration "
+                        "limit was reached, and there's no safe way to "
+                        "resolve it in place. The request has been undone "
+                        "(nothing was added to the conversation); please try "
+                        "again, possibly with a narrower question.]"
+                    )
+                    break
+                # Anything reaching here has a resolvable stop_reason: either
+                # it was "tool_use" all along (unaffected by the pause_turn
+                # handling above — _resolve_pending_tool_uses synthesizes its
+                # error tool_result exactly as before), or the drain above
+                # successfully moved it past "pause_turn" into something
+                # else, in which case _resolve_pending_tool_uses is a no-op
+                # and this is just the model's own completed answer.
                 self._resolve_pending_tool_uses(
                     response, "stopped: exceeded tool-iteration limit"
                 )
