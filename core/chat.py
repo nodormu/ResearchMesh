@@ -106,7 +106,7 @@ def _block_field(block, name: str):
 
 
 def _orphaned_tool_uses(messages) -> list[str]:
-    """tool_use ids that never got a tool_result — the poisoned-session check.
+    """tool_use ids that never got a result block — the poisoned-session check.
 
     The API requires every tool_use block to be answered in the *immediately
     following* message. One that isn't doesn't just break the turn it happened
@@ -115,8 +115,28 @@ def _orphaned_tool_uses(messages) -> list[str]:
     reads as "it started 400ing and won't stop", which is very hard to tell
     from a context overflow without looking.
 
-    `_resolve_pending_tool_uses` exists to make this impossible. This is how you
-    find out it didn't.
+    Covers both flavors the API can leave dangling, not just the client-tool
+    one:
+      - a plain client `tool_use` block, answered by a `tool_result` block.
+      - a `server_tool_use` (or an MCP-connector `mcp_tool_use`) block,
+        answered by a tool-specific result block instead — e.g.
+        `web_search_tool_result`, `web_fetch_tool_result`. This app doesn't
+        execute these itself (Anthropic runs them server-side), but a
+        dangling one is just as poisonous: the assistant turn never closed,
+        so the next request 400s the same way a missing client tool_result
+        does. Matched generically by suffix (`_tool_use` / `_tool_result`)
+        rather than a hardcoded list of current tool names, so a future
+        server tool is covered without editing this function again.
+
+    Both flavors pair up by the same id field regardless of which specific
+    block type is involved — confirmed against Anthropic's own docs: "A
+    server_tool_use block and its result block pair up by tool_use_id, not
+    by position."
+
+    `_resolve_pending_tool_uses` exists to make the client-tool_use case
+    impossible; this is how you find out it didn't, and it's this function's
+    output (not that guarantee) that `/clear` and `_report_api_failure`
+    actually trust.
     """
     answered: set[str] = set()
     issued: list[str] = []
@@ -126,11 +146,13 @@ def _orphaned_tool_uses(messages) -> list[str]:
             continue
         for block in content:
             kind = _block_field(block, "type")
-            if kind == "tool_use":
+            if not kind:
+                continue
+            if kind == "tool_use" or kind.endswith("_tool_use"):
                 block_id = _block_field(block, "id")
                 if block_id:
                     issued.append(block_id)
-            elif kind == "tool_result":
+            elif kind == "tool_result" or kind.endswith("_tool_result"):
                 used = _block_field(block, "tool_use_id")
                 if used:
                     answered.add(used)
