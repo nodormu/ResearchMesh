@@ -416,8 +416,36 @@ class Chat:
                     self.messages, tool_result_parts
                 )
             elif response.stop_reason == "pause_turn":
-                # A server-side tool (web_search / web_fetch) paused mid-run;
-                # resend the conversation so the server resumes it.
+                # A server-side tool (web_search / web_fetch) paused mid-run.
+                # If Claude ALSO called a client tool in this same turn, that
+                # tool_use block was just added to self.messages above (via
+                # add_assistant_message) and still owes the API a tool_result
+                # — resending unchanged would leave it permanently orphaned,
+                # poisoning every later request with the exact "tool_use ids
+                # were found without tool_result blocks" 400 (this is a
+                # documented Anthropic failure mode: a paused server tool
+                # alongside a client tool in the same turn). Resolve any such
+                # blocks first, the same way the tool_use branch above does,
+                # THEN resend so the server resumes the paused portion. The
+                # common case — a pure server-tool pause with no client tool
+                # calls alongside it — has nothing to resolve here and
+                # behaves exactly as before.
+                client_tool_blocks = [
+                    b for b in response.content if b.type == "tool_use"
+                ]
+                if client_tool_blocks:
+                    try:
+                        tool_result_parts = await self._run_tool_uses(response)
+                    except Exception as e:
+                        print(f"[tool routing error: {e}]")
+                        self._resolve_pending_tool_uses(
+                            response, f"tool execution failed: {e}"
+                        )
+                        final_text_response = f"[error running tools: {e}]"
+                        break
+                    self.claude_service.add_user_message(
+                        self.messages, tool_result_parts
+                    )
                 continue
             else:
                 final_text_response = self.claude_service.text_from_message(
