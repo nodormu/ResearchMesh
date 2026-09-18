@@ -256,6 +256,13 @@ bash syntax error):
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
+If you also use Claude Code with a subscription, add this alias too (same file) so it
+doesn't shadow your subscription auth with the API key:
+
+```bash
+alias claude='env -u ANTHROPIC_API_KEY claude'
+```
+
 If you're using any MCP servers with a bearer token, export their `token_env` variable
 the same way (see `config.toml`'s `[mcp]` block). Open a fresh shell (or `source` the
 file) afterward, and check without revealing anything:
