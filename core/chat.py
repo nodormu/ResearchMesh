@@ -80,15 +80,14 @@ State between calls:
   virtualenvs do not carry over; chain with `&&` in a single call instead.
 - `bash` actually runs commands through **{_SHELL_EXECUTABLE_NAME}** ({SHELL_EXECUTABLE})
   — not necessarily bash despite the tool's name; configurable via config.toml's
-  `[bash].shell`. Write commands for whichever shell is named above, not blindly for
-  bash: if it says `zsh`, it does NOT word-split unquoted variables by default the
-  way bash/dash do (`for w in $var` won't split `$var` on whitespace unless the
-  invoking script sets `setopt shwordsplit`), and array indices are 1-based instead
-  of 0-based; `[[ ]]`/`$(...)`/`&&`/`||` still work the same as bash either way. If
-  it says `bash` or `dash`, ordinary POSIX/bash syntax is safe as usual. (Separately,
-  `/bin/sh` on this machine resolves to **{_SH_NAME}** ({SH_TARGET}) — relevant only
-  if you ever write a standalone `#!/bin/sh` script rather than running an inline
-  command.)
+  `[bash].shell`. If it's `zsh`, a prelude already neutralizes the two behavioral
+  gotchas that would otherwise matter (unquoted `$var` word-splitting, and an
+  unmatched glob hard-erroring instead of passing through literally), so ordinary
+  bash/POSIX syntax is safe as written — the one real difference left is that zsh
+  array indices are 1-based instead of 0-based; everything else, including
+  `[[ ]]`/`$(...)`/`&&`/`||`, is identical to bash. (Separately, `/bin/sh` on this
+  machine resolves to **{_SH_NAME}** ({SH_TARGET}) — relevant only if you ever write
+  a standalone `#!/bin/sh` script rather than running an inline command.)
 - The browser holds one live page, and `sql_query` one DuckDB connection, for the session.
 - `memory` is the only state that outlives this process. Everything above is gone when the
   session ends; files under `/memories` are still there next time.

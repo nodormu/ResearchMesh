@@ -41,9 +41,13 @@ claude_models_checked_at = "2026-09-20T15:36:59.027070+00:00"
 # /bin/sh is already bash (RHEL/Fedora/AlmaLinux).
 #
 # Override to whatever shell you actually want, e.g. "/usr/bin/zsh" or
-# "zsh" — note zsh doesn't word-split unquoted variables by default the way
-# bash/dash do. Whatever's resolved here also gets named in the system
-# prompt (core/chat.py) so Claude knows which dialect it's writing for.
+# "zsh". If it resolves to zsh, a prelude (core/claude_learned_schemas.py's
+# apply_shell_prelude) automatically restores bash-style word-splitting and
+# glob-nomatch behavior, so ordinary bash syntax stays safe — zsh's 1-based
+# array indices are the one remaining difference, left as-is rather than
+# patched (the option that would fix it, KSH_ARRAYS, has its own side
+# effects). Whatever's resolved here also gets named in the system prompt
+# (core/chat.py) so Claude knows which dialect it's writing for.
 #
 # Resolved once at process start — restart to pick up a change.
 shell = "/bin/bash"
