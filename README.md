@@ -32,7 +32,7 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 
 | Tool | For |
 |---|---|
-| `bash` | Shell commands as your user. Stateless — fresh subprocess each call |
+| `bash` | Shell commands as your user via `/bin/bash` by default. Stateless — fresh subprocess each call. See `[bash]` in config.toml to use a different shell instead (e.g. zsh) |
 | `str_replace_based_edit_tool` | View, create, and edit files |
 | `web_search` · `web_fetch` | Anthropic's server-side search and page fetch |
 | `memory` | A `/memories` store that **persists across sessions** — the only state that outlives the process |

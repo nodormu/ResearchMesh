@@ -1,11 +1,32 @@
 import os
+from pathlib import Path
 
 from anthropic.types import MessageParam
 
 from core import local_tools
 from core.claude import Claude
+from core.claude_learned_schemas import SH_TARGET, SHELL_EXECUTABLE
 from core.tools import ToolManager
 from mcp_client import MCPClient
+
+# Human-facing name of the interpreter the `bash` tool actually runs commands
+# through (e.g. "bash", "zsh", "dash") — resolved once at import time from
+# SHELL_EXECUTABLE, which is itself resolved once from config.toml's
+# [bash].shell (see core/claude_learned_schemas.py, including why that
+# constant is named SHELL_EXECUTABLE rather than BASH_SHELL). Interpolated
+# into SYSTEM_PROMPT below so Claude is told which shell dialect it's
+# actually writing for, rather than always assuming bash-only syntax is
+# safe — matters most if a user points [bash].shell at zsh, whose default
+# word-splitting on unquoted variables differs from bash/dash. Both this
+# name and the tool's actual subprocess executable are read from the exact
+# same SHELL_EXECUTABLE constant, so the two can never drift apart within a
+# running process.
+_SHELL_EXECUTABLE_NAME = Path(SHELL_EXECUTABLE).name
+
+# Human-facing name derived from SH_TARGET (core/claude_learned_schemas.py),
+# which checks /bin/sh live at every process start rather than hardcoding a
+# distro-specific claim — see that function's own docstring for why.
+_SH_NAME = Path(SH_TARGET).name if SH_TARGET.startswith("/") else SH_TARGET
 
 MAX_TOOL_ITERATIONS = 75
 
@@ -27,7 +48,7 @@ SHOW_USAGE = os.getenv("CLAUDE_SHOW_USAGE") == "1"
 # have (e.g. inventing a sandboxed code-execution container, which this app has
 # no such thing as). Everything here is either a fact about this environment that
 # Claude cannot infer, or a choice between genuinely overlapping tools.
-SYSTEM_PROMPT = """\
+SYSTEM_PROMPT = f"""\
 You are the assistant in a command-line research client running on the user's own Linux
 machine. What follows describes your actual environment.
 
@@ -57,6 +78,17 @@ State between calls:
   across calls. Load data once and keep working with it.
 - `bash` is a fresh subprocess every call. `cd`, exported variables, and activated
   virtualenvs do not carry over; chain with `&&` in a single call instead.
+- `bash` actually runs commands through **{_SHELL_EXECUTABLE_NAME}** ({SHELL_EXECUTABLE})
+  — not necessarily bash despite the tool's name; configurable via config.toml's
+  `[bash].shell`. Write commands for whichever shell is named above, not blindly for
+  bash: if it says `zsh`, it does NOT word-split unquoted variables by default the
+  way bash/dash do (`for w in $var` won't split `$var` on whitespace unless the
+  invoking script sets `setopt shwordsplit`), and array indices are 1-based instead
+  of 0-based; `[[ ]]`/`$(...)`/`&&`/`||` still work the same as bash either way. If
+  it says `bash` or `dash`, ordinary POSIX/bash syntax is safe as usual. (Separately,
+  `/bin/sh` on this machine resolves to **{_SH_NAME}** ({SH_TARGET}) — relevant only
+  if you ever write a standalone `#!/bin/sh` script rather than running an inline
+  command.)
 - The browser holds one live page, and `sql_query` one DuckDB connection, for the session.
 - `memory` is the only state that outlives this process. Everything above is gone when the
   session ends; files under `/memories` are still there next time.
