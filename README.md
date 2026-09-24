@@ -28,7 +28,7 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 
 ## What it can do
 
-**23 local tools**, plus whatever your MCP servers expose:
+**24 local tools**, plus whatever your MCP servers expose:
 
 | Tool | For |
 |---|---|
@@ -40,6 +40,7 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 | `browser_navigate` · `_links` · `_click` · `_fill` · `_extract` · `_back` | Headless [Playwright](https://playwright.dev/) — real DOM surfing: renders JavaScript, follows links, fills forms |
 | `document_convert` | LibreOffice + pandoc. Markdown → `.docx`/`.odt`/`.pdf`, or any office format to any other |
 | `python` | Persistent IPython kernel — **variables survive between calls** |
+| `bash_session` | Persistent shell — **cd/env/venvs/background jobs survive between calls** |
 | `interactive_run` | Commands that prompt: passwords, `[y/N]`, ssh host keys, installers, REPLs |
 | `config_edit` | Edit YAML/TOML/JSON **without destroying your comments** |
 | `sql_query` | DuckDB straight against CSV/Parquet/JSON — no import step |
@@ -62,7 +63,7 @@ Claude chooses the tools and keeps working until it has an answer.
   systems everyone else's work goes through — a CRM/CMDB (ServiceNow, ConnectWise,
   whatever the organization already runs) as its system of record, change tickets
   opened for anything that touches production. Those are examples, not a fixed list.
-  None of that is built into this app's 23 tools directly; it's what
+  None of that is built into this app's 24 tools directly; it's what
   [MCP, in both directions](#mcp-in-both-directions) is *for* — connect it to an
   email MCP server, a Teams/Slack one, your CMDB's — and it participates the same way
   a new hire would, through the same front doors, not a side channel. That reframes
@@ -171,7 +172,7 @@ its tool actually runs):
 To drop a tool entirely, remove its module from `MODULES` in `core/local_tools.py` (e.g.
 if you don't want MIDI, also drop `libasound2-dev` from the apt line above and
 `mido[ports-rtmidi]` from `requirements.txt`) — otherwise, install everything as
-written so all 23 tools actually work.
+written so all 24 tools actually work.
 Everything in `requirements.txt` is a `>=` floor, not a pin — if a tool ever reports a
 package missing that's already listed there, your venv just predates that line; re-run
 `pip install -r requirements.txt` (no restart needed).
@@ -278,7 +279,7 @@ python main.py
 ```
 
 **MCP servers are optional** — the `[mcp]` block in `config.toml` ships with
-`enabled = false` and every server commented out, so a fresh clone runs on the 23 local
+`enabled = false` and every server commented out, so a fresh clone runs on the 24 local
 tools alone. The commented entries are worked examples of both entry shapes (Streamable
 HTTP and stdio) — replace the machine-specific addresses/paths with your own before
 uncommenting and setting `enabled = true`.
@@ -492,7 +493,7 @@ either, both, or neither:
    Claude Code  ──delegate──▶  ResearchMesh  ──▶  n8n / Unreal / Unity / …
    (any MCP client)            (server AND client)     (its own MCP servers)
         │                            │                          │
-     mcp_server.py            23 local tools           [mcp] in config.toml
+     mcp_server.py            24 local tools           [mcp] in config.toml
 ```
 
 **As a client**, it connects out to MCP servers and merges their tools with its own —
@@ -691,6 +692,7 @@ core/
   browser.py                     Playwright DOM surfing
   documents.py                   LibreOffice / pandoc conversion
   kernel.py                      persistent IPython kernel
+  bash_session.py                persistent shell — cd/env/venvs/bg jobs survive across calls
   processes.py                   pexpect — commands that prompt
   config_edit.py                 comment-preserving YAML/TOML/JSON edits
   data.py                        DuckDB queries
