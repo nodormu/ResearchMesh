@@ -54,7 +54,7 @@ shell = "/bin/bash"
 
 [mcp]
 # Set enabled = false to skip every MCP server and run with local tools only.
-enabled = false
+enabled = true
 
 # MCP servers to connect to. Every reachable/launchable one connects and its
 # tools are merged into the single list Claude sees; one that fails prints a
@@ -162,7 +162,7 @@ servers = [
   #   see the repo README's "Config File" section for the full set of optional keys):
   #   { name = "unreal", command = ["node", "/run/media/$USER/POD2/unreal-mcp-additional-tools/dist/bin.js"],
   #     env = { UNREAL_MCP_PROJECT_PATH = "/path/to/YourProject.uproject" } },
-#  { name = "shopify-dev-mcp", command = ["npx", "-y", "@shopify/dev-mcp@latest"] },
+  { name = "shopify-dev-mcp", command = ["npx", "-y", "@shopify/dev-mcp@latest"] },
   # ^ Shopify's official dev MCP server (https://www.npmjs.com/package/@shopify/dev-mcp).
   #   stdio transport, spawned fresh via npx each time ResearchMesh starts — no
   #   separate process to run by hand. Confirmed live: `npx -y @shopify/dev-mcp@latest`
