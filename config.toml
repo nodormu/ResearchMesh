@@ -28,7 +28,7 @@ claude_models = ["claude-sonnet-5", "claude-opus-5-5", "claude-fable-5-1", "clau
 # smaller number just adds network calls to every other process start for
 # no practical benefit.
 model_scan_ttl_hours = 24
-claude_models_checked_at = "2026-09-23T20:30:18.204059+00:00"
+claude_models_checked_at = "2026-09-24T20:39:45.360966+00:00"
 
 [bash]
 # Shell the `bash` tool runs commands through (subprocess.run's `executable=`

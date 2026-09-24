@@ -223,6 +223,54 @@ async def check_timeout_and_recovery(bs) -> None:
     )
 
 
+async def check_raw_mode_program_recovery(bs) -> None:
+    print(
+        "timeout recovery against a raw-mode program (less) that survives "
+        "plain Ctrl-C -- escalates to a full respawn instead of a session "
+        "that merely looks recovered"
+    )
+    # Set state BEFORE the hang, to prove the escalation path's documented
+    # tradeoff: it wipes cd/env, unlike the plain-Ctrl-C path above.
+    await run(bs, "cd /tmp && export BS_RAWMODE_VAR=should_not_survive_escalation")
+
+    r = await run(bs, "printf 'line1\\nline2\\nline3\\n' | less", timeout=3)
+    check("reports timed_out", r.get("timed_out") is True, str(r))
+    check("reports recovered", r.get("recovered") is True, str(r))
+    check("reports force_killed", r.get("force_killed") is True, str(r))
+    check("reports state_reset", r.get("state_reset") is True, str(r))
+
+    # The actual proof, not just the self-reported flags: a plain command
+    # right after must be genuinely healthy -- correct exit code, and NOT
+    # itself killed by a stray leftover signal (confirmed live this was a
+    # real risk with an earlier, rejected "kill + retry same buffer"
+    # design, hence the full respawn instead).
+    r2 = await run(bs, "echo RAWMODE_RECOVERY_OK; false; echo rc=$?")
+    check(
+        "shell genuinely responsive, not just self-reported as such",
+        "RAWMODE_RECOVERY_OK" in r2.get("output", ""),
+        str(r2),
+    )
+    check(
+        "exit code fidelity intact after escalated recovery",
+        "rc=1" in r2.get("output", ""),
+        str(r2),
+    )
+    check(
+        "the health-check command itself wasn't killed by a leftover signal",
+        r2.get("return_code") == 0,
+        str(r2),
+    )
+
+    # Confirms the documented tradeoff, not an accident: cd/env from before
+    # the hang did NOT survive escalation (unlike the plain-Ctrl-C case in
+    # check_timeout_and_recovery above, which DOES preserve them).
+    check(
+        "cd did not survive the escalated recovery",
+        "should_not_survive_escalation" not in r2.get("output", ""),
+        str(r2),
+    )
+
+
 async def check_restart(bs) -> None:
     print("restart wipes cwd/env, self-heals on next use")
     await run(bs, "cd /tmp && export BS_RESTART_VAR=should_not_survive")
@@ -251,6 +299,7 @@ async def _run_all() -> int:
             check_ps1_leak_prompt_command_stomp,
             check_ps1_leak_edge_cases,
             check_timeout_and_recovery,
+            check_raw_mode_program_recovery,
             check_restart,
         ):
             await step(bs)

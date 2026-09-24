@@ -19,13 +19,36 @@ into the output — see the reset in `_run()` for the mechanism.
 Not a replacement for `bash`: use plain `bash` for one-off commands, this
 for anything that needs state to survive across multiple calls. Also not a
 replacement for `interactive_run` — a foreground command that blocks on
-its own stdin (a password prompt, `read`, an installer) will hang here
-exactly as it would in `bash`, until the per-call timeout fires.
+its own stdin (a password prompt, `read`, an installer, a pager, a REPL, a
+full-screen program like `vim`/`top`) will still hang here for the full
+per-call timeout, exactly as it would in `bash`, since there's no way to
+know in advance that it's waiting on input rather than just running long.
+
+What changed is what happens AFTER that timeout, in `_handle_timeout()`.
+Plain Ctrl-C only works if whatever's stuck has no handler for it — true
+for a blocking command (`sleep`, `curl`, a stuck loop), false for any
+raw-mode program that installs one specifically to survive Ctrl-C (a
+pager, `vim`, `top`, `psql`, many REPLs — the general case, not a
+`less`-specific quirk). For that class, recovery does NOT try to keep
+negotiating with the same pty: confirmed live that even after correctly
+detecting Ctrl-C didn't work (`_bash_owns_foreground()` asks the kernel
+who owns the terminal, rather than trusting a sentinel regex match that a
+still-alive program can coincidentally echo back itself), retrying on the
+SAME pexpect buffer after force-killing it can still leave a stale,
+unconsumed byte to surface on the NEXT real command instead of this one.
+So escalation kills what's left as a courtesy, then respawns an entirely
+fresh shell via the same code `restart: true` uses — proven reliable
+unconditionally — rather than trying to more precisely characterize that
+race. `recovered: true` after escalation is honest, but `state_reset:
+true` alongside it says cd/env/background jobs did NOT survive, unlike
+the plain-Ctrl-C case, which still preserves them exactly as before.
 """
 
 import asyncio
 import json
+import os
 import re
+import signal
 import uuid
 
 from core.claude_learned_schemas import SHELL_EXECUTABLE, apply_shell_prelude
@@ -273,10 +296,86 @@ def _clean(text: str) -> str:
     return _ANSI.sub("", text).replace("\r\n", "\n").replace("\r", "")
 
 
+def _bash_owns_foreground(bash_pid: int, fd: int) -> bool:
+    """The one question that actually matters after a timeout: is bash
+    itself currently reading this pty, or is something else still there?
+
+    This is the AUTHORITATIVE check, not a convenience one. A regex match
+    on accumulated output is not proof bash produced it — confirmed live:
+    a raw-mode program (`less`) that's still fully in control can, while
+    echoing back the very keystrokes our own recovery text sent it (its
+    normal behavior while reading a search pattern), coincidentally
+    reproduce our sentinel string in that echo. `expect()` matches it, and
+    the naive "no exception = recovered" read reports success while `less`
+    is demonstrably still running and still owns the terminal. Trusting
+    that would leave a caller believing the shell is fine when the very
+    next real command would just feed it into the same still-alive `less`.
+    `tcgetpgrp` asks the kernel who currently owns the terminal, which
+    doesn't care what any of them printed or echoed.
+    """
+    try:
+        return os.tcgetpgrp(fd) == os.getpgid(bash_pid)
+    except OSError:
+        return False
+
+
+def _kill_foreground(bash_pid: int, fd: int) -> bool:
+    """Best-effort SIGKILL of whatever currently owns the tty, if it isn't
+    bash. Used only as a courtesy before abandoning this pty entirely (see
+    `_handle_timeout()`) — NOT relied on to make the existing session safe
+    to keep using afterward. Returns whether a kill was actually sent.
+    """
+    try:
+        fg_pgid = os.tcgetpgrp(fd)
+        if fg_pgid == os.getpgid(bash_pid):
+            return False
+        os.killpg(fg_pgid, signal.SIGKILL)
+        return True
+    except OSError:
+        return False
+
+
 def _handle_timeout() -> dict:
-    """A command blew past its timeout. Try Ctrl-C, then re-sync on the
-    sentinel so a SUBSEQUENT call isn't necessarily also stuck behind the
-    same hung command — report whether that recovery attempt worked.
+    """A command blew past its timeout. Try Ctrl-C first — the common
+    case, a plain blocking command (`sleep`, `curl`, a stuck loop) with no
+    handler of its own, dies to it immediately and cleanly, exactly as
+    before. If that doesn't BOTH match the sentinel AND leave bash owning
+    the terminal (`_bash_owns_foreground`), do not try to keep salvaging
+    this pty. Confirmed live, twice, why not:
+
+    1. A raw-mode program that survives plain SIGINT (`less`, `vim`, `top`,
+       `psql`, many REPLs — not a `less`-specific quirk, the general case
+       for anything that puts the terminal in raw/cbreak mode) can, while
+       echoing back the very keystrokes our recovery text sends it,
+       coincidentally reproduce the sentinel string in that echo. A bare
+       "no exception raised" read of `expect()` then reports success while
+       that program is demonstrably still running and still owns the
+       terminal — `_bash_owns_foreground()` exists specifically to catch
+       this, by asking the kernel who owns the pty rather than trusting a
+       regex match against accumulated output.
+    2. Once that's caught and the foreground group is force-killed instead,
+       retrying the SAME reset+sentinel send on the SAME pexpect buffer is
+       *still* not reliably safe: confirmed live that a plain follow-up
+       command afterward can come back killed by a signal it had no reason
+       to receive on its own (return_code 130 on a bare `echo`) — a stale,
+       unconsumed byte from the interrupted exchange surfacing on the next
+       real command instead of this one, most likely because many raw-mode
+       programs deliberately disable the terminal's normal signal
+       generation so they can read Ctrl-C as plain input themselves, which
+       breaks the assumption that sending it always produces a clean,
+       one-shot kernel-generated interrupt. That's a pty/line-discipline
+       race, not a "which program is running" problem, and chasing it with
+       more targeted heuristics is exactly the failure mode to avoid —
+       every additional special case just narrows which specific program
+       it protects against, without ever closing the underlying gap.
+
+    So: escalation does not try to resume this pexpect session at all. It
+    kills whatever's left as a courtesy, then respawns an entirely fresh
+    shell via `_spawn()` — the exact same, already-proven code path
+    `restart: true` uses. That trades cd/env/background-job continuity
+    away ONLY in the (should be rare) case recovery needed to escalate at
+    all — an explicit, honest tradeoff (`state_reset: true`) rather than a
+    session that merely looks recovered.
     """
     # Only ever called from `_run()`'s `except pexpect.TIMEOUT:` handler,
     # by which point `_shell` is already known non-None there — but this
@@ -284,12 +383,12 @@ def _handle_timeout() -> dict:
     # doesn't carry over. Spelled out here too, same reasoning as `_run()`.
     assert _shell is not None
     partial = _clean(_shell.before or "")
+    bash_pid, fd = _shell.pid, _shell.child_fd
+
+    # Layer 1: the polite attempt, unchanged from before other than being
+    # gated on ground truth rather than trusted on pattern-match alone.
     try:
         _shell.sendcontrol("c")
-        # Same brace-group reset as the main path above, for consistency —
-        # a command interrupted mid-way could just as easily have already
-        # changed PROMPT_COMMAND before the Ctrl-C landed, and Ctrl-C alone
-        # doesn't retroactively undo that.
         _shell.sendline(
             "{\n"
             f"PROMPT_COMMAND='PS1=\"\"'; PS2=''; "
@@ -297,13 +396,28 @@ def _handle_timeout() -> dict:
             "}"
         )
         _shell.expect(_sentinel_pattern(), timeout=_RECOVERY_TIMEOUT)
-        recovered = True
+        recovered = _bash_owns_foreground(bash_pid, fd)
     except Exception:
         recovered = False
+
+    force_killed = False
+    state_reset = False
+    if not recovered:
+        # Layer 2: don't keep negotiating with this pty. Kill whatever's
+        # left, then start over completely via the same path `restart`
+        # uses — proven reliable, unconditionally, every time it's been
+        # tested this session.
+        force_killed = _kill_foreground(bash_pid, fd)
+        error = _spawn()
+        recovered = error is None
+        state_reset = recovered
+
     return {
         "output": clip(partial, _MAX_OUTPUT),
         "timed_out": True,
         "recovered": recovered,
+        "force_killed": force_killed,
+        "state_reset": state_reset,
         "return_code": None,
     }
 
