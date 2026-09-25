@@ -5,9 +5,9 @@ tool schemas), `handles(name)`, and `await execute(name, input)` — so adding a
 tool means writing one module and adding it here, rather than editing the chat
 loop's declaration list and its routing chain separately.
 
-Optional third-party packages are imported inside each module's `execute`, so a
-tool whose dependency is missing declares itself normally and returns an install
-hint if the model reaches for it.
+Third-party packages, where a tool needs one, are imported inside each module's
+`execute`, so a tool whose dependency is missing declares itself normally and
+returns an install hint if the model reaches for it.
 """
 
 import inspect
@@ -49,7 +49,7 @@ MODULES = [
     listen,       # local speech-to-text via faster-whisper, config-driven
     midi1,        # MIDI 1.0 device I/O via mido/python-rtmidi — device
                   # discovery, open/close/send/poll (poll carries real
-                  # per-message timestamps and an optional blocking wait),
+                  # per-message timestamps and a blocking wait when requested),
                   # every standard channel/System-Common/System-Real-Time
                   # message, generic SysEx, full .mid/.syx file read+write,
                   # and a large set of typed SysEx convenience messages

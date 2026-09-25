@@ -44,7 +44,7 @@ jobs:
           cache: pip
 
       - name: Install module-level dependencies only
-        # Every optional backing (playwright, duckdb, pyautogui, jupyter,
+        # Every per-tool backing (playwright, duckdb, pyautogui, jupyter,
         # pexpect, ruamel, tomlkit, jsonpath-ng, send2trash, pillow) is
         # imported *inside* the tool that needs it, so none of them are
         # required to import the app or start the MCP server. Installing just

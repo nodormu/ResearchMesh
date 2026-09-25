@@ -149,7 +149,7 @@ html/rtf/txt/pdf, `pandoc` handles markdown (soffice has no dependable markdown 
 `md → pdf` goes through odt on the way). `libreoffice-writer`/`-calc`/`-impress` alone are
 enough if you don't want the whole suite. `python3-tk` and `scrot` back `computer` — see
 step 3. `libasound2-dev` backs `midi1` — see the table below for why it's a hard
-requirement, not an optional extra.
+requirement, unlike some of the packages near it that aren't.
 
 **Per-tool Python packages** (all installed unconditionally via `requirements.txt` —
 none of these are meant to be skipped; each is only *imported* lazily, at the moment
@@ -278,7 +278,7 @@ echo "key: ${ANTHROPIC_API_KEY:+set}"
 python main.py
 ```
 
-**MCP servers are optional** — the `[mcp]` block in `config.toml` ships with
+**MCP servers ship disabled** — the `[mcp]` block in `config.toml` ships with
 `enabled = false` and every server commented out, so a fresh clone runs on the 24 local
 tools alone. The commented entries are worked examples of both entry shapes (Streamable
 HTTP and stdio) — replace the machine-specific addresses/paths with your own before
@@ -445,7 +445,7 @@ enabled = true              # false skips every server; local tools still work
 #   stdio (a local server main.py launches itself, no separate process to start
 #   by hand — it talks JSON-RPC over the subprocess's stdin/stdout):
 #     command    full argv as a list, e.g. ["node", "/path/to/bin.js"]
-#     env        optional table of extra environment variables for it
+#     env        table of extra environment variables for it, if needed
 servers = [
   { name = "n8n",    url = "http://192.168.2.12:5678/mcp-server/http", token_env = "N8N_MCP_TOKEN" },
   { name = "alpaca", url = "http://192.168.2.12:8000/mcp" },
@@ -742,15 +742,15 @@ each in turn, lists its tools, and reports failures without starting the chat.
 </details>
 
 <details>
-<summary><b>Optional: MCP Inspector</b> — for debugging an MCP server</summary>
+<summary><b>Not required: MCP Inspector</b> — for debugging an MCP server</summary>
 
 This project is **Python-first**, but the full-feature setup needs Node.js — the repo
 supports Node-based MCP servers in `config.toml` (e.g. `command = ["node", ...]`), and
 the browser tooling's Playwright is Node-backed in practice. So: for the full MCP +
 browser workflow, install Node.js and keep it on PATH.
 
-The [MCP Inspector](https://github.com/modelcontextprotocol/inspector) is optional but
-also Node-based:
+The [MCP Inspector](https://github.com/modelcontextprotocol/inspector) isn't required,
+and is also Node-based:
 
 ```bash
 npx @modelcontextprotocol/inspector@latest
@@ -760,7 +760,7 @@ A separate debugging aid, not the core of the project runtime.
 
 </details>
 
-## Recommended local tools (optional — saves tokens)
+## Recommended local tools (not required — saves tokens)
 
 None of these are dependencies — nothing here breaks without them. They're suggested
 purely so Claude reaches for a fast, purpose-built local binary via `bash` instead of

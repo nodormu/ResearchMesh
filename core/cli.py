@@ -107,9 +107,9 @@ class CliApp:
                 # this is a deliberate pivot away from this command's
                 # earlier "stage as next prompt's pre-fill for manual
                 # review/edit" behavior — see speak_listen_tool_integration_
-                # plan.md in /memories for that history. Optional
-                # `/listen <N>` overrides [listen]'s configured duration for
-                # just this one call.
+                # plan.md in /memories for that history. `/listen <N>`, if
+                # `<N>` is given, overrides [listen]'s configured duration
+                # for just this one call.
                 if text.startswith("/listen"):
                     arg = text[len("/listen"):].strip()
                     tool_input = {}

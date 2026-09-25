@@ -1,4 +1,4 @@
-"""Fast sanity checks — no API key, no network, no optional packages needed.
+"""Fast sanity checks — no API key, no network, no per-tool packages needed.
 
     python smoke_test.py
 
@@ -20,7 +20,7 @@ stray byte on stdout desynchronising JSON-RPC — is invisible until a client
 connects.
 
 Only module-level dependencies are required (anthropic, mcp, prompt_toolkit,
-pydantic, anyio); every optional backing is imported lazily inside the tool that
+pydantic, anyio); every per-tool backing is imported lazily inside the tool that
 needs it, so this runs on a bare CI box.
 """
 

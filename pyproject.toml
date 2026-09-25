@@ -55,9 +55,6 @@ ignore = [
     # must not be able to fail at all. Narrowing these has already caused one
     # real bug — see "Shutdown is isolated per tool" in CLAUDE.md.
     "BLE001",
-    # `Optional[X]` rather than `X | None`, 6× in mcp_client.py. Cosmetic; the
-    # churn isn't worth it. New code is free to use either.
-    "UP045",
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -80,7 +77,7 @@ ignore = [
 # this is a floor, not a straitjacket. Annotating a function opts it in, which
 # is the right direction of travel for new code.
 [tool.mypy]
-# The optional tool backings (duckdb, playwright, pyautogui, jupyter_client,
+# The per-tool backings (duckdb, playwright, pyautogui, jupyter_client,
 # pexpect, ruamel, tomlkit, jsonpath_ng, send2trash) are imported lazily inside
 # the tool that needs them, so they are legitimately absent from a bare
 # environment — CI installs only the five module-level dependencies. Without
