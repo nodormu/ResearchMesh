@@ -23,9 +23,10 @@ dependencies = [
     "send2trash>=1.8",
     "pyautogui>=0.9.54",
     "pillow>=10.0",
-    "httpx>=0.24",             # `text_embeddings`/`vision_query` — already guaranteed
-                               # by `anthropic`, listed here for the direct import in
-                               # core/text_embeddings.py and core/vision.py
+    "httpx>=0.24",             # `text_embeddings`/`vision_query` — NOT guaranteed by
+                               # `anthropic` anymore as of anthropic>=1 (its HTTP layer
+                               # moved to httpx2); an independent requirement now, see
+                               # requirements.txt for the full note
     "piper-tts",               # `speak` — see requirements.txt for the full note
     "faster-whisper",          # `listen` — see requirements.txt for the full note
     "mido[ports-rtmidi]>=1.3", # `midi1` — see requirements.txt for the full note

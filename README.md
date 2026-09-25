@@ -164,7 +164,7 @@ its tool actually runs):
 | `trash` | `send2trash` |
 | `computer` | `pyautogui`, `pillow` — plus `python3-tk`/`scrot` from apt and an X11 display (step 3) |
 | `memory` | nothing — standard library only |
-| `text_embeddings` · `vision_query` | `httpx` — already pulled in by `anthropic`, normally a no-op install |
+| `text_embeddings` · `vision_query` | `httpx` — an independent requirement as of `anthropic>=1` (which moved its own HTTP layer to `httpx2` and no longer pulls in plain `httpx` for you) |
 | `speak` | `piper-tts` — **not** `sudo apt install piper` (an unrelated GTK app); playback shells out to `paplay` (`pulseaudio-utils` — on by default on any real desktop install via PipeWire, `sudo apt install pulseaudio-utils` if it's ever missing) |
 | `listen` | `faster-whisper`; capture shells out to `parecord` (same `pulseaudio-utils` package as above) |
 | `midi1` | `mido[ports-rtmidi]` — pulls in `python-rtmidi`, a C extension. No prebuilt Linux wheel exists for every Python version, so `pip` frequently compiles it from source — and its own build script makes ALSA dev headers a **hard requirement** on Linux unless JACK's are present instead. Without `libasound2-dev` (installed above) the build fails with a `meson`/ALSA-related compiler error, not an obvious "MIDI" one |
@@ -642,13 +642,23 @@ write the literal token into anything in the repo.
 <details>
 <summary><b>HTTPS and TLS</b> — for an MCP server with a self-signed or private-CA certificate</summary>
 
-A server URL may be `http://` or `https://`. TLS is verified by the `httpx` client
-inside `mcp_client.py`, offline, against a local CA bundle — the CA isn't contacted at
-connect time.
+A server URL may be `http://` or `https://`. TLS is verified by the `httpx2` client
+inside `mcp_client.py` (via the `mcp` package's own dependency — confirmed live,
+`mcp` requires `httpx2`, independent of whatever `anthropic` itself uses), offline —
+the CA is not contacted at connect time.
 
-A publicly-signed certificate (Let's Encrypt, DigiCert, …) works with no configuration.
-A self-signed or internal-CA certificate isn't in `certifi`, so point `httpx` at a bundle
-that contains your CA:
+**Verification goes through OpenSSL's own default trust configuration, not a bundled
+`certifi` list.** `httpx2` builds its default SSL context with `truststore.SSLContext`
+(confirmed live: a plain `httpx2.Client()`'s transport uses `truststore._api.SSLContext`,
+not `ssl.SSLContext` directly), which on Linux defers to `ssl.get_default_verify_paths()`
+— the same mechanism `SSL_CERT_FILE`/`SSL_CERT_DIR` have always fed on this platform —
+and only falls back to a short list of common per-distro CA file locations
+(`/etc/ssl/certs/ca-certificates.crt` on Debian/Ubuntu, etc.) if OpenSSL's own compiled-in
+defaults come up empty.
+
+A publicly-signed certificate (Let's Encrypt, DigiCert, …) works with no configuration —
+the system's own CA bundle already covers it. A self-signed or internal-CA certificate
+isn't in that bundle, so override the default verify paths:
 
 ```bash
 export SSL_CERT_FILE=/path/to/your-ca-chain.pem   # or SSL_CERT_DIR for a hashed dir
@@ -656,14 +666,20 @@ export SSL_CERT_FILE=/path/to/your-ca-chain.pem   # or SSL_CERT_DIR for a hashed
 
 Two things that catch people out:
 
-- `SSL_CERT_FILE` **replaces** the default trust store rather than adding to it. If the
-  same process also needs public HTTPS hosts, concatenate:
-  `cat "$(python -m certifi)" your-ca.pem > combined-ca.pem`
+- `SSL_CERT_FILE` **replaces** the default verify paths rather than adding to it. If the
+  same process also needs public HTTPS hosts, concatenate your CA with the system bundle
+  (`/etc/ssl/certs/ca-certificates.crt` on Debian/Ubuntu — check which of the paths above
+  actually exists on your distro) rather than with `certifi`'s, since that system bundle
+  is what's actually being overridden now:
+  `cat /etc/ssl/certs/ca-certificates.crt your-ca.pem > combined-ca.pem`
 - Your server (or reverse proxy) must present its **full chain** — a missing
   intermediate is the most common "the cert is valid but it still won't connect" cause,
   and the fix is on the server side; the client only needs the root.
 
-The OS trust store (`/etc/ssl/certs`) does not affect this app.
+**The OS trust store genuinely does affect this app now** — this is a real behavior
+change from the SDK's pre-1.0 `httpx`-based transport, which used a bundled `certifi`
+list regardless of the OS. Don't assume the old "OS trust store is irrelevant" framing
+still holds if you're used to it from an earlier version of this doc.
 
 </details>
 
