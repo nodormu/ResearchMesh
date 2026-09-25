@@ -28,7 +28,18 @@ _SHELL_EXECUTABLE_NAME = Path(SHELL_EXECUTABLE).name
 # distro-specific claim — see that function's own docstring for why.
 _SH_NAME = Path(SH_TARGET).name if SH_TARGET.startswith("/") else SH_TARGET
 
-MAX_TOOL_ITERATIONS = 75
+# Raised 30 -> 75 -> 200 across this project's own history (see
+# researchmesh_client_dev_log.md for the 30->75 incident: a single turn
+# doing iterative debugging against a buggy third-party MCP server
+# chewed through 20+ iterations just fixing/working around that
+# server's own bugs). 200 is a safety-valve headroom increase, not a
+# response to a specific new incident — it exists so a long, genuinely
+# productive turn doesn't get cut off mid-task purely on iteration
+# count. Counts rounds of the chat loop (each of which can batch
+# several tool_use calls in one response), not a literal per-tool-call
+# counter, and resets every new user message, never across a whole
+# conversation.
+MAX_TOOL_ITERATIONS = 200
 
 # Separate, small grace budget for continuations the API contract makes
 # mandatory (an open pause_turn; a server_tool_use left dangling by a mixed
