@@ -137,7 +137,7 @@ client, so a Claude subscription won't work.
 
 ```bash
 sudo apt install python3 python3-venv python3-dev build-essential \
-                 libreoffice pandoc python3-tk scrot libasound2-dev
+                 libreoffice pandoc python3-tk scrot libasound2-dev pulseaudio-utils
 
 python3 -m venv ~/claude-chat-plus-more-tools
 source ~/claude-chat-plus-more-tools/bin/activate
@@ -149,7 +149,14 @@ html/rtf/txt/pdf, `pandoc` handles markdown (soffice has no dependable markdown 
 `md → pdf` goes through odt on the way). `libreoffice-writer`/`-calc`/`-impress` alone are
 enough if you don't want the whole suite. `python3-tk` and `scrot` back `computer` — see
 step 3. `libasound2-dev` backs `midi1` — see the table below for why it's a hard
-requirement, unlike some of the packages near it that aren't.
+requirement, unlike some of the packages near it that aren't. `pulseaudio-utils` backs
+`speak`/`listen` — both shell out to it directly (`paplay`/`parecord`) with no fallback,
+so unlike most per-tool packages below, a missing binary here isn't a clean "tool
+declares itself unavailable" story, just a raw subprocess failure. It's genuinely already
+present on most real desktop installs (pulled in by PipeWire's `pipewire-pulse`), which is
+why it's easy to assume it's a given — but that assumption doesn't hold on a headless
+server, WSL, or a minimal container, all realistic ways to run a CLI tool like this one,
+so it's listed here explicitly rather than left to chance.
 
 **Per-tool Python packages** (all installed unconditionally via `requirements.txt` —
 none of these are meant to be skipped; each is only *imported* lazily, at the moment
@@ -165,7 +172,7 @@ its tool actually runs):
 | `computer` | `pyautogui`, `pillow` — plus `python3-tk`/`scrot` from apt and an X11 display (step 3) |
 | `memory` | nothing — standard library only |
 | `text_embeddings` · `vision_query` | `httpx2` — already pulled in transitively by both `anthropic` and `mcp`, listed explicitly since these modules import it directly |
-| `speak` | `piper-tts` — **not** `sudo apt install piper` (an unrelated GTK app); playback shells out to `paplay` (`pulseaudio-utils` — on by default on any real desktop install via PipeWire, `sudo apt install pulseaudio-utils` if it's ever missing) |
+| `speak` | `piper-tts` — **not** `sudo apt install piper` (an unrelated GTK app); playback shells out to `paplay` (`pulseaudio-utils`, installed above) |
 | `listen` | `faster-whisper`; capture shells out to `parecord` (same `pulseaudio-utils` package as above) |
 | `midi1` | `mido[ports-rtmidi]` — pulls in `python-rtmidi`, a C extension. No prebuilt Linux wheel exists for every Python version, so `pip` frequently compiles it from source — and its own build script makes ALSA dev headers a **hard requirement** on Linux unless JACK's are present instead. Without `libasound2-dev` (installed above) the build fails with a `meson`/ALSA-related compiler error, not an obvious "MIDI" one |
 
