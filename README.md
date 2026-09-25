@@ -164,7 +164,7 @@ its tool actually runs):
 | `trash` | `send2trash` |
 | `computer` | `pyautogui`, `pillow` — plus `python3-tk`/`scrot` from apt and an X11 display (step 3) |
 | `memory` | nothing — standard library only |
-| `text_embeddings` · `vision_query` | `httpx` — an independent requirement as of `anthropic>=1` (which moved its own HTTP layer to `httpx2` and no longer pulls in plain `httpx` for you) |
+| `text_embeddings` · `vision_query` | `httpx2` — already pulled in transitively by both `anthropic` and `mcp`, listed explicitly since these modules import it directly |
 | `speak` | `piper-tts` — **not** `sudo apt install piper` (an unrelated GTK app); playback shells out to `paplay` (`pulseaudio-utils` — on by default on any real desktop install via PipeWire, `sudo apt install pulseaudio-utils` if it's ever missing) |
 | `listen` | `faster-whisper`; capture shells out to `parecord` (same `pulseaudio-utils` package as above) |
 | `midi1` | `mido[ports-rtmidi]` — pulls in `python-rtmidi`, a C extension. No prebuilt Linux wheel exists for every Python version, so `pip` frequently compiles it from source — and its own build script makes ALSA dev headers a **hard requirement** on Linux unless JACK's are present instead. Without `libasound2-dev` (installed above) the build fails with a `meson`/ALSA-related compiler error, not an obvious "MIDI" one |
