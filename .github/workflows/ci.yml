@@ -102,4 +102,21 @@ jobs:
             echo "::error::A literal token is committed; use \${VAR} instead."
             exit 1
           fi
+          # config.toml's own equivalent: `token_env`/`api_key_env` are meant to
+          # hold the NAME of an environment variable, never a secret value
+          # itself. A real token pasted in by mistake will contain a lowercase
+          # letter somewhere (this project's env-var-name convention is
+          # ALL_CAPS_WITH_UNDERSCORES), so that's the signal this checks for.
+          if git grep -nIE '\b(token_env|api_key_env)\s*=\s*"[^"]*[a-z][^"]*"' -- '*.toml' ; then
+            echo "::error::token_env/api_key_env should name an ALL_CAPS environment variable, not a literal value."
+            exit 1
+          fi
+          # The `env = { ANTHROPIC_API_KEY = "$ANTHROPIC_API_KEY" }` inline
+          # table (config.toml's stdio-worker examples) is meant to carry a
+          # shell expansion, never a literal — the TOML equivalent of the
+          # .mcp.json check above.
+          if git grep -nIE '\benv\s*=\s*\{[^}]*(ANTHROPIC_API_KEY|_TOKEN)\s*=\s*"[^$"][^"]*"' -- '*.toml' ; then
+            echo "::error::A literal secret appears to be committed in an inline env table; use \"\$VAR\" instead."
+            exit 1
+          fi
           echo "no committed credentials found"
