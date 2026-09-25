@@ -98,7 +98,11 @@ jobs:
           # doesn't start with $" is spelled as a first character that is
           # neither $ nor a closing quote. That passes "${ANTHROPIC_API_KEY}"
           # and catches a pasted-in literal.
-          if git grep -nIE '"(ANTHROPIC_API_KEY|RESEARCHMESH_MCP_TOKEN)"[[:space:]]*:[[:space:]]*"[^$"][^"]{7,}"' -- '*.json' ; then
+          # `RESEARCHMESH_MCP_TOKEN` is only the *default* --token-env name;
+          # docs explicitly say it's renameable (`--token-env VAR`), so a
+          # hardcoded single name would miss a renamed token leaking under
+          # its own key. Match any ALL_CAPS key ending in _TOKEN instead.
+          if git grep -nIE '"(ANTHROPIC_API_KEY|[A-Z_]*_TOKEN)"[[:space:]]*:[[:space:]]*"[^$"][^"]{7,}"' -- '*.json' ; then
             echo "::error::A literal token is committed; use \${VAR} instead."
             exit 1
           fi
