@@ -419,6 +419,157 @@ file helps a lot if a 400 does hit.
 1.61.0. `pyproject.toml` requires 3.11+ (the floor is `tomllib`, used by `main.py`); 3.14
 is just what it was run on. The apt commands above assume a Debian/Ubuntu system.
 
+### 10) interactive_run — log in without Claude ever seeing your passwords
+
+`interactive_run` can log you into things — sudo, ssh, whatever asks for a password —
+without your password, or your GPG vault passphrase, ever being seen by Claude. You
+need to set this up once (below). After that, whenever a command needs a credential,
+you get a list of the names you saved to pick from, so you never have to remember
+which one it is yourself either.
+
+<details>
+<summary><strong>Full <code>pass</code> vault setup, walkthrough + reference charts (click to expand)</strong></summary>
+
+**One-time `pass` setup — install first:**
+```
+sudo apt install pass pinentry-curses
+```
+
+```
+SETUP SEQUENCE SETTING UP A VAULT FROM SCRATCH
+══════════════════════════════════════════════
+
+Step 1: gpg --full-generate-key
+  You type:   Name, Email, Passphrase
+  Purpose:    Creates your encryption key (a public/private key pair)
+
+Step 2: gpg --list-secret-keys
+  You type:   Nothing — just run it
+  Purpose:    Shows you the Key ID (long hex string) you'll need next
+
+Step 3: pass init <key-id>
+  You type:   The Key ID from step 2
+  Purpose:    Tells pass "encrypt my whole vault using this key"
+
+Step 4: pass insert <entry-name>
+  You type:   A name you choose, then the secret value to store
+  Purpose:    Encrypts and saves one password under that name
+
+Step 5: pass show <entry-name>
+  You type:   Nothing — just the entry name
+  Purpose:    Decrypts and prints that password (needs your passphrase
+              the first time; gpg-agent caches it for a while after)
+```
+
+**EXPLANATION FOR SETTING UP A VAULT FROM SCRATCH AND ADDING YOUR GITHUB PERSONAL ACCESS TOKEN (PAT) TO IT AS AN EXAMPLE**
+
+Using a PAT specifically, not a password, because GitHub doesn't accept account
+passwords for git/API operations at all anymore — a PAT is what actually goes in that
+prompt. Generate one at github.com → Settings → Developer settings → Personal access
+tokens.
+```
+Thing            Where it comes from              What it's actually for
+─────────────────────────────────────────────────────────────────────────
+Name / Email     You type it when you run         The vault never reads this
+(= "User ID")    `gpg --full-generate-key`         — but YOU will. It's the
+                 to create your key                only human-readable label
+                                                    you'll see when running
+                                                    `gpg --list-keys` later.
+                                                    Pick something you'll
+                                                    recognize (e.g. name:
+                                                    "pass-vault"), not
+                                                    garbage — you're the one
+                                                    who has to remember it,
+                                                    not the software.
+
+Passphrase       You type it when you run         This passphrase allows
+                 `gpg --full-generate-key`,        you to get into your
+                 same command as above             vault.
+
+Key ID           GPG generates this on its        An ID number you give to
+(long hex        own, shown to you after           `pass init` one time, to
+string)          you run `gpg --list-secret-       tell your (still-empty)
+                 keys`                             vault which key to use.
+
+Public key       Generated automatically           Locks up new passwords
+                 alongside the key, same           you save — used the
+                 command as above                  moment you run
+                                                    `pass insert github`.
+
+Private key      Generated automatically           Unlocks passwords so you
+                 alongside the key, same           can read them — used the
+                 command as above                  moment you run
+                                                    `pass show github` (once
+                                                    the passphrase has
+                                                    unlocked the key itself).
+
+─────────────────────────────────────────────────────────────────────────
+Your Actual      You type it when you run          THIS is your actual
+GitHub           `pass insert github` — pass       GitHub PAT — the real
+Personal         then asks you for it on its       credential git sends to
+Access Token     OWN separate line, AFTER you      GitHub over HTTPS. Lives
+(PAT)            run that command                  INSIDE the vault,
+                                                    encrypted. Retrieved
+                                                    with `pass show github`.
+                                                    GitHub sees THIS, never
+                                                    the passphrase. NOT the
+                                                    same as, and unrelated
+                                                    to, the passphrase
+                                                    above. NOT your GitHub
+                                                    account password either
+                                                    — GitHub no longer
+                                                    accepts that for git/API
+                                                    use at all.
+```
+
+Once set up, a tool call looks like:
+```json
+{"expect": "Password for", "send_secret": "github"}
+```
+Note: git's own prompt text literally says "Password for ..." even though what
+actually belongs there is your PAT, not a password — that's git's wording, not
+this project's; the `expect` regex just has to match what git really prints.
+
+The model only ever sees the word `"github"` — never your real PAT, at any point.
+
+```
+BELOW IS HOW YOU BLOW THE WHOLE VAULT AWAY IF YOU WANT START OVER
+═════════════════════════════════════════════════════════════════
+gpgconf --kill gpg-agent
+rm -rf ~/.password-store
+```
+
+Example interactive run so you will know exactly how this works
+═══════════════════════════════════════════════════════════════
+
+```
+$ python main.py 
+[mcp] disabled in config.toml — no workers
+> please run sudo whoami
+Response:
+please select the cred name I need to use:
+super_secret_admin_password
+> super_secret_admin_password
+Response:
+`sudo whoami` returned **`root`** — the `super_secret_admin_password` credential authenticated successfully.
+> could you see my password and/or did my password get sent to the LLM?
+Response:
+No — based on how this system is designed, your actual password was **not** visible to me and was **not sent to the LLM (me/Anthropic's API)**.
+
+Here's the mechanism, as documented for the `send_secret` field I used:
+
+- I only ever specified the **name** of the credential (`super_secret_admin_password`) in my tool call — never the value.
+- That name is resolved **locally**, on your machine, via `pass show super_secret_admin_password` (the `pass` password manager, which decrypts a GPG-encrypted entry on disk).
+- The decrypted value is piped directly into the `sudo` prompt by the local tool plumbing — it is substituted in *before* the interaction ever gets turned into something I read.
+- The transcript that came back to me had it redacted: you can see in the raw output I received it shows as `Password***` and then a string of backspace-masked characters (`**************\b \b...`), not the actual password text.
+
+So the flow is: **pass vault → local process → sudo's stdin**, bypassing me entirely for the secret itself. I only ever see the *name* `super_secret_admin_password` (which isn't sensitive) and a masked transcript afterward.
+
+A caveat on precision: I can tell you how the tool is documented and designed to behave, and what I observed (a redacted transcript), but I can't personally audit the underlying implementation from here to give you a cryptographic guarantee — if you want that level of assurance, that'd come from inspecting the client's source/config yourself rather than taking my word for it.
+```
+
+</details>
+
 ## Configuration
 
 Non-secret settings live in `config.toml`. Secrets stay in the environment — the app does
