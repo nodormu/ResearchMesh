@@ -85,7 +85,7 @@ Claude chooses the tools and keeps working until it has an answer.
     genuinely needed, grant it narrowly via `sudoers`, not blanket admin rights.
   - For stricter control, **AppArmor**/**SELinux** profiles and systemd sandboxing
     directives enforce restrictions the account can't opt itself out of.
-- It's your API key: one request can fan out into many tool calls (capped at 75 per turn).
+- It's your API key: one request can fan out into many tool calls (capped at 200 per turn).
 - `bash` forgets everything between calls — `cd`, exports, activated venvs. Chain with `&&`,
   or use `python`, which keeps state.
 - Ask for files by absolute path. If Claude offers a download link instead, tell it you
