@@ -13,3 +13,11 @@ memories/
 
 # Personal brainstorming notes — not part of the project
 node_modules/
+
+# Machine-local convenience scripts (e.g. cross-repo fork-parity checks
+# against sibling ResearchMesh-Router/-Mac/-Windows clones that only exist
+# on this one machine). Not part of the shipped project — a fresh clone
+# has none of those sibling repos, so scripts assuming they exist would
+# just confuse/break for anyone else. Kept out of git entirely rather
+# than shipped-but-inert.
+scripts/
