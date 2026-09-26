@@ -327,12 +327,11 @@ servers = [
 # values (via the config_edit tool, so these comments survive) — then flip
 # `enabled` to true yourself once it's filled in correctly.
 #
-# ⚠️ TESTING STATE, NOT THE INTENDED SHIPPED DEFAULT: `enabled` is live
-# `true` below so active development/testing can continue without a
-# per-call override. The intended default for a real commit is `false` —
-# flip this back before committing, per the explicit decision made while
-# building this tool (see speak_listen_tool_integration_plan.md in
-# /memories for the reasoning).
+# ⚠️ CURRENT STATE: every value below is commented out, so `speak` returns
+# not_configured unless a call passes its own `voice`. They're this machine's own hardware
+# values, kept for reference — uncomment them to turn the tool on here. Any
+# commit should have them commented out again (or `enabled = false`), per
+# the decision recorded in speak_listen_tool_integration_plan.md in /memories.
 # enabled = true
 # voice_model = "/home/invent/models/piper_voices/en_US-lessac-medium.onnx"
 # sink = "alsa_output.usb-Razer_Razer_USB_Sound_Card_00000000-00.analog-stereo"
@@ -372,11 +371,11 @@ servers = [
 # mic/headset, and edit this file's values (via config_edit) — then flip
 # `enabled` to true yourself once it's filled in correctly.
 #
-# ⚠️ TESTING STATE, NOT THE INTENDED SHIPPED DEFAULT: `enabled` is live
-# `true` below so active development/testing can continue. The intended
-# default for a real commit is `false` — flip this back before committing,
-# per the explicit decision made while building this tool (see
-# speak_listen_tool_integration_plan.md in /memories for the reasoning).
+# ⚠️ CURRENT STATE: every value below is commented out, so `listen` returns
+# not_configured unless a call passes its own `device`. They're this machine's own hardware
+# values, kept for reference — uncomment them to turn the tool on here. Any
+# commit should have them commented out again (or `enabled = false`), per
+# the decision recorded in speak_listen_tool_integration_plan.md in /memories.
 # enabled = true
 # device = "alsa_input.usb-Razer_Razer_USB_Sound_Card_00000000-00.analog-stereo"
 # model_size = "base"
