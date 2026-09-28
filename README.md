@@ -113,6 +113,8 @@ Claude chooses the tools and keeps working until it has an answer.
   imports, tool-registry shape, that the doc tool-count matches the code, and an MCP
   handshake. GitHub Actions runs it plus `ruff`/`mypy` on every push/PR to `main`, on
   Python 3.11 and 3.14.
+- **`python test_model_compat_live.py` is separate, outside CI** (real API, ~9 requests): checks the
+  per-model tool-compatibility handler against Anthropic's actual error wording.
 - **No unit tests, and CI doesn't exercise the tools themselves** — that needs LibreOffice,
   a browser, an X11 display, and real API credits.
 - **Two things a linter will flag that are deliberate.** Broad `except Exception`/
@@ -855,6 +857,7 @@ mcp_client.py                    MCP client (stdio / SSE / Streamable HTTP)
 mcp_server.py                    the other direction — serve this agent to an MCP client
 .mcp.json                        example Claude Code registration for mcp_server.py
 smoke_test.py                    fast wiring checks — no API key, no network
+test_model_compat_live.py        live check of the model-compat handler (spends tokens, not in CI)
 .github/workflows/ci.yml         runs ruff, mypy, smoke_test.py on push and PR
 config.toml                      model + MCP server list (no secrets; committed)
 pyproject.toml                   metadata, deps, and the ruff exemptions (lint config)
