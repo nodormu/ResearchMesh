@@ -63,7 +63,13 @@ def check_tool_registry() -> None:
     from core import local_tools
 
     tools = local_tools.TOOLS
-    names = [t["name"] for t in tools]
+    # A client TOOLSET entry (currently just computer.COMPUTER_TOOL) carries
+    # no "name" at all — the dated `type` fixes its member set server-side
+    # instead, so there is nothing of this module's own to name. Filtering to
+    # named entries first means every check below that means "a tool's name"
+    # can't crash on `t["name"]` for the one entry that has none.
+    named = [t for t in tools if "name" in t]
+    names = [t["name"] for t in named]
 
     check("at least one tool declared", bool(tools))
     check(
@@ -71,11 +77,11 @@ def check_tool_registry() -> None:
         len(names) == len(set(names)),
         f"dupes: {sorted({n for n in names if names.count(n) > 1})}",
     )
-    for tool in tools:
-        name = tool.get("name", "<unnamed>")
-        # The learned schemas (bash, text editor, memory, computer) carry a
-        # `type` instead of a description and input_schema — Claude already
-        # knows their shape, so declaring one would contradict its training.
+    for tool in named:
+        name = tool["name"]
+        # The learned schemas (bash, text editor, memory) carry a `type`
+        # instead of a description and input_schema — Claude already knows
+        # their shape, so declaring one would contradict its training.
         if "type" in tool:
             check(f"{name}: learned schema has a name", bool(tool.get("name")))
             continue
@@ -85,6 +91,17 @@ def check_tool_registry() -> None:
             f"{name}: input_schema is an object",
             schema.get("type") == "object" and "properties" in schema,
         )
+
+    # The one entry expected to have NO name at all: a client TOOLSET. Its
+    # own separate check, rather than silently skipped by the `named` filter
+    # above — a toolset entry that ever gained a stray "name" (or lost its
+    # "type") would otherwise pass through both loops unnoticed.
+    unnamed = [t for t in tools if "name" not in t]
+    check(
+        "every unnamed entry is a real client toolset, not a mistake",
+        all(t.get("type", "").endswith("_toolset_20260801") for t in unnamed),
+        str(unnamed),
+    )
 
     # Every module must expose the three-name contract local_tools relies on.
     for module in local_tools.MODULES:

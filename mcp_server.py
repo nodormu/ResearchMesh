@@ -11,16 +11,16 @@ command (core/claude.py's `load_claude_models`/`resolve_model_swap`), just
 reachable over MCP. This is what lets a caller like ResearchMesh-Router
 change a connected worker's model remotely, not just its own.
 
-**Why `delegate` is one tool instead of re-exporting all 23.** `bash_20250124`,
-`memory_20250818` and `computer_20251124` are *learned* schemas — Claude is
-trained on their exact shape, and `computer` additionally needs the
-`computer-use-2025-11-24` beta header on the request that declares it. Neither
-survives a round trip through MCP's generic tool schema: the header belongs to
-ResearchMesh's own API call, not to the client's. Re-exporting them would hand
-Claude Code a lookalike of a tool it already knows, with the trained schema
-discarded. Wrapping the loop keeps every one of them running against the API
-exactly as designed, and keeps `SYSTEM_PROMPT` (which explains the tools to the
-model actually calling them) in force.
+**Why `delegate` is one tool instead of re-exporting all 24.** `bash_20250124`,
+`memory_20250818` and `computer_toolset_20260801` are *learned* schemas —
+Claude is trained on their exact wire shape (the computer one moreso than
+most: it's a client TOOLSET, one declared entry expanding into 17 member
+tools server-side). Neither survives a round trip through MCP's generic tool
+schema unchanged. Re-exporting them would hand Claude Code a lookalike of a
+tool it already knows, with the trained schema discarded. Wrapping the loop
+keeps every one of them running against the API exactly as designed, and
+keeps `SYSTEM_PROMPT` (which explains the tools to the model actually calling
+them) in force.
 
 So `delegate` is a self-contained agent, not an extension of the caller's
 toolset — the `bash`/editor overlap with Claude Code's own built-ins is the
