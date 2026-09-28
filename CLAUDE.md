@@ -92,8 +92,8 @@ call is faked): the per-model tool-compatibility handler, the computer toolset's
 `cursor_position`, and the web tools' `allowed_callers`. It cannot see Anthropic rewording the "does not
 support tool types" error (`python test_model_compat_live.py` checks that against the real API; it spends
 tokens and is not in CI) or a new computer-toolset member (`_MEMBERS` in `core/computer.py` is hand-kept).
-The four `test_*.py` scripts spawn real shells and pty children, so CI runs them in a separate `behaviour`
-job (needs `pexpect`, `zsh`, `less`) that stays out of `check`, keeping the bare-box smoke run.
+The four `test_*.py` scripts spawn real shells and pty children; they are for local debugging and are not
+run in CI.
 
 **`mypy .` is the third gate**, configured in `pyproject.toml`'s `[tool.mypy]` and run by CI
 alongside `ruff`. It should come back clean. Only one option is set —
