@@ -259,155 +259,39 @@ TOOLS = [
     {
         "name": "midi1",
         "description": (
-            "MIDI 1.0 device discovery and I/O. "
-            "Actions: 'list_devices' enumerates available MIDI input/output "
-            "port names. 'open' opens a named port as either 'input' or "
-            "'output' and returns a handle string to use in later calls. "
-            "'send' sends a channel message (note_on, note_off, "
-            "control_change, program_change, pitchwheel, aftertouch, "
-            "polytouch), a system message (quarter_frame, songpos, "
-            "song_select, tune_request, clock, start, stop, continue, "
-            "active_sensing, reset), an arbitrary-payload System "
-            "Exclusive message ('sysex', with a 'data' array of 0-127 "
-            "integers, NOT including the leading 0xF0/trailing 0xF7 which "
-            "are added automatically), or a typed 'mtc_full' convenience "
-            "message (MIDI Time Code Full Message — jumps the timeline to "
-            "an exact position in one message, built as a validated sysex "
-            "payload under the hood: needs 'hours' 0-23, 'minutes' 0-59, "
-            "'seconds' 0-59, 'frames' 0-29, and REQUIRED 'frame_rate' (one "
-            "of '24'/'25'/'30drop'/'30nondrop' — no default, since guessing "
-            "wrong here changes what the position means downstream; "
-            "'device_id' 0-127, not required, defaults to 127/all-devices, "
-            "which IS the spec's own stated default), or a typed 'mmc' message "
-            "(MIDI Machine Control — transport control, also built as a "
-            "validated sysex payload under the hood): needs a required "
-            "'command', one of 'stop'/'play'/'deferred_play'/"
-            "'fast_forward'/'rewind'/'record_strobe'/'record_exit'/"
-            "'record_pause'/'pause'/'eject'/'chase'/'command_error_reset'/"
-            "'mmc_reset' (no extra fields needed for any of these), or "
-            "'locate' (needs 'hours'/'minutes'/'seconds'/'frames'/"
-            "'frame_rate' same as 'mtc_full' above, PLUS 'subframes' "
-            "0-99 — moves the receiving device's playhead to that exact "
-            "position). 'device_id' 0-127, not required, defaults to 127/all-"
-            "devices, same convention as 'mtc_full'. NOTE: the 'command' "
-            "enum also accepts the later RP-013 extensions, including "
-            "'shuttle'/'variable_play'/'search' (need 'speed') and the "
-            "Information Field commands 'read'/'write'/'masked_write'/"
-            "'update' — see the 'command' field's own enum for the full "
-            "list; use the generic 'sysex' action for anything not in it. "
-            "There is also a typed 'msc' message (MIDI Show Control — "
-            "stage/theatrical equipment control, also a validated sysex "
-            "payload under the hood): needs 'command_format' (one of "
-            "'lighting'/'sound'/'machinery'/'video'/'projection'/"
-            "'process_control'/'pyro'/'all_types', the 8 top-level device "
-            "categories) OR 'command_format_raw' (0-127, for a narrower "
-            "sub-category not in that list — specify exactly one of the "
-            "two), and 'command' (one of the 11 'General Category' "
-            "commands, which apply to every command_format: 'go'/'stop'/"
-            "'resume'/'timed_go'/'load'/'set'/'fire'/'all_off'/'restore'/"
-            "'reset'/'go_off' — NOTE this is a shared field name with "
-            "'mmc' above but a DIFFERENT set of valid values for 'msc'). "
-            "'go'/'stop'/'resume'/'go_off' may include 'q_number'/"
-            "'q_list'/'q_path' (none required; ASCII digit-and-dot strings, "
-            "e.g. 'q_list' requires 'q_number' too, 'q_path' requires "
-            "'q_list' too). 'load' requires 'q_number' (same 'q_list'/"
-            "'q_path' rules, neither required). 'timed_go' requires 'hours'/"
-            "'minutes'/'seconds'/'frames'/'fractional_frames'/'frame_rate' "
-            "(same meaning as 'mtc_full', plus 'fractional_frames' 0-99) "
-            "and may include the same q_number/q_list/q_path as 'go'. "
-            "'set' requires 'control_number' and 'control_value' (each "
-            "0-16383) and may include the SAME 6 time fields as 'timed_go' "
-            "— given ALL together or not at all. 'fire' requires "
-            "'macro_number' (0-127). 'all_off'/'restore'/'reset' need no "
-            "extra fields. 'device_id' 0-127, not required, defaults to 127/all-"
-            "devices, same convention as 'mtc_full'/'mmc'. NOTE: the "
-            "extended 15-command MSC 'Sound Commands' set (clock/cue-list-"
-            "path management) is deliberately NOT supported — use the "
-            "generic 'sysex' action directly if ever needed. "
-            "All of the above are sent on an open output handle. "
-            "'poll' checks for buffered messages on an open input handle "
-            "— decodes any incoming MIDI message generically, not just "
-            "the types 'send' explicitly supports. Each returned message "
-            "has 'message' (mido's text), 'hex' (the raw bytes), "
-            "'decoded' (the same dict 'send' takes; SysEx with no decoder "
-            "comes back as type 'sysex', MMC replies as type "
-            "'mmc_response'), and, when it finishes a multi-message "
-            "change, 'completes' (an 'rpn'/'nrpn' parameter change or an "
-            "'mtc_quarter_frame_sequence' time). Each also "
-            "includes a real wall-clock 'received_at' timestamp (epoch "
-            "seconds) captured at actual arrival time, and nothing is "
-            "lost between calls while the port stays open (continuously "
-            "captured into a bounded 10,000-message buffer regardless of "
-            "poll timing). By default returns instantly with whatever's "
-            "already buffered; set 'timeout_seconds' (0-60, not required, "
-            "default 0) to instead BLOCK until either a message arrives "
-            "or that many seconds elapse, waking up early rather than "
-            "always waiting the full duration. 'close' closes a "
-            "previously opened handle. Handles only live for the current "
-            "ResearchMesh process — reopen after a restart. "
-            "'read_midi_file' reads a .mid/.midi or .syx file from disk "
-            "('path' required) and returns a structured summary: for "
-            ".mid/.midi, file type/ticks_per_beat/length_seconds plus a "
-            "per-track breakdown (name, message count, first tempo/time-"
-            "signature/key-signature/instrument-name meta values found, "
-            "and decoded messages up to 'max_messages' per track, default "
-            "100 — set 0 for metadata/counts only); for .syx, message_count "
-            "plus decoded sysex messages up to the same cap. "
-            "'write_midi_file' creates a NEW .mid/.midi or .syx file from "
-            "scratch on disk ('path' required, format inferred from the "
-            "extension) — this is whole-file CREATE only, not an in-place "
-            "edit of an existing file. Refuses to overwrite an existing "
-            "file unless 'overwrite' is explicitly true. For .mid: "
-            "'midi_file_type' (0/1/2, default 1, not required) and "
-            "'ticks_per_beat' (default 480), plus required 'tracks' — an "
-            "array of {'messages': [...]} objects. Each message reuses the "
-            "same type+fields shape as 'send' (note_on, control_change, "
-            "sysex, etc.) plus a 'time' field (delta ticks since the "
-            "previous message in that track, default 0), PLUS 17 file-only "
-            "meta message types not valid for live 'send': track_name, "
-            "text, copyright, lyrics, marker, cue_marker, instrument_name, "
-            "device_name, set_tempo (takes either raw 'tempo' in "
-            "microseconds/quarter-note OR a friendlier 'bpm'), "
-            "time_signature, key_signature, smpte_offset, midi_port, "
-            "channel_prefix, sequence_number, sequencer_specific, "
-            "end_of_track (auto-added if omitted). For .syx: required "
-            "'messages' — a flat array of {'type':'sysex','data':[...]} "
-            "objects. On success, returns the same structured summary "
-            "'read_midi_file' would produce for the file just written, as "
-            "a built-in round-trip sanity check. "
-            "'run_clock' drives a real, precisely-paced MIDI Real-Time "
-            "Clock stream (24 pulses per quarter note) on an open output "
-            "handle for a fixed duration — for hardware that's been set "
-            "to follow an EXTERNAL clock/transport source (common on "
-            "grooveboxes/drum machines with a 'sync source' menu set to "
-            "MIDI/USB/AUTO rather than INTERNAL), a single 'send' of "
-            "'start' alone typically only ARMS the transport; the device "
-            "then waits for actual Clock pulses to advance, and pulses "
-            "sent one 'send' call at a time can't be paced tightly enough "
-            "(round-trip call latency dwarfs the ~20ms/tick a musical "
-            "tempo needs) — hence this dedicated, self-contained action "
-            "that paces the whole stream internally with a real "
-            "monotonic schedule instead of depending on per-message call "
-            "timing. Required: 'handle' (an open OUTPUT handle), 'bpm' "
-            "(20-300), 'duration_seconds' (0 exclusive to 120 inclusive — "
-            "capped short deliberately, since unlike 'poll' this is "
-            "ACTIVELY driving hardware I/O the whole time, not just "
-            "idly waiting; call again for a longer run). Not required: "
-            "'transport' — 'start' (default, sent once before the clock "
-            "stream begins), 'continue' (resume rather than restart-from-"
-            "beginning, on gear that distinguishes the two), or 'none' "
-            "(send bare Clock only, no transport message at all — for "
-            "tempo-following without triggering play/already-started "
-            "gear). Also not required: 'stop_at_end' (boolean, default true) — "
-            "sends a 'stop' message once the clock stream finishes; set "
-            "false to leave the receiving device running/armed on its "
-            "own after this call returns. The call blocks for "
-            "approximately 'duration_seconds' (the tool's own timeout is "
-            "extended to accommodate this, same mechanism as 'poll's "
-            "'timeout_seconds'). Returns 'ticks_sent', 'elapsed_seconds' "
-            "(actual measured wall-clock duration of the clock stream, "
-            "for comparing against the requested 'duration_seconds'), "
-            "'transport_sent', and 'stop_sent'."
+            "MIDI 1.0 on Linux (ALSA): device ports, building and decoding every "
+            "MIDI 1.0 message, and .mid/.syx files. Actions: "
+            "'list_devices': input and output port names. "
+            "'open': open 'port_name' as 'direction' input or output; returns a "
+            "'handle' ('opened_at' too for an input). "
+            "'close': close a 'handle'. "
+            "'send': send 'message' on an output handle. A message is a dict with "
+            "'type' and that type's fields; 'describe' gives them and an example. "
+            "rpn, nrpn, mtc_quarter_frame_sequence and an mmc with 'segment' send "
+            "several wire messages, and 'sent' is then a list. "
+            "'poll': the messages an input handle received since the last poll "
+            "(up to 10,000 kept). Each has 'received_at' (epoch seconds), 'message' "
+            "(text), 'hex' and 'decoded' (the dict 'send' takes; SysEx with no "
+            "decoder is type 'sysex', MMC replies 'mmc_response'); 'completes' when "
+            "it finishes an RPN/NRPN change, a Quarter Frame time or MMC segments; "
+            "'at_open' and 'overflow' are explained under 'action'. "
+            "'timeout_seconds' (0-60, default 0) waits for the first message. "
+            "'describe': field documentation; see 'action'. "
+            "'read_midi_file': summary of the .mid/.midi or .syx at 'path', with "
+            "decoded messages up to 'max_messages' per track (default 100; 0 for "
+            "counts only). "
+            "'write_midi_file': create a .mid/.midi from 'tracks' or a .syx from "
+            "'messages' at 'path', then read it back. Messages are 'send' dicts plus "
+            "'time' (delta ticks), and in .mid tracks also the meta types with "
+            "mido's fields (track_name 'name', set_tempo 'tempo' or 'bpm', "
+            "time_signature, key_signature 'key', ...). An existing file is replaced "
+            "only with 'overwrite': true. "
+            "'decode_mmc_response': decode an MMC response given as its full SysEx "
+            "bytes in 'data' (poll already decodes received ones). "
+            "'run_clock': send MIDI Clock (24 per quarter note) at 'bpm' for "
+            "'duration_seconds' on an output handle, for devices that follow "
+            "external clock; one 'send' per clock is too slow and uneven. "
+            "Handles last only as long as this process."
         ),
         "input_schema": {
             "type": "object",
@@ -420,199 +304,120 @@ TOOLS = [
                         "decode_mmc_response", "run_clock", "describe",
                     ],
                     "description": (
-                        "Which MIDI operation to perform. 'describe' with "
-                        "'message': {'type': T} returns T's fields and an "
-                        "example (add 'command' for one command's fields); "
-                        "with no 'message' it lists every type. A 'poll' entry with "
-                        "'overflow': true marks where the input queue overflowed "
-                        "(a burst of over 2000 events) and messages were lost. "
-                        "'at_open': true marks messages in the burst that arrives "
-                        "as the input opens: normally events the device stored "
-                        "while the port was closed (old playing, or a reply to a "
-                        "request sent before the open). A live message arriving "
-                        "within 20 ms of the open is marked too."
+                        "Which operation. 'describe' with no 'message' lists every "
+                        "message type; with 'message': {'type': T} it returns T's "
+                        "fields and an example; add 'command' for one command, or "
+                        "for mmc 'field' for one Information Field. In 'poll' "
+                        "results, 'at_open': true marks the burst that arrives as an "
+                        "input opens: usually what the device stored while the port "
+                        "was closed (old playing, or a reply to a request sent "
+                        "before the open); a live message within 20 ms of the open "
+                        "is marked too. 'overflow': true marks where more than 2000 "
+                        "events queued at once and messages were lost."
                     ),
                 },
                 "port_name": {
                     "type": "string",
-                    "description": (
-                        "Exact MIDI port name (as returned by 'list_devices'). "
-                        "Required for 'open'."
-                    ),
+                    "description": "'open': a port name as 'list_devices' gives it.",
                 },
                 "direction": {
                     "type": "string",
                     "enum": ["input", "output"],
-                    "description": "Which side to open the port as. Required for 'open'.",
+                    "description": "'open': input or output.",
                 },
                 "active_sensing": {
                     "type": "boolean",
                     "description": (
-                        "'open' of an input only. true passes received Active "
-                        "Sensing (FE) to 'poll'; default false drops it. A device "
-                        "that sends it does so about every 300 ms."
+                        "'open' of an input: true passes received Active Sensing "
+                        "(FE, about every 300 ms from a device that sends it) to "
+                        "'poll'. Default false drops it."
                     ),
                 },
                 "handle": {
                     "type": "string",
-                    "description": (
-                        "Handle returned by a previous 'open' call. Required "
-                        "for 'close', 'send', and 'poll'."
-                    ),
+                    "description": "From 'open'; for close, send, poll and run_clock.",
                 },
                 "timeout_seconds": {
                     "type": "number",
                     "description": (
-                        "Not required for 'poll'. 0-60, default 0 (instant, "
-                        "non-blocking — returns immediately with whatever "
-                        "is already buffered). A value above 0 instead "
-                        "BLOCKS until either a message arrives or this "
-                        "many seconds elapse, returning early as soon as "
-                        "something shows up rather than always waiting "
-                        "the full duration."
+                        "'poll': 0-60, default 0 (return at once). Above 0, wait "
+                        "until a message arrives or this many seconds pass."
                     ),
                 },
                 "bpm": {
                     "type": "number",
-                    "description": (
-                        "Required for 'run_clock'. Tempo in beats per "
-                        "minute, 20-300. Converted internally to a "
-                        "24-pulses-per-quarter-note MIDI Clock interval "
-                        "(seconds/tick = 60/bpm/24)."
-                    ),
+                    "description": "'run_clock', required: 20-300.",
                 },
                 "duration_seconds": {
                     "type": "number",
                     "description": (
-                        "Required for 'run_clock'. How long to run the "
-                        "Clock stream, > 0 and <= 120 seconds. The tool "
-                        "call itself blocks for approximately this long — "
-                        "call again for a longer run rather than raising "
-                        "this past the cap."
+                        "'run_clock', required: above 0, at most 120; the call "
+                        "takes this long. Call again for longer."
                     ),
                 },
                 "transport": {
                     "type": "string",
                     "enum": ["start", "continue", "none"],
                     "description": (
-                        "Not required for 'run_clock', default 'start'. "
-                        "Which (if any) MIDI Real-Time transport message "
-                        "to send once, immediately before the Clock "
-                        "stream begins: 'start' (from the beginning), "
-                        "'continue' (resume, on gear that distinguishes "
-                        "the two), or 'none' (bare Clock only, e.g. for "
-                        "tempo-following gear that's already running/"
-                        "armed by other means)."
+                        "'run_clock': sent once before the clock, default 'start'; "
+                        "'none' sends clock only."
                     ),
                 },
                 "stop_at_end": {
                     "type": "boolean",
-                    "description": (
-                        "Not required for 'run_clock', default true. Sends a "
-                        "'stop' message once the Clock stream finishes. "
-                        "Set false to leave the receiving device running/"
-                        "armed on its own after this call returns."
-                    ),
+                    "description": "'run_clock': send Stop after the clock, default true.",
                 },
                 "path": {
                     "type": "string",
-                    "description": (
-                        "Absolute path to a .mid/.midi or .syx file on disk. "
-                        "Required for 'read_midi_file'."
-                    ),
+                    "description": "'read_midi_file'/'write_midi_file': a .mid, .midi or .syx path.",
                 },
                 "max_messages": {
                     "type": "integer",
                     "description": (
-                        "For 'read_midi_file': max number of decoded message "
-                        "strings to return per track (.mid) or total (.syx). "
-                        "Default 100. Set 0 to return only metadata/counts "
-                        "with no message bodies, useful for a quick look at "
-                        "a very large file without flooding the response."
+                        "'read_midi_file': decoded messages per track (.mid) or in "
+                        "total (.syx), default 100; 0 returns counts only."
                     ),
                 },
                 "overwrite": {
                     "type": "boolean",
-                    "description": (
-                        "For 'write_midi_file': set true to allow "
-                        "overwriting a file that already exists at 'path'. "
-                        "Default false — the call is refused if the file "
-                        "already exists, to avoid accidentally destroying "
-                        "it. This only guards against a whole-file "
-                        "overwrite; there is no in-place partial-edit "
-                        "(e.g. punch-in style re-recording a specific "
-                        "region of an existing file) support."
-                    ),
+                    "description": "'write_midi_file': replace an existing file; default false.",
                 },
                 "midi_file_type": {
                     "type": "integer",
                     "enum": [0, 1, 2],
-                    "description": (
-                        "For 'write_midi_file' on a .mid/.midi path: the "
-                        "MIDI file format (0, 1, or 2). Default 1 "
-                        "(multi-track). Type 0 requires exactly one track "
-                        "in 'tracks' — mido itself raises a clear error if "
-                        "violated."
-                    ),
+                    "description": "'write_midi_file' .mid: default 1; type 0 takes one track.",
                 },
                 "ticks_per_beat": {
                     "type": "integer",
-                    "description": (
-                        "For 'write_midi_file' on a .mid/.midi path: the "
-                        "file's time division. Default 480."
-                    ),
+                    "description": "'write_midi_file' .mid: default 480.",
                 },
                 "tracks": {
                     "type": "array",
                     "description": (
-                        "Required for 'write_midi_file' on a .mid/.midi "
-                        "path. Array of track objects, each "
-                        "{'messages': [...]}. See the tool description for "
-                        "the full message-type list (channel/system/sysex "
-                        "types matching 'send', plus 17 file-only meta "
-                        "types)."
+                        "'write_midi_file' .mid, required: a list of "
+                        "{'messages': [...]}."
                     ),
                     "items": {
                         "type": "object",
                         "properties": {
-                            "messages": {
-                                "type": "array",
-                                "items": {"type": "object"},
-                            }
+                            "messages": {"type": "array", "items": {"type": "object"}},
                         },
                     },
                 },
                 "messages": {
                     "type": "array",
                     "description": (
-                        "Required for 'write_midi_file' on a .syx path. "
-                        "Flat array of {'type': 'sysex', 'data': [...]} "
-                        "objects."
+                        "'write_midi_file' .syx, required: a list of "
+                        "{'type': 'sysex', 'data': [...]}."
                     ),
                     "items": {"type": "object"},
                 },
                 "message": {
                     "type": "object",
                     "description": (
-                        "Required for 'send'. Object with 'type' plus the "
-                        "fields that type needs. Channel messages (need "
-                        "'channel', 0-15, default 0): note_on/note_off need "
-                        "'note'+'velocity'; control_change needs "
-                        "'control'+'value'; program_change needs 'program'; "
-                        "pitchwheel needs 'pitch' (-8192..8191, default 0); "
-                        "aftertouch (channel pressure) needs 'value'; "
-                        "polytouch (poly key pressure) needs 'note'+'value'. "
-                        "System Common: quarter_frame needs "
-                        "'frame_type'+'frame_value'; songpos needs 'pos'; "
-                        "song_select needs 'song'; tune_request needs no "
-                        "extra fields. System Real-Time (clock, start, stop, "
-                        "continue, active_sensing, reset) need no extra "
-                        "fields at all — just 'type'. sysex needs a 'data' "
-                        "array of integers, each 0-127 (7-bit data bytes "
-                        "only) — do NOT include the leading 0xF0 or trailing "
-                        "0xF7, both are added automatically. Received Active "
-                        "Sensing reaches 'poll' only on an input opened with "
-                        "'active_sensing': true."
+                        "'send', required: 'type' plus that type's fields (see "
+                        "'describe'). 'describe': {'type', 'command'} or, for mmc, "
+                        "{'type': 'mmc', 'field'}."
                     ),
                     "properties": {
                         "type": {
@@ -641,154 +446,13 @@ TOOLS = [
                                 "rpn", "nrpn", "mtc_quarter_frame_sequence",
                             ],
                         },
-                        "channel": {"type": "integer"},
-                        "note": {"type": "integer"},
-                        "velocity": {"type": "integer"},
-                        "control": {"type": "integer"},
-                        "value": {"type": "integer"},
-                        "program": {"type": "integer"},
-                        "pitch": {"type": "integer"},
-                        "frame_type": {"type": "integer"},
-                        "frame_value": {"type": "integer"},
-                        "pos": {"type": "integer"},
-                        "song": {"type": "integer"},
-                        "data": {
-                            "type": "array",
-                            "items": {"type": "integer"},
-                            "description": (
-                                "SysEx payload bytes, each 0-127. Required "
-                                "for 'sysex'. Do not include the leading "
-                                "0xF0 or trailing 0xF7 — added automatically."
-                            ),
-                        },
-                        "hours": {
-                            "type": "integer",
-                            "description": "0-23. Required for 'mtc_full'.",
-                        },
-                        "minutes": {
-                            "type": "integer",
-                            "description": "0-59. Required for 'mtc_full'.",
-                        },
-                        "seconds": {
-                            "type": "integer",
-                            "description": "0-59. Required for 'mtc_full'.",
-                        },
-                        "frames": {
-                            "type": "integer",
-                            "description": "0-29. Required for 'mtc_full'.",
-                        },
-                        "frame_rate": {
-                            "type": "string",
-                            "enum": ["24", "25", "30drop", "30nondrop"],
-                            "description": (
-                                "Required for 'mtc_full' — no default, since "
-                                "the wrong value changes what the position "
-                                "means downstream."
-                            ),
-                        },
-                        "device_id": {
-                            "type": "integer",
-                            "description": (
-                                "0-127. Not required for 'mtc_full'/'mmc', "
-                                "defaults to 127 (all devices) — the spec's "
-                                "own default."
-                            ),
-                        },
                         "command": {
                             "type": "string",
                             "enum": _command_enum(),
                             "description": (
-                                "Sub-command for mmc, msc, gm_system, "
-                                "device_inquiry, device_control, channel_mode, "
-                                "midi_tuning, notation, mtc_cueing, "
-                                "mtc_cueing_nrt and file_dump. Valid values "
-                                "depend on 'type' (grouped by type in this "
-                                "enum); a wrong one returns an error listing "
-                                "the valid values for that type."
-                            ),
-                        },
-                        "subframes": {
-                            "type": "integer",
-                            "description": (
-                                "0-99. Required for 'mmc' when 'command' "
-                                "is 'locate'."
-                            ),
-                        },
-                        "command_format": {
-                            "type": "string",
-                            "enum": [
-                                "lighting", "sound", "machinery", "video",
-                                "projection", "process_control", "pyro",
-                                "all_types",
-                            ],
-                            "description": (
-                                "Required for 'msc' (unless "
-                                "'command_format_raw' is used instead)."
-                            ),
-                        },
-                        "command_format_raw": {
-                            "type": "integer",
-                            "description": (
-                                "0-127. Alternative to 'command_format' "
-                                "for 'msc', for a narrower sub-category "
-                                "not in the 8-value enum (e.g. a specific "
-                                "type of moving light rather than "
-                                "'lighting' in general). Specify exactly "
-                                "one of the two, not both."
-                            ),
-                        },
-                        "q_number": {
-                            "type": "string",
-                            "description": (
-                                "'msc' only — ASCII digit/'.' string, e.g. "
-                                "'235.6'. Required for 'load', not required "
-                                "for 'go'/'stop'/'resume'/'timed_go'/"
-                                "'go_off'."
-                            ),
-                        },
-                        "q_list": {
-                            "type": "string",
-                            "description": (
-                                "'msc' only — same ASCII format as "
-                                "'q_number'. Requires 'q_number' to also "
-                                "be given."
-                            ),
-                        },
-                        "q_path": {
-                            "type": "string",
-                            "description": (
-                                "'msc' only — same ASCII format as "
-                                "'q_number'. Requires 'q_list' to also be "
-                                "given."
-                            ),
-                        },
-                        "fractional_frames": {
-                            "type": "integer",
-                            "description": (
-                                "0-99. 'msc' only, required for "
-                                "'timed_go' and (if any time field is "
-                                "given at all) for 'set'."
-                            ),
-                        },
-                        "control_number": {
-                            "type": "integer",
-                            "description": (
-                                "0-16383. Required for 'msc's 'set' "
-                                "command."
-                            ),
-                        },
-                        "control_value": {
-                            "type": "integer",
-                            "description": (
-                                "0-16383. Required for 'msc's 'set' "
-                                "command."
-                            ),
-                        },
-                        "macro_number": {
-                            "type": "integer",
-                            "description": (
-                                "0-127. Required for 'msc's 'fire' "
-                                "command."
+                                "The sub-command for types that have one; the "
+                                "valid names depend on 'type' ('describe' lists "
+                                "them)."
                             ),
                         },
                     },
@@ -797,21 +461,8 @@ TOOLS = [
                     "type": "array",
                     "items": {"type": "integer"},
                     "description": (
-                        "Required for 'decode_mmc_response'. The FULL raw "
-                        "sysex byte sequence to decode, INCLUDING the "
-                        "leading 0xF0 and trailing 0xF7 (the opposite "
-                        "convention from 'message.data' on 'sysex' sends, "
-                        "which excludes both — chosen this way since this "
-                        "is meant to accept bytes copied straight from a "
-                        "real captured MMC Response, e.g. a 'poll' "
-                        "result's own raw bytes). Decodes the 15 "
-                        "Information Fields already supported by "
-                        "'read'/'write'/'update' (SELECTED_TIME_CODE, "
-                        "SELECTED_MASTER_CODE, REQUESTED_OFFSET, "
-                        "ACTUAL_OFFSET, LOCK_DEVIATION, GENERATOR_TIME_CODE, "
-                        "MIDI_TIME_CODE_INPUT, GP0-GP7) plus RESPONSE "
-                        "ERROR; anything else is reported as an 'unknown' "
-                        "type with the raw name byte rather than guessed."
+                        "'decode_mmc_response', required: the whole SysEx, F0 to "
+                        "F7 included (unlike a 'sysex' message's 'data')."
                     ),
                 },
             },
