@@ -213,6 +213,12 @@
   "err: mmc command string over 48 bytes": {
    "error": "ValueError"
   },
+  "err: mmc command_segment remaining 64": {
+   "error": "ValueError"
+  },
+  "err: mmc command_segment with other commands": {
+   "error": "ValueError"
+  },
   "err: mmc device_id 128": {
    "error": "ValueError"
   },
@@ -235,6 +241,9 @@
    "error": "ValueError"
   },
   "err: mmc procedure nested assemble": {
+   "error": "ValueError"
+  },
+  "err: mmc segment_size 46": {
    "error": "ValueError"
   },
   "err: mmc speed negative": {
@@ -543,6 +552,12 @@
     0
    ]
   ],
+  "mmc command_segment single": [
+   [
+    "F0 7F 7F 06 53 05 42 44 06 01 21 F7",
+    0
+   ]
+  ],
   "mmc deferred_play": [
    [
     "F0 7F 7F 06 03 F7",
@@ -804,6 +819,26 @@
   "mmc search speed 100.25": [
    [
     "F0 7F 7F 06 46 03 26 22 00 F7",
+    0
+   ]
+  ],
+  "mmc segmented size 1": [
+   [
+    "F0 7F 7F 06 53 02 41 01 F7",
+    0
+   ],
+   [
+    "F0 7F 7F 06 53 02 00 02 F7",
+    0
+   ]
+  ],
+  "mmc seven locates segmented": [
+   [
+    "F0 7F 03 06 53 2E 41 44 06 01 21 25 34 10 00 44 06 01 21 25 34 10 00 44 06 01 21 25 34 10 00 44 06 01 21 25 34 10 00 44 06 01 21 25 34 10 00 44 06 01 21 25 F7",
+    0
+   ],
+   [
+    "F0 7F 03 06 53 0C 00 34 10 00 44 06 01 21 25 34 10 00 F7",
     0
    ]
   ],
@@ -2163,6 +2198,18 @@
     "record_mode"
    ]
   },
+  "response_segment first of two": {
+   "data": [
+    1,
+    96,
+    22
+   ],
+   "device_id": 1,
+   "first": true,
+   "remaining": 1,
+   "status": "ok",
+   "type": "response_segment"
+  },
   "rp013 appendix signature": {
    "command_bitmaps": [
     127,
@@ -2210,7 +2257,7 @@
     "procedure",
     "event",
     "group",
-    "0x53",
+    "command_segment",
     "deferred_variable_play",
     "wait",
     "resume"

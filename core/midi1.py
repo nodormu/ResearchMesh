@@ -100,7 +100,7 @@ _COMMANDS: dict = {
         "generator_command": 0x4A, "midi_time_code_command": 0x4B,
         "move": 0x4C, "add": 0x4D, "subtract": 0x4E,
         "drop_frame_adjust": 0x4F, "procedure": 0x50, "event": 0x51,
-        "group": 0x52, "deferred_variable_play": 0x54,
+        "group": 0x52, "command_segment": 0x53, "deferred_variable_play": 0x54,
         "record_strobe_variable": 0x55, "wait": 0x7C, "resume": 0x7F,
     },
     # MSC (RP-002/014): General Category 01-0B, Sound Commands 11-1E,
@@ -1791,6 +1791,13 @@ _MMC_FIELD_CODECS.update({
 def _mmc_response_field(name_byte: int, payload: list) -> dict:
     """One field of an MMC response, given its name byte and data (the
     count byte already removed)."""
+    if name_byte == _MMC_RESPONSE_ONLY_NAMES["response_segment"]:
+        # RESPONSE SEGMENT (RP-013 p.73): <id> = 0 f ssssss, then a piece of
+        # a long response string; _StreamDecoder reassembles them.
+        if not payload:
+            raise ValueError("RESPONSE SEGMENT has no segment id")
+        return {"type": "response_segment", "first": bool(payload[0] & 0x40),
+                "remaining": payload[0] & 0x3F, "data": list(payload[1:])}
     if name_byte == _MMC_RESPONSE_ONLY_NAMES["response_error"]:
         names = {v: k for k, v in _INFO_FIELD_NAMES.items()}
         return {
@@ -2725,6 +2732,20 @@ def _mmc_update(message: dict, command: str) -> tuple:
     ))
 
 
+def _mmc_command_segment(message: dict, command: str) -> tuple:
+    # COMMAND SEGMENT (53h, RP-013 p.39): one piece of a long command
+    # string. <id> = 0 f ssssss: f = first segment, ssssss = segments still
+    # to come (0 on the last). Usually built by 'segment': true on an mmc
+    # message (_build_mmc_segments).
+    first = message.get("first", False)
+    if not isinstance(first, bool):
+        raise ValueError(f"'first' must be true or false, got {first!r}")
+    remaining = _check_range("remaining", _required(message, "remaining", command), 0, 63)
+    data = [_check_range("data entry", b, 0, 127)
+            for b in _required(message, "data", command)]
+    return ((0x40 if first else 0x00) | remaining, *data)
+
+
 _MMC_DATA_BUILDERS = {
     "locate": _mmc_locate,
     "step": _mmc_step,
@@ -2747,6 +2768,7 @@ _MMC_DATA_BUILDERS = {
     "write": _mmc_write,
     "masked_write": _mmc_masked_write,
     "update": _mmc_update,
+    "command_segment": _mmc_command_segment,
 }
 
 
@@ -3056,28 +3078,11 @@ def _build_message(message: dict) -> "mido.Message":
         # nested list.) The command string can't exceed
         # 48 bytes, and WAIT/RESUME must be alone in their message. Device
         # replies are decoded by the decode_mmc_response action.
-        if message.get("batch") is not None:
-            if message.get("command") is not None:
-                raise ValueError("specify only ONE of 'command' or 'batch', not both")
-            entries = _required_list(message, "batch", "mmc")
-            for entry in entries:
-                if entry.get("type", "mmc") != "mmc":
-                    raise ValueError(f"'batch' entries must be mmc commands, got {entry!r}")
-            names = [_choice(entry, "command", _COMMANDS["mmc"], "mmc") for entry in entries]
-            alone = sorted({"wait", "resume"} & set(names))
-            if alone and len(entries) > 1:
-                raise ValueError(f"{alone} must be the only command in its message (RP-013 p.42)")
-            command_string = [b for entry in entries for b in _mmc_command_bytes(entry)]
-        else:
-            names = [_choice(message, "command", _COMMANDS["mmc"], "mmc")]
-            command_string = list(_mmc_command_bytes(message))
-        device_id = _device_id(message)
-        if set(names) & _MMC_ALL_CALL:
-            device_id = 0x7F
+        device_id, command_string = _mmc_command_string(message)
         if len(command_string) > 48:
             raise ValueError(
                 f"the MMC command string is {len(command_string)} bytes; RP-013 "
-                f"allows at most 48 per message"
+                f"allows at most 48 per message (use 'segment': true)"
             )
         return _sysex(0x7F, device_id, 0x06, *command_string, time=time)
     if msg_type == "msc":
@@ -3598,6 +3603,51 @@ def _build_quarter_frame_sequence(message: dict) -> list:
     ]
 
 
+def _mmc_command_string(message: dict) -> tuple:
+    """(device_id, command string) for an mmc message: 'command' or 'batch'.
+    WAIT, RESUME and COMMAND SEGMENT must be alone in their message; an
+    all-call command sends the message to 7F."""
+    if message.get("batch") is not None:
+        if message.get("command") is not None:
+            raise ValueError("specify only ONE of 'command' or 'batch', not both")
+        entries = _required_list(message, "batch", "mmc")
+        for entry in entries:
+            if entry.get("type", "mmc") != "mmc":
+                raise ValueError(f"'batch' entries must be mmc commands, got {entry!r}")
+        names = [_choice(entry, "command", _COMMANDS["mmc"], "mmc") for entry in entries]
+        alone = sorted({"wait", "resume", "command_segment"} & set(names))
+        if alone and len(entries) > 1:
+            raise ValueError(f"{alone} must be the only command in its message (RP-013)")
+        command_string = [b for entry in entries for b in _mmc_command_bytes(entry)]
+    else:
+        names = [_choice(message, "command", _COMMANDS["mmc"], "mmc")]
+        command_string = list(_mmc_command_bytes(message))
+    device_id = _device_id(message)
+    if set(names) & _MMC_ALL_CALL:
+        device_id = 0x7F
+    return device_id, command_string
+
+
+def _build_mmc_segments(message: dict) -> list:
+    """An mmc message sent as COMMAND SEGMENTs (RP-013 p.8): the command
+    string split into pieces of 'segment_size' bytes (default 45, the most
+    that fits in a 48-byte command field), first flagged 40h, counting down
+    to 00 on the last. Splits can fall inside a command."""
+    size = _check_range("segment_size", message.get("segment_size", 45), 1, 45)
+    plain = {k: v for k, v in message.items() if k not in ("segment", "segment_size")}
+    device_id, command_string = _mmc_command_string(plain)
+    pieces = [command_string[i:i + size] for i in range(0, len(command_string), size)]
+    if len(pieces) > 64:
+        raise ValueError(f"{len(pieces)} segments; COMMAND SEGMENT allows at most 64")
+    time = message.get("time", 0)
+    return [
+        _sysex(0x7F, device_id, 0x06, 0x53, len(piece) + 1,
+               (0x40 if index == 0 else 0x00) | (len(pieces) - 1 - index), *piece,
+               time=time if index == 0 else 0)
+        for index, piece in enumerate(pieces)
+    ]
+
+
 def _build_message_sequence(message: dict) -> list:
     """Build the list of mido.Messages for a typed dict. rpn, nrpn and
     mtc_quarter_frame_sequence produce several; every other type is
@@ -3610,6 +3660,8 @@ def _build_message_sequence(message: dict) -> list:
         return _build_rpn_or_nrpn_sequence(message, registered=False)
     if msg_type == "mtc_quarter_frame_sequence":
         return _build_quarter_frame_sequence(message)
+    if msg_type == "mmc" and message.get("segment"):
+        return _build_mmc_segments(message)
     return [_build_message(message)]
 
 
@@ -4266,6 +4318,9 @@ _MMC_DATA_DECODERS = {
         "action": _name_for(_MMC_UPDATE_ACTIONS, d[0]),
         "names": ["all" if b == 0x7F else _info_field_name(b) for b in d[1:]],
     },
+    "command_segment": lambda d: {
+        "first": bool(d[0] & 0x40), "remaining": d[0] & 0x3F, "data": list(d[1:]),
+    },
 }
 
 
@@ -4394,19 +4449,85 @@ class _StreamDecoder:
 
     Quarter Frames: eight consecutive pieces, types 0 to 7 (forward) or 7 to 0
     (reverse), complete one time.
+
+    MMC COMMAND SEGMENT / RESPONSE SEGMENT (RP-013 pp.8, 39, 73), per
+    device: a first segment starts, the down-count must step by one, and the
+    last (00) completes the command or response. An out-of-order segment, or
+    a normal MMC message from that device other than WAIT/RESUME, cancels it.
+    A reassembled command carries 'segment': true, plus 'segment_size' when
+    that size rebuilds exactly the segments received.
     """
 
     def __init__(self) -> None:
         # channel -> {"kind": "rpn"|"nrpn", "msb", "lsb", "value_msb"}
         self._params: dict = {}
         self._quarter_frames: list = []
+        # (06 commands | 07 responses, device id) -> {"remaining", "data"}
+        self._segments: dict = {}
 
     def feed(self, msg: "mido.Message") -> "dict | None":
         if msg.type == "control_change":
             return self._control_change(msg)
         if msg.type == "quarter_frame":
             return self._quarter_frame(msg)
+        if msg.type == "sysex":
+            return self._mmc_segment(tuple(msg.data))
         return None
+
+    def _mmc_segment(self, data: tuple) -> "dict | None":
+        if len(data) < 4 or data[0] != 0x7F or data[2] not in (0x06, 0x07):
+            return None
+        key, body = (data[2], data[1]), data[3:]
+        segment_code = 0x53 if data[2] == 0x06 else 0x64
+        if body[0] != segment_code:
+            if body not in ((0x7C,), (0x7F,)):
+                self._segments.pop(key, None)
+            return None
+        if len(body) < 3 or body[1] != len(body) - 2:
+            self._segments.pop(key, None)
+            return None
+        first, remaining, piece = bool(body[2] & 0x40), body[2] & 0x3F, list(body[3:])
+        state = self._segments.get(key)
+        if first:
+            state = {"remaining": remaining, "pieces": [piece]}
+        elif state is None or state["remaining"] - 1 != remaining:
+            self._segments.pop(key, None)
+            return None
+        else:
+            state = {"remaining": remaining, "pieces": state["pieces"] + [piece]}
+        if remaining:
+            self._segments[key] = state
+            return None
+        self._segments.pop(key, None)
+        pieces = state["pieces"]
+        whole = [b for p in pieces for b in p]
+        try:
+            if data[2] == 0x07:
+                fields = _mmc_response_fields([0xF0, 0x7F, data[1], 0x07, *whole, 0xF7])
+                return {"type": "mmc_response", "device_id": fields.pop("device_id"),
+                        "response": fields, "segments": len(pieces)}
+            commands = _mmc_parse_commands(whole)
+        except (ValueError, KeyError, IndexError):
+            return None
+        if len(commands) == 1:
+            command = commands[0]
+            out = {"type": "mmc", "command": command["command"], "device_id": data[1],
+                   **{k: v for k, v in command.items() if k not in ("type", "command")}}
+        else:
+            out = {"type": "mmc", "device_id": data[1], "batch": commands}
+        out["segment"] = True
+        # 'segment_size' only when it rebuilds the sender's own split.
+        if 1 <= len(pieces[0]) <= 45:
+            out["segment_size"] = len(pieces[0])
+            try:
+                rebuilt = [list(m.data[3:]) for m in _build_mmc_segments(out)]
+            except (ValueError, KeyError, IndexError, TypeError):
+                rebuilt = None
+            sent = [[0x53, len(p) + 1, (0x40 if i == 0 else 0) | (len(pieces) - 1 - i), *p]
+                    for i, p in enumerate(pieces)]
+            if rebuilt != sent:
+                del out["segment_size"]
+        return out
 
     def _control_change(self, msg: "mido.Message") -> "dict | None":
         selects = {101: ("rpn", "msb"), 100: ("rpn", "lsb"),

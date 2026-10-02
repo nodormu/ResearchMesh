@@ -416,6 +416,20 @@ CASES: list[tuple[str, dict]] = [
     ("err: mmc command and batch", {"type": "mmc", "command": "stop", "batch": [{"command": "play"}]}),
     ("err: mmc command string over 48 bytes", {"type": "mmc", "batch": [
         {"command": "locate", **TC, "subframes": 0, "frame_rate": "25"}] * 7}),
+    # MMC COMMAND SEGMENT (step 6f-3)
+    ("mmc command_segment single", {"type": "mmc", "command": "command_segment", "first": True,
+                                    "remaining": 2, "data": [0x44, 0x06, 0x01, 0x21]}),
+    ("mmc seven locates segmented", {"type": "mmc", "device_id": 3, "segment": True,
+                                     "batch": [{"command": "locate", **TC, "subframes": 0, "frame_rate": "25"}] * 7}),
+    ("mmc segmented size 1", {"type": "mmc", "segment": True, "segment_size": 1,
+                              "batch": [{"command": "stop"}, {"command": "play"}]}),
+    ("err: mmc command_segment with other commands", {"type": "mmc", "batch": [
+        {"command": "command_segment", "first": True, "remaining": 0, "data": [1]},
+        {"command": "stop"}]}),
+    ("err: mmc segment_size 46", {"type": "mmc", "segment": True, "segment_size": 46,
+                                  "command": "stop"}),
+    ("err: mmc command_segment remaining 64", {"type": "mmc", "command": "command_segment",
+                                               "first": True, "remaining": 64, "data": [1]}),
     ("mmc read new fields", {"type": "mmc", "command": "read",
                              "names": ["motion_control_tally", "short_generator_time_code", "signature"]}),
     ("mmc update short field", {"type": "mmc", "command": "update", "action": "begin",
@@ -555,6 +569,8 @@ MMC_RESPONSES: list[tuple[str, list[int]]] = [
     ("event_response", [0xF0, 0x7F, 0x01, 0x07, 0x61, 0x09, 0x03, 0x42, 0x01,
                         0x61, 0x25, 0x34, 0x10, 0x00, 0x06, 0xF7]),
     ("failure text", [0xF0, 0x7F, 0x01, 0x07, 0x65, 0x09] + list(b"Tape jam!") + [0xF7]),
+    # Step 6f-3.
+    ("response_segment first of two", [0xF0, 0x7F, 0x01, 0x07, 0x64, 0x04, 0x41, 0x01, 0x60, 0x16, 0xF7]),
 ]
 
 META_CASES: list[tuple[str, dict]] = [
@@ -663,6 +679,15 @@ SPEC_EXAMPLES: list[tuple[str, dict, list[str]]] = [
          {"name": "time_standard", "frame_rate": "30nondrop", "encoding": "unshifted"},
          {"name": "command_error_level", "value": "all_enabled"}]},
      ["F0 7F 7C 06 40 06 45 01 03 44 01 7F F7"]),
+    # RP-013 p.8 gives aa..mm placeholders: an 11-byte string as 4 + 4 + 3,
+    # <count> 05 42, 05 01, 04 00. Here the 11 bytes are LOCATE 01:37:52:16
+    # (25 fps), STOP, PLAY, DEFERRED PLAY.
+    ("RP-013 p.8 segmentation: 11-byte command string as counts 05/05/04, ids 42/01/00",
+     {"type": "mmc", "segment": True, "segment_size": 4,
+      "batch": [{"command": "locate", **TC, "subframes": 0, "frame_rate": "25"}, {"command": "stop"}, {"command": "play"},
+                {"command": "deferred_play"}]},
+     ["F0 7F 7F 06 53 05 42 44 06 01 21 F7", "F0 7F 7F 06 53 05 01 25 34 10 00 F7",
+      "F0 7F 7F 06 53 04 00 01 02 03 F7"]),
     # Captured from real hardware, not printed in a spec.
     ("Roland TR-8S Identity Reply (captured 2026-10-02)",
      {"type": "device_inquiry", "command": "reply", "device_id": 0x10,
@@ -861,6 +886,51 @@ def check_stream_decoder(midi1) -> None:
     check("stream: a missing quarter frame completes nothing",
           feed(a[:5] + a[6:]) == [])
 
+    # MMC COMMAND SEGMENT / RESPONSE SEGMENT (RP-013 pp.8, 39, 73).
+    def sx(*data):
+        return M("sysex", data=data)
+
+    def wire(msg):
+        return midi1._build_message_sequence(dict(msg))
+
+    spec = dict(dict((n, m) for n, m, _ in SPEC_EXAMPLES)[
+        "RP-013 p.8 segmentation: 11-byte command string as counts 05/05/04, ids 42/01/00"])
+    got = feed(wire(spec))
+    check("stream: RP-013 p.8 segments reassemble to the four commands, segment_size 4",
+          len(got) == 1 and [c["command"] for c in got[0].get("batch", [])]
+          == ["locate", "stop", "play", "deferred_play"] and got[0].get("segment_size") == 4
+          and [m.bytes() for m in wire(got[0])] == [m.bytes() for m in wire(spec)], f"{got}")
+    long = {"type": "mmc", "device_id": 3, "segment": True, "batch": [{"command": "locate", **TC, "subframes": 0, "frame_rate": "25"}] * 7}
+    got = feed(wire(long))
+    check("stream: 56-byte command string in 45 + 11 rebuilds exactly",
+          len(wire(long)) == 2 and len(got) == 1
+          and [m.bytes() for m in wire(got[0])] == [m.bytes() for m in wire(long)], f"{got}")
+    uneven = [sx(0x7F, 1, 6, 0x53, 3, 0x42, 0x01, 0x02), sx(0x7F, 1, 6, 0x53, 4, 0x01, 0x03, 0x01, 0x02),
+              sx(0x7F, 1, 6, 0x53, 2, 0x00, 0x03)]
+    got = feed(uneven)
+    check("stream: an uneven split reassembles, without segment_size",
+          len(got) == 1 and [c["command"] for c in got[0]["batch"]]
+          == ["stop", "play", "deferred_play", "stop", "play", "deferred_play"]
+          and "segment_size" not in got[0] and got[0]["segment"] is True, f"{got}")
+    check("stream: a missing middle segment completes nothing",
+          feed([uneven[0], uneven[2]]) == [])
+    check("stream: a later segment with no first segment completes nothing",
+          feed(uneven[1:]) == [])
+    check("stream: a byte count that doesn't match cancels",
+          feed([uneven[0], sx(0x7F, 1, 6, 0x53, 9, 0x01, 0x03, 0x01, 0x02), uneven[2]]) == [])
+    stop_1, stop_2 = sx(0x7F, 1, 6, 0x01), sx(0x7F, 2, 6, 0x01)
+    check("stream: a normal MMC message from the same device cancels",
+          feed([uneven[0], stop_1] + uneven[1:]) == [])
+    check("stream: other devices' messages and WAIT don't cancel",
+          len(feed([uneven[0], stop_2, sx(0x7F, 1, 6, 0x7C)] + uneven[1:])) == 1)
+    resp = [sx(0x7F, 1, 7, 0x64, 4, 0x41, 0x01, 0x60, 0x16),
+            sx(0x7F, 1, 7, 0x64, 9, 0x00, 0x05, 0x2C, 0x00, 0x48, 0x03, 0x02, 0x7F, 0x01)]
+    got = feed(resp)
+    check("stream: RESPONSE SEGMENTs reassemble to time code + motion control tally",
+          len(got) == 1 and got[0]["type"] == "mmc_response" and got[0]["segments"] == 2
+          and [f.get("name") for f in got[0]["response"]["fields"]]
+          == ["selected_time_code", "motion_control_tally"], f"{got}")
+
 
 def check_track_bitmap(midi1) -> None:
     """RP-013 Standard Track Bitmap: byte 0 is video, reserved, time code,
@@ -899,7 +969,7 @@ def check_mmc_response_examples(midi1) -> None:
         "extension", "stop", "play", "deferred_play", "fast_forward", "rewind", "record_strobe",
         "record_exit", "chase", "command_error_reset", "mmc_reset", "write", "read", "update",
         "locate", "variable_play", "move", "add", "subtract", "drop_frame_adjust", "procedure",
-        "event", "group", "0x53", "deferred_variable_play", "wait", "resume"}
+        "event", "group", "command_segment", "deferred_variable_play", "wait", "resume"}
     listed_fields = {
         "selected_time_code", "selected_master_code", "requested_offset", "actual_offset",
         "lock_deviation", "gp0", "gp1", "gp2", "gp3", "short_selected_time_code",
