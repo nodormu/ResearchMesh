@@ -22,7 +22,13 @@ Actions (dispatched by `_run`):
                         (_StreamDecoder), and a wall-clock 'received_at'
                         taken when the message arrived. An entry with
                         'overflow': true marks where the input queue
-                        overflowed and messages were lost.
+                        overflowed and messages were lost. 'at_open': true
+                        marks the burst that arrives as the input opens
+                        (_OpenBurst): normally what the device stored while
+                        the port was closed, such as earlier playing or a
+                        reply to a request sent before the open. A message
+                        that arrives live within 20 ms of the open is
+                        marked too.
                         'timeout_seconds' (0-60, default 0) waits until a
                         message arrives or the timeout passes.
   - read_midi_file      .mid/.midi (mido.MidiFile) or .syx
@@ -414,7 +420,12 @@ TOOLS = [
                     "description": (
                         "Which MIDI operation to perform. A 'poll' entry with "
                         "'overflow': true marks where the input queue overflowed "
-                        "(a burst of over 2000 events) and messages were lost."
+                        "(a burst of over 2000 events) and messages were lost. "
+                        "'at_open': true marks messages in the burst that arrives "
+                        "as the input opens: normally events the device stored "
+                        "while the port was closed (old playing, or a reply to a "
+                        "request sent before the open). A live message arriving "
+                        "within 20 ms of the open is marked too."
                     ),
                 },
                 "port_name": {
@@ -812,11 +823,11 @@ _MESSAGE_TYPES = TOOLS[0]["input_schema"]["properties"]["message"]["properties"]
 _OPEN_PORTS: dict = {}
 _HANDLE_COUNTER = itertools.count(1)
 
-# Per input handle: a deque of (received_at, mido.Message), an Event that
-# _poll waits on, and a _StreamDecoder that _poll feeds in arrival order. The
-# callbacks _open gives _AlsaInput fill the deque and set the Event; each
-# message is stamped with time.time() when it arrives, and an overflow is
-# queued as (time, None). The deque drops its oldest entries past
+# Per input handle: a deque of (received_at, mido.Message or None for an
+# overflow, at_open), an Event that _poll waits on, and a _StreamDecoder that
+# _poll feeds in arrival order. _AlsaInput's thread stamps each entry with
+# time.time() on arrival, and the callback _open gives it appends the entry
+# and sets the Event. The deque drops its oldest entries past
 # _INPUT_BUFFER_MAXLEN.
 _INPUT_BUFFER_MAXLEN = 10_000
 _INPUT_BUFFERS: dict = {}
@@ -947,16 +958,45 @@ def _alsa_port_address(port_name: str) -> tuple:
     return port_name, int(found.group(1)), int(found.group(2))
 
 
+# A device releases what it stored while its input was closed as one burst
+# when the port opens. Measured 2026-10-02 (TR-8S, KeyStep 37, Hydrasynth DR):
+# the first message 0.1-3.1 ms after the open, the rest about 0.01 ms apart,
+# 655 messages within 4.2 ms. A message belongs to that burst if it arrives
+# within _AT_OPEN_GAP of the open or of the burst's previous message. Timing
+# can't tell a stored message from a live one arriving that soon, so a live
+# message within the gap is marked too.
+_AT_OPEN_GAP = 0.020
+
+
+class _OpenBurst:
+    """Decides, in arrival order, which messages belong to the burst at open.
+    The first message more than _AT_OPEN_GAP after the open or after the
+    previous burst message ends the burst."""
+
+    def __init__(self, opened_at: float) -> None:
+        self._last = opened_at
+        self._running = True
+
+    def member(self, received_at: float) -> bool:
+        if self._running and received_at - self._last <= _AT_OPEN_GAP:
+            self._last = received_at
+            return True
+        self._running = False
+        return False
+
+
 class _AlsaInput:
     """An input port as an ALSA sequencer client of its own, subscribed to
     the device's port, with an input pool of _ALSA_INPUT_POOL events. A
     thread waits on the client's poll descriptor, reads every queued event,
     turns it back into bytes (snd_midi_event_decode) and parses them with
-    mido.Parser, which joins SysEx split across events. on_message gets each
-    mido.Message; on_overflow is called when the kernel reports the pool
-    overflowed (it has then discarded everything queued)."""
+    mido.Parser, which joins SysEx split across events. deliver gets
+    (received_at, mido.Message, at_open) for each message, and
+    (received_at, None, at_open) when the kernel reports the pool overflowed
+    (it has then discarded everything queued). 'opened_at' is the time just
+    before subscribing; _OpenBurst gives at_open."""
 
-    def __init__(self, port_name: str, on_message, on_overflow, active_sensing: bool) -> None:
+    def __init__(self, port_name: str, deliver, active_sensing: bool) -> None:
         if _ALSA is None:
             raise OSError(f"input ports need cffi and libasound.so.2 ({_ALSA_IMPORT_ERROR})")
         self.name, client, port = _alsa_port_address(port_name)
@@ -987,13 +1027,17 @@ class _AlsaInput:
             if lib.snd_seq_poll_descriptors(self._seq, pfd, 1, select.POLLIN) != 1:
                 raise OSError("snd_seq_poll_descriptors failed")
             self._fd = pfd[0].fd
-            self._on_message, self._on_overflow = on_message, on_overflow
+            self._deliver = deliver
             self._active_sensing = active_sensing
+            self.opened_at = time.time()
+            self._burst = _OpenBurst(self.opened_at)
             self._stop = False
             self._thread = threading.Thread(target=self._read, daemon=True,
                                             name=f"midi1 input {self.name}")
             self._thread.start()
             # Subscribing opens the device's input; a backlog arrives now.
+            self.opened_at = time.time()
+            self._burst = _OpenBurst(self.opened_at)
             rc = lib.snd_seq_connect_from(self._seq, my_port, client, port)
             if rc < 0:
                 raise OSError(f"can't subscribe to {client}:{port} ({rc})")
@@ -1030,7 +1074,8 @@ class _AlsaInput:
                     break
                 if rc == -errno.ENOSPC:
                     parser = mido.Parser()  # a SysEx in progress is lost too
-                    self._on_overflow()
+                    now = time.time()
+                    self._deliver((now, None, self._burst.member(now)))
                     continue
                 if rc < 0:
                     break
@@ -1045,7 +1090,8 @@ class _AlsaInput:
                 for msg in parser:
                     if msg.type == "active_sensing" and not self._active_sensing:
                         continue
-                    self._on_message(msg)
+                    now = time.time()
+                    self._deliver((now, msg, self._burst.member(now)))
 
     def close(self) -> None:
         self._stop = True
@@ -1077,21 +1123,16 @@ def _open(tool_input: dict) -> str:
 
     try:
         if direction == "input":
-            # Both run on _AlsaInput's thread. deque append/popleft and
-            # Event set/wait/clear need no lock with one producer and one
-            # consumer.
+            # Runs on _AlsaInput's thread. deque append/popleft and Event
+            # set/wait/clear need no lock with one producer and one consumer.
             buf: deque = deque(maxlen=_INPUT_BUFFER_MAXLEN)
             event = threading.Event()
 
-            def _on_message(msg: "mido.Message", _buf: deque = buf, _event: threading.Event = event) -> None:
-                _buf.append((time.time(), msg))
+            def _deliver(entry: tuple, _buf: deque = buf, _event: threading.Event = event) -> None:
+                _buf.append(entry)
                 _event.set()
 
-            def _on_overflow(_buf: deque = buf, _event: threading.Event = event) -> None:
-                _buf.append((time.time(), None))
-                _event.set()
-
-            port = _AlsaInput(port_name, _on_message, _on_overflow, active_sensing)
+            port = _AlsaInput(port_name, _deliver, active_sensing)
             _INPUT_BUFFERS[handle] = buf
             _INPUT_EVENTS[handle] = event
             _STREAM_DECODERS[handle] = _StreamDecoder()
@@ -1107,9 +1148,10 @@ def _open(tool_input: dict) -> str:
         )
 
     _OPEN_PORTS[handle] = (direction, port)
-    return json.dumps(
-        {"status": "ok", "handle": handle, "direction": direction, "port_name": port_name}
-    )
+    result = {"status": "ok", "handle": handle, "direction": direction, "port_name": port_name}
+    if direction == "input":
+        result["opened_at"] = port.opened_at
+    return json.dumps(result)
 
 
 def _close(tool_input: dict) -> str:
@@ -4877,18 +4919,20 @@ def _poll(tool_input: dict) -> str:
     stream = _STREAM_DECODERS.setdefault(handle, _StreamDecoder())
     messages = []
     while buf:
-        received_at, msg = buf.popleft()
+        received_at, msg, at_open = buf.popleft()
         if msg is None:
-            messages.append({"received_at": received_at, "overflow": True})
+            entry = {"received_at": received_at, "overflow": True}
             stream = _STREAM_DECODERS[handle] = _StreamDecoder()
-            continue
-        entry = {
-            "received_at": received_at, "message": str(msg),
-            "hex": msg.hex(), "decoded": _decode_message(msg),
-        }
-        completed = stream.feed(msg)
-        if completed is not None:
-            entry["completes"] = completed
+        else:
+            entry = {
+                "received_at": received_at, "message": str(msg),
+                "hex": msg.hex(), "decoded": _decode_message(msg),
+            }
+            completed = stream.feed(msg)
+            if completed is not None:
+                entry["completes"] = completed
+        if at_open:
+            entry["at_open"] = True
         messages.append(entry)
 
     return json.dumps({"status": "ok", "messages": messages})

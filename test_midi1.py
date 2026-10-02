@@ -1083,7 +1083,7 @@ def check_poll_wait(midi1) -> None:
 
     def deliver() -> None:
         time.sleep(0.2)
-        buf.append((time.time(), midi1.mido.Message("clock")))
+        buf.append((time.time(), midi1.mido.Message("clock"), False))
         event.set()
 
     threading.Thread(target=deliver).start()
@@ -1092,7 +1092,7 @@ def check_poll_wait(midi1) -> None:
           0.15 <= elapsed < 1.0 and len(msgs) == 1, f"{elapsed:.3f}s, {len(msgs)} msgs")
 
     buf, event = _fake_input(midi1, "fake-ready")
-    buf.append((time.time(), midi1.mido.Message("clock")))
+    buf.append((time.time(), midi1.mido.Message("clock"), False))
     elapsed, msgs = _timed_poll(midi1, "fake-ready", 2.0)
     check("poll: buffered message returns without waiting",
           elapsed < 0.1 and len(msgs) == 1, f"{elapsed:.3f}s")
@@ -1109,7 +1109,7 @@ def check_poll_wait(midi1) -> None:
               M("control_change", control=98, value=0x34),
               M("control_change", control=6, value=0x40),
               M("control_change", control=38, value=0x05)):
-        buf.append((time.time(), m))
+        buf.append((time.time(), m, False))
     _, msgs = _timed_poll(midi1, "fake-decode", 0)
     check("poll: entries carry message, hex and decoded",
           all({"received_at", "message", "hex", "decoded"} <= set(m) for m in msgs)
@@ -1124,14 +1124,30 @@ def check_poll_wait(midi1) -> None:
     midi1._STREAM_DECODERS["fake-overflow"] = midi1._StreamDecoder()
     for m in (M("control_change", control=99, value=1), M("control_change", control=98, value=2),
               None, M("control_change", control=6, value=9)):
-        buf.append((time.time(), m))
+        buf.append((time.time(), m, False))
     _, msgs = _timed_poll(midi1, "fake-overflow", 0)
     check("poll: an overflow is an entry in order, and partial NRPN state starts over",
           [m.get("overflow", False) for m in msgs] == [False, False, True, False]
           and "completes" not in msgs[3], f"{msgs}")
 
+    buf, event = _fake_input(midi1, "fake-at-open")
+    for m, at_open in ((M("note_on", note=60), True), (None, True), (M("note_off", note=60), False)):
+        buf.append((time.time(), m, at_open))
+    _, msgs = _timed_poll(midi1, "fake-at-open", 0)
+    check("poll: 'at_open' appears on burst entries only, overflow entries included",
+          [m.get("at_open", False) for m in msgs] == [True, True, False]
+          and msgs[1].get("overflow") is True, f"{msgs}")
+
+    burst = midi1._OpenBurst(100.0)
+    got = [burst.member(t) for t in (100.0002, 100.0015, 100.019, 100.05, 100.0505)]
+    check("_OpenBurst: arrivals within 20 ms of the open or the previous one; the first gap ends it",
+          got == [True, True, True, False, False], f"{got}")
+    late = midi1._OpenBurst(100.0)
+    check("_OpenBurst: a first message over 20 ms after the open isn't in a burst",
+          [late.member(t) for t in (100.03, 100.031)] == [False, False])
+
     for name in ("fake-stale", "fake-arrive", "fake-ready", "fake-zero", "fake-decode",
-                 "fake-overflow"):
+                 "fake-overflow", "fake-at-open"):
         midi1._close({"handle": name})
 
 
@@ -1149,6 +1165,8 @@ def check_live_loopback(midi1) -> None:
         return
     i = call(action="open", port_name=in_port, direction="input")
     o = call(action="open", port_name=out_port, direction="output")
+    # Past the 20 ms in which arrivals count as the burst at open.
+    time.sleep(2 * midi1._AT_OPEN_GAP)
     try:
         sent = [
             {"type": "note_on", "note": 60, "velocity": 64},
@@ -1163,6 +1181,10 @@ def check_live_loopback(midi1) -> None:
         received = [m["message"] for m in got["messages"]]
         check("live loopback: everything sent comes back", received == expected,
               f"sent {expected}, got {received}")
+        check("live loopback: open returns 'opened_at'; messages arriving after the "
+              "burst window aren't 'at_open'",
+              isinstance(i.get("opened_at"), float)
+              and not any(m.get("at_open") for m in got["messages"]), f"{i}, {got['messages'][:2]}")
         t0 = time.monotonic()
         empty = call(action="poll", handle=i["handle"], timeout_seconds=1)
         elapsed = time.monotonic() - t0
