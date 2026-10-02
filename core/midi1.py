@@ -544,7 +544,7 @@ TOOLS = [
                                 "active_sensing", "reset",
                                 # System Exclusive, raw and typed
                                 "sysex",
-                                "mtc_full", "mtc_nak", "mmc", "msc",
+                                "mtc_full", "mtc_nak", "mtc_user_bits", "mmc", "msc",
                                 "gm_system", "device_inquiry",
                                 "device_control", "controller_destination",
                                 "key_based_instrument_control",
@@ -1579,6 +1579,30 @@ def _required_list(message: dict, field: str, context: str) -> list:
     return list(value)
 
 
+def _user_bit_groups(message: dict) -> tuple:
+    """The 8 SMPTE binary groups (u1-u8), from 'binary_groups' (8 nibbles,
+    group 1 first) or 'characters' (4 characters of 8 bits). Characters go
+    into the groups in RP-004/008's order hhhhgggg ffffeeee ddddcccc bbbbaaaa:
+    the first character is groups 8 and 7, the last is groups 2 and 1."""
+    groups = message.get("binary_groups")
+    characters = message.get("characters")
+    if groups is not None and characters is not None:
+        raise ValueError("specify only ONE of 'binary_groups' or 'characters', not both")
+    if characters is not None:
+        if len(characters) != 4:
+            raise ValueError(f"'characters' must be 4 characters, got {characters!r}")
+        nibbles = [0] * 8
+        for index, char in enumerate(characters):
+            code = _check_range("characters entry", ord(char), 0, 255)
+            nibbles[7 - 2 * index] = code >> 4
+            nibbles[6 - 2 * index] = code & 0x0F
+        return tuple(nibbles)
+    groups = _required(message, "binary_groups")
+    if len(groups) != 8:
+        raise ValueError(f"'binary_groups' must have 8 entries, got {len(groups)}")
+    return tuple(_check_range("binary_groups entry", g, 0, 15) for g in groups)
+
+
 # --- GM2 and CA Universal SysEx ---------------------------------------------------
 
 # Global Parameter Control slot paths and GM2's parameter numbers (GM2 4.4-4.5).
@@ -2272,6 +2296,17 @@ def _build_message(message: dict) -> "mido.Message":
             "packet_number", message.get("packet_number", 0), 0, 127,
         )
         return _sysex(0x7E, device_id, 0x7E, packet_number, time=time)
+    if msg_type == "mtc_user_bits":
+        # MTC User Bits (RP-004/008 p.5): the 32 SMPTE user bits, e.g. a reel
+        # number or date.
+        #   F0 7F <device_id> 01 02 u1 u2 u3 u4 u5 u6 u7 u8 u9 F7
+        # u1-u8 = binary groups 1-8 (_user_bit_groups); u9 = 000000ji,
+        # i = SMPTE bit 43, j = SMPTE bit 59 ('flags' 0-3). The spec's
+        # device ID is 7F (whole system).
+        device_id = _device_id(message)
+        groups = _user_bit_groups(message)
+        flags = _check_range("flags", message.get("flags", 0), 0, 3)
+        return _sysex(0x7F, device_id, 0x01, 0x02, *groups, flags, time=time)
     if msg_type == "mmc":
         # MIDI Machine Control (RP-013); see _mmc_command_bytes. Device
         # replies are decoded by the decode_mmc_response action.
@@ -3010,10 +3045,16 @@ def _checksum_ok(data: tuple) -> bool:
 
 
 def _decode_mtc(data: tuple) -> dict:
-    # Full Message only; User Bits (01 02) isn't implemented.
-    _, device_id, _, code, hr, mn, sc, fr = data
+    # Full Message (01 01) and User Bits (01 02).
+    device_id, code = data[1], data[3]
+    if code == 0x02:
+        if len(data) != 13:
+            raise ValueError("User Bits has 9 data bytes")
+        return {"type": "mtc_user_bits", "device_id": device_id,
+                "binary_groups": list(data[4:12]), "flags": data[12]}
+    _, _, _, code, hr, mn, sc, fr = data
     if code != 0x01:
-        raise ValueError("not an MTC Full Message")
+        raise ValueError("not an MTC Full Message or User Bits")
     return {"type": "mtc_full", "device_id": device_id,
             **_decode_time_code(hr, mn, sc, fr)}
 

@@ -258,6 +258,15 @@
   "err: mtc_full missing frame_rate": {
    "error": "KeyError"
   },
+  "err: mtc_user_bits both inputs": {
+   "error": "ValueError"
+  },
+  "err: mtc_user_bits flags 4": {
+   "error": "ValueError"
+  },
+  "err: mtc_user_bits nibble 16": {
+   "error": "ValueError"
+  },
   "err: notation denominator 3": {
    "error": "ValueError"
   },
@@ -1223,6 +1232,18 @@
    ],
    [
     "F1 00",
+    0
+   ]
+  ],
+  "mtc_user_bits binary_groups": [
+   [
+    "F0 7F 7F 01 02 06 01 02 05 03 00 01 00 02 F7",
+    0
+   ]
+  ],
+  "mtc_user_bits characters": [
+   [
+    "F0 7F 03 01 02 0C 04 05 04 05 04 02 05 00 F7",
     0
    ]
   ],

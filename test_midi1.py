@@ -314,6 +314,14 @@ CASES: list[tuple[str, dict]] = [
                                         "bank": 0, "tuning_program": 0, "changes": [{"key": 1, "no_change": True}]}),
     ("err: key_based_dump missing bank", {"type": "midi_tuning", "command": "key_based_dump",
                                           "tuning_program": 0, "notes": TUNING_NOTES}),
+    # MTC User Bits (step 6c)
+    ("mtc_user_bits binary_groups", {"type": "mtc_user_bits",
+                                     "binary_groups": [6, 1, 2, 5, 3, 0, 1, 0], "flags": 2}),
+    ("mtc_user_bits characters", {"type": "mtc_user_bits", "characters": "REEL", "device_id": 3}),
+    ("err: mtc_user_bits both inputs", {"type": "mtc_user_bits", "characters": "ABCD",
+                                        "binary_groups": [0] * 8}),
+    ("err: mtc_user_bits nibble 16", {"type": "mtc_user_bits", "binary_groups": [16] + [0] * 7}),
+    ("err: mtc_user_bits flags 4", {"type": "mtc_user_bits", "binary_groups": [0] * 8, "flags": 4}),
     # Errors
     ("err: unknown type", {"type": "bogus"}),
     ("err: missing type", {}),
@@ -469,6 +477,9 @@ SPEC_EXAMPLES: list[tuple[str, dict, list[str]]] = [
      {"type": "device_control", "command": "global_parameter_control", "effect": "reverb",
       "parameters": [{"parameter": "type", "value": 4}]},
      ["F0 7F 7F 04 05 01 01 01 01 01 00 04 F7"]),
+    ("RP-004/008 User Bits: characters reassemble as hhhhgggg ffffeeee ddddcccc bbbbaaaa",
+     {"type": "mtc_user_bits", "characters": "ABCD"},
+     ["F0 7F 7F 01 02 04 04 03 04 02 04 01 04 00 F7"]),
     # Captured from real hardware, not printed in a spec.
     ("Roland TR-8S Identity Reply (captured 2026-10-02)",
      {"type": "device_inquiry", "command": "reply", "device_id": 0x10,
@@ -590,7 +601,8 @@ def check_decode_edges(midi1) -> None:
         ("Identity Reply one byte short", [0x7E, 0x10, 0x06, 0x02, 0x41, 0x45, 0x03,
                                            0x00, 0x00, 0x00, 0x03, 0x00]),
         ("notation length byte wrong", [0x7F, 0x7F, 0x03, 0x02, 0x09, 0x04, 0x02, 0x18, 0x08]),
-        ("MTC User Bits (no decoder)", [0x7F, 0x7F, 0x01, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        ("MTC User Bits with a nibble above 15", [0x7F, 0x7F, 0x01, 0x02, 0x10, 0, 0, 0, 0, 0, 0, 0, 0]),
+        ("MTC User Bits with flag bits 2-6 set", [0x7F, 0x7F, 0x01, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0x04]),
         ("manufacturer SysEx", [0x41, 0x10, 0x42, 0x12, 0x7F]),
         ("minutes with a flag bit set", [0x7F, 0x7F, 0x01, 0x01, 0x61, 0x65, 0x34, 0x10]),
     ):
