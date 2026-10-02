@@ -416,6 +416,10 @@ CASES: list[tuple[str, dict]] = [
     ("err: mmc command and batch", {"type": "mmc", "command": "stop", "batch": [{"command": "play"}]}),
     ("err: mmc command string over 48 bytes", {"type": "mmc", "batch": [
         {"command": "locate", **TC, "subframes": 0, "frame_rate": "25"}] * 7}),
+    ("mmc read new fields", {"type": "mmc", "command": "read",
+                             "names": ["motion_control_tally", "short_generator_time_code", "signature"]}),
+    ("mmc update short field", {"type": "mmc", "command": "update", "action": "begin",
+                                "names": ["short_selected_time_code", "motion_control_tally"]}),
     # Errors
     ("err: unknown type", {"type": "bogus"}),
     ("err: missing type", {}),
@@ -473,12 +477,20 @@ MMC_RESPONSES: list[tuple[str, list[int]]] = [
     ("gp0 status byte", [0xF0, 0x7F, 0x01, 0x07, 0x08, 0x20, 0x40, 0x40, 0x60, 0x48, 0xF7]),
     ("track_mute bitmap", [0xF0, 0x7F, 0x7F, 0x07, 0x62, 0x02, 0x05, 0x40, 0xF7]),
     ("response_error", [0xF0, 0x7F, 0x01, 0x07, 0x42, 0x02, 0x01, 0x4C, 0xF7]),
-    ("unknown field", [0xF0, 0x7F, 0x01, 0x07, 0x45, 0x00, 0xF7]),
+    ("time_standard with count 0", [0xF0, 0x7F, 0x01, 0x07, 0x45, 0x00, 0xF7]),
     ("err not mmc response", [0xF0, 0x7F, 0x01, 0x06, 0x01, 0xF7]),
     ("err missing F7", [0xF0, 0x7F, 0x01, 0x07, 0x01, 0x00]),
     ("err wrong length", [0xF0, 0x7F, 0x01, 0x07, 0x01, 0x00, 0x00, 0xF7]),
     ("err bitmap count mismatch", [0xF0, 0x7F, 0x01, 0x07, 0x62, 0x03, 0x05, 0xF7]),
     ("err empty", []),
+    # Step 6f-2a: several fields per response, Short time code, handshakes.
+    ("rp013 master: time code + motion control tally",
+     [0xF0, 0x7F, 0x01, 0x07, 0x01, 0x60, 0x16, 0x05, 0x2C, 0x00, 0x48, 0x03, 0x02, 0x7F, 0x01, 0xF7]),
+    ("rp013 master: short selected time code", [0xF0, 0x7F, 0x01, 0x07, 0x21, 0x2D, 0x00, 0xF7]),
+    ("rp013 slave: selected time code", [0xF0, 0x7F, 0x02, 0x07, 0x01, 0x6A, 0x01, 0x3A, 0x3C, 0x00, 0xF7]),
+    ("handshake wait", [0xF0, 0x7F, 0x01, 0x07, 0x7C, 0xF7]),
+    ("unregistered 5-byte name", [0xF0, 0x7F, 0x01, 0x07, 0x10, 1, 2, 3, 4, 5, 0xF7]),
+    ("err extension set", [0xF0, 0x7F, 0x01, 0x07, 0x00, 0x01, 0xF7]),
 ]
 
 META_CASES: list[tuple[str, dict]] = [
@@ -781,6 +793,34 @@ def check_stream_decoder(midi1) -> None:
           feed(a[:5] + a[6:]) == [])
 
 
+def check_mmc_response_examples(midi1) -> None:
+    """RP-013's appendix responses, field by field."""
+    master = json.loads(midi1._decode_mmc_response({"data": dict(MMC_RESPONSES)[
+        "rp013 master: time code + motion control tally"]}))
+    fields = master.get("fields", [])
+    check("RP-013 appendix: master response has two fields",
+          master.get("type") == "fields" and len(fields) == 2, f"{master}")
+    if len(fields) == 2:
+        tc, tally = fields
+        check("RP-013 appendix: SELECTED TIME CODE 00:22:05:12, 30 fps, status byte",
+              (tc["name"], tc["hours"], tc["minutes"], tc["seconds"], tc["frames"],
+               tc["frame_rate"], tc["use_status_byte"])
+              == ("selected_time_code", 0, 22, 5, 12, "30nondrop", True), f"{tc}")
+        check("RP-013 appendix: MOTION CONTROL TALLY data 02 7F 01",
+              (tally["name"], tally.get("data")) == ("motion_control_tally", [2, 0x7F, 1]),
+              f"{tally}")
+    short = json.loads(midi1._decode_mmc_response({"data": dict(MMC_RESPONSES)[
+        "rp013 master: short selected time code"]}))
+    check("RP-013 appendix: Short SELECTED TIME CODE frame 13",
+          (short.get("name"), short.get("frames"), short.get("use_status_byte"))
+          == ("short_selected_time_code", 13, True), f"{short}")
+    slave = json.loads(midi1._decode_mmc_response({"data": dict(MMC_RESPONSES)[
+        "rp013 slave: selected time code"]}))
+    check("RP-013 appendix: slave SELECTED TIME CODE 10:01:58:28",
+          (slave.get("hours"), slave.get("minutes"), slave.get("seconds"), slave.get("frames"))
+          == (10, 1, 58, 28), f"{slave}")
+
+
 def check_device_replies(midi1) -> None:
     for device, data, expected in DEVICE_REPLIES:
         got = midi1._decode_message(midi1.mido.Message("sysex", data=data))
@@ -976,6 +1016,7 @@ def main() -> int:
     check_round_trip(midi1)
     check_decode_edges(midi1)
     check_stream_decoder(midi1)
+    check_mmc_response_examples(midi1)
     check_device_replies(midi1)
 
     print("\nschema")

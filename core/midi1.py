@@ -994,11 +994,11 @@ def _encode_standard_speed(speed: float, reverse: bool) -> tuple:
     return sh, sm, sl
 
 
-# MMC Information Field names (RP-013 pp.14-16). 01h-0Fh use the 5-byte
-# Standard Time Code format; 10h-1Fh are unassigned in the spec. Used by
-# the mmc commands move/add/subtract/drop_frame_adjust/read/write/
-# masked_write/update and by _decode_mmc_response. RP-013 defines more
-# fields than are registered here.
+# MMC Information Field names (RP-013 pp.14-16, every field in its index).
+# The name byte sets the data length (RP-013 p.9): 01-1F 5 bytes (Standard
+# Time Code), 20-3F 2 bytes (Short Time Code: the 'short_' form of 01-0F),
+# 40-77 a <count> then that many bytes. Used by the mmc commands and by
+# _mmc_response_fields.
 _INFO_FIELD_NAMES = {
     "selected_time_code": 0x01,
     "selected_master_code": 0x02,
@@ -1015,6 +1015,48 @@ _INFO_FIELD_NAMES = {
     "gp5": 0x0D,
     "gp6": 0x0E,
     "gp7": 0x0F,
+    # Short Time Code forms of 01-0F (frames + subframes/status only).
+    "short_selected_time_code": 0x21,
+    "short_selected_master_code": 0x22,
+    "short_requested_offset": 0x23,
+    "short_actual_offset": 0x24,
+    "short_lock_deviation": 0x25,
+    "short_generator_time_code": 0x26,
+    "short_midi_time_code_input": 0x27,
+    "short_gp0": 0x28, "short_gp1": 0x29, "short_gp2": 0x2A, "short_gp3": 0x2B,
+    "short_gp4": 0x2C, "short_gp5": 0x2D, "short_gp6": 0x2E, "short_gp7": 0x2F,
+    # Count-prefixed fields.
+    "signature": 0x40,
+    "update_rate": 0x41,
+    "command_error": 0x43,
+    "command_error_level": 0x44,
+    "time_standard": 0x45,
+    "selected_time_code_source": 0x46,
+    "selected_time_code_userbits": 0x47,
+    "motion_control_tally": 0x48,
+    "velocity_tally": 0x49,
+    "stop_mode": 0x4A,
+    "fast_mode": 0x4B,
+    "record_mode": 0x4C,
+    "record_status": 0x4D,
+    "global_monitor": 0x50,
+    "record_monitor": 0x51,
+    "step_length": 0x54,
+    "play_speed_reference": 0x55,
+    "fixed_speed": 0x56,
+    "lifter_defeat": 0x57,
+    "control_disable": 0x58,
+    "resolved_play_mode": 0x59,
+    "chase_mode": 0x5A,
+    "generator_command_tally": 0x5B,
+    "generator_set_up": 0x5C,
+    "generator_userbits": 0x5D,
+    "midi_time_code_command_tally": 0x5E,
+    "midi_time_code_set_up": 0x5F,
+    "procedure_response": 0x60,
+    "event_response": 0x61,
+    "vitc_insert_enable": 0x63,
+    "failure": 0x65,
     # Standard Track Bitmap fields (RP-013 p.17): <count> <bitmap bytes...>,
     # one bit per track. Reachable through read/update (whole field) and
     # masked_write. 'write' doesn't support them (see _WRITEABLE_INFO_FIELDS).
@@ -1024,6 +1066,13 @@ _INFO_FIELD_NAMES = {
     "track_input_monitor": 0x53,
     "track_mute": 0x62,
 }
+
+# Response-only names (RP-013): RESPONSE ERROR lists fields the device can't
+# supply; RESPONSE SEGMENT splits a long response. Neither can be READ.
+_MMC_RESPONSE_ONLY_NAMES = {"response_error": 0x42, "response_segment": 0x64}
+
+# Handshakes in a response string (RP-013): no data.
+_MMC_RESPONSE_HANDSHAKES = {"wait": 0x7C, "resume": 0x7F}
 
 # Read/Writeable Standard Time Code fields: valid destinations for write/
 # move/add/subtract/drop_frame_adjust. Sources may be any registered name.
@@ -1196,6 +1245,15 @@ def _encode_standard_time_code(
     return hr_byte, mn_byte, sc_byte, fr_byte, fifth_byte
 
 
+def _decode_short_time_code(fr_byte: int, fifth_byte: int) -> dict:
+    """MMC Short Time Code (RP-013 section 3): the fr and 5th bytes of
+    Standard Time Code alone."""
+    return {
+        k: v for k, v in _decode_standard_time_code(0, 0, 0, fr_byte, fifth_byte).items()
+        if k not in ("hours", "frame_rate", "color_frame", "minutes", "blank", "seconds")
+    }
+
+
 def _decode_standard_time_code(
     hr_byte: int, mn_byte: int, sc_byte: int, fr_byte: int, fifth_byte: int
 ) -> dict:
@@ -1281,17 +1339,83 @@ def _cueing_event(message: dict, command: str) -> tuple:
     return (sl, sm, *info)
 
 
-def _mmc_response_fields(data: list) -> dict:
-    """Decode an MMC Response (F0 7F <device_id> 07 <name> ... F7; 07 is
-    mcr, device to controller), given the whole SysEx including F0 and F7.
-    Raises ValueError for a malformed one.
+def _mmc_response_field(name_byte: int, payload: list) -> dict:
+    """One field of an MMC response, given its name byte and data (the
+    count byte already removed)."""
+    if name_byte == _MMC_RESPONSE_ONLY_NAMES["response_error"]:
+        names = {v: k for k, v in _INFO_FIELD_NAMES.items()}
+        return {
+            "type": "response_error",
+            "unsupported_fields": [names.get(b, f"0x{b:02X}") for b in payload],
+        }
+    name = {v: k for k, v in _INFO_FIELD_NAMES.items()}.get(name_byte)
+    if name is None:
+        return {
+            "type": "unknown", "raw_name_byte": name_byte, "data": list(payload),
+            "note": "not a registered Information Field",
+        }
+    if name_byte < 0x20:
+        return {"type": "field_value", "name": name,
+                **_decode_standard_time_code(*payload)}
+    if name_byte < 0x40:
+        return {"type": "field_value", "name": name,
+                **_decode_short_time_code(*payload)}
+    if name in _TRACK_BITMAP_INFO_FIELDS:
+        # <count> <bitmap bytes...>. A device may leave out trailing zero
+        # bytes; missing tracks are inactive. Returns the raw bytes (for
+        # masked_write) and the active track numbers (bit 0 of byte 0 is
+        # track 1).
+        return {
+            "type": "field_value", "name": name,
+            "byte_count": len(payload), "bitmap_bytes": list(payload),
+            "active_tracks": [
+                byte_index * 7 + bit_index + 1
+                for byte_index, byte_value in enumerate(payload)
+                for bit_index in range(7)
+                if byte_value & (1 << bit_index)
+            ],
+        }
+    return {"type": "field_value", "name": name, "data": list(payload)}
 
-    Decodes the fields in _INFO_FIELD_NAMES (Standard Time Code or Track
-    Bitmap format) and RESPONSE ERROR (42h, a count then the failed field
-    names). Any other name byte, including COMMAND ERROR and segmented
-    responses, comes back as type "unknown" with the raw byte. A response
-    carrying several fields isn't supported.
-    """
+
+def _mmc_response_string(body) -> list:
+    """Split an MMC response string into fields by the name-byte ranges of
+    RP-013 p.9: 01-1F 5 data bytes, 20-3F 2, 40-77 <count> + data, 78-7F
+    none (handshakes). Extension sets (00 prefix) aren't decoded."""
+    fields, at = [], 0
+    while at < len(body):
+        name_byte = body[at]
+        if name_byte == 0x00:
+            raise ValueError("MMC extension sets (00 prefix) aren't decoded")
+        if name_byte >= 0x78:
+            handshake = {v: k for k, v in _MMC_RESPONSE_HANDSHAKES.items()}.get(name_byte)
+            fields.append({"type": "handshake",
+                           "name": handshake or f"0x{name_byte:02X}"})
+            at += 1
+            continue
+        if name_byte < 0x40:
+            size = 5 if name_byte < 0x20 else 2
+            payload, at = body[at + 1:at + 1 + size], at + 1 + size
+        else:
+            if at + 1 >= len(body):
+                raise ValueError(f"field 0x{name_byte:02X} has no <count> byte")
+            size = body[at + 1]
+            payload, at = body[at + 2:at + 2 + size], at + 2 + size
+        if len(payload) != size:
+            name = {v: k for k, v in _INFO_FIELD_NAMES.items()}.get(name_byte)
+            label = f"0x{name_byte:02X} ({name})" if name else f"0x{name_byte:02X}"
+            raise ValueError(
+                f"field {label} needs {size} data byte(s), got {len(payload)}"
+            )
+        fields.append(_mmc_response_field(name_byte, list(payload)))
+    return fields
+
+
+def _mmc_response_fields(data: list) -> dict:
+    """Decode an MMC Response (F0 7F <device_id> 07 <fields> F7; 07 is mcr,
+    device to controller), given the whole SysEx including F0 and F7.
+    Raises ValueError for a malformed one. One field comes back as that
+    field's dict; several as type "fields" with a 'fields' list."""
     if len(data) < 5 or data[0] != 0xF0 or data[-1] != 0xF7:
         raise ValueError(
             "'data' must be a complete sysex, including the leading "
@@ -1302,74 +1426,12 @@ def _mmc_response_fields(data: list) -> dict:
             "'data' is not an MMC Response sysex — expected "
             "F0 7F <device_id> 07 ... F7"
         )
-    device_id = data[2]
-    name_byte = data[4]
-    payload = data[5:-1]
-    if name_byte == 0x42:
-        field_names_by_byte = {v: k for k, v in _INFO_FIELD_NAMES.items()}
-        unsupported = [
-            field_names_by_byte.get(b, f"0x{b:02X}")
-            for b in payload[1:]  # payload[0] is the count byte
-        ]
-        return {
-            "device_id": device_id,
-            "type": "response_error",
-            "unsupported_fields": unsupported,
-        }
-    field_name = {v: k for k, v in _INFO_FIELD_NAMES.items()}.get(name_byte)
-    if field_name is None:
-        return {
-            "device_id": device_id,
-            "type": "unknown",
-            "raw_name_byte": name_byte,
-            "note": (
-                f"not decodable: only the {len(_INFO_FIELD_NAMES)} "
-                "registered Information Fields plus RESPONSE ERROR are "
-                "supported"
-            ),
-        }
-    if field_name in _TRACK_BITMAP_INFO_FIELDS:
-        # <count> <bitmap bytes...>. A device may leave out trailing zero
-        # bytes; missing tracks are inactive. Returns the raw bytes (for
-        # masked_write) and the active track numbers (bit 0 of byte 0 is
-        # track 1).
-        if not payload:
-            raise ValueError(
-                f"expected at least a <count> byte for field "
-                f"{field_name!r}, got an empty payload"
-            )
-        bitmap_count = payload[0]
-        bitmap_bytes = payload[1:]
-        if len(bitmap_bytes) != bitmap_count:
-            raise ValueError(
-                f"'{field_name}' declared byte count {bitmap_count} but "
-                f"{len(bitmap_bytes)} bitmap byte(s) actually followed"
-            )
-        active_tracks = [
-            byte_index * 7 + bit_index + 1
-            for byte_index, byte_value in enumerate(bitmap_bytes)
-            for bit_index in range(7)
-            if byte_value & (1 << bit_index)
-        ]
-        return {
-            "device_id": device_id,
-            "type": "field_value",
-            "name": field_name,
-            "byte_count": bitmap_count,
-            "bitmap_bytes": list(bitmap_bytes),
-            "active_tracks": active_tracks,
-        }
-    if len(payload) != 5:
-        raise ValueError(
-            f"expected exactly 5 data bytes for field {field_name!r}, "
-            f"got {len(payload)}"
-        )
-    return {
-        "device_id": device_id,
-        "type": "field_value",
-        "name": field_name,
-        **_decode_standard_time_code(*payload),
-    }
+    fields = _mmc_response_string(data[4:-1])
+    if not fields:
+        raise ValueError("the MMC Response has no fields")
+    if len(fields) == 1:
+        return {"device_id": data[2], **fields[0]}
+    return {"device_id": data[2], "type": "fields", "fields": fields}
 
 
 def _decode_mmc_response(tool_input: dict) -> str:

@@ -720,6 +720,12 @@
     0
    ]
   ],
+  "mmc read new fields": [
+   [
+    "F0 7F 7F 06 42 03 48 26 40 F7",
+    0
+   ]
+  ],
   "mmc record_exit": [
    [
     "F0 7F 7F 06 07 F7",
@@ -861,6 +867,12 @@
   "mmc update end all": [
    [
     "F0 7F 7F 06 43 02 01 7F F7",
+    0
+   ]
+  ],
+  "mmc update short field": [
+   [
+    "F0 7F 7F 06 43 03 00 21 48 F7",
     0
    ]
   ],
@@ -1897,10 +1909,13 @@
  },
  "mmc_responses": {
   "err bitmap count mismatch": {
-   "error": "'track_mute' declared byte count 3 but 1 bitmap byte(s) actually followed"
+   "error": "field 0x62 (track_mute) needs 3 data byte(s), got 1"
   },
   "err empty": {
    "error": "'data' is required: a non-empty list of ints, the full sysex including the leading 0xF0 and trailing 0xF7"
+  },
+  "err extension set": {
+   "error": "MMC extension sets (00 prefix) aren't decoded"
   },
   "err missing F7": {
    "error": "'data' must be a complete sysex, including the leading 0xF0 and trailing 0xF7"
@@ -1909,7 +1924,7 @@
    "error": "'data' is not an MMC Response sysex \u2014 expected F0 7F <device_id> 07 ... F7"
   },
   "err wrong length": {
-   "error": "expected exactly 5 data bytes for field 'selected_time_code', got 2"
+   "error": "field 0x01 (selected_time_code) needs 5 data byte(s), got 2"
   },
   "gp0 status byte": {
    "blank": true,
@@ -1930,14 +1945,85 @@
    "use_status_byte": true,
    "video_field_1": false
   },
+  "handshake wait": {
+   "device_id": 1,
+   "name": "wait",
+   "status": "ok",
+   "type": "handshake"
+  },
   "response_error": {
    "device_id": 1,
    "status": "ok",
    "type": "response_error",
    "unsupported_fields": [
     "selected_time_code",
-    "0x4C"
+    "record_mode"
    ]
+  },
+  "rp013 master: short selected time code": {
+   "device_id": 1,
+   "estimated": false,
+   "frames": 13,
+   "invalid": false,
+   "name": "short_selected_time_code",
+   "negative": false,
+   "no_time_code": false,
+   "status": "ok",
+   "type": "field_value",
+   "use_status_byte": true,
+   "video_field_1": false
+  },
+  "rp013 master: time code + motion control tally": {
+   "device_id": 1,
+   "fields": [
+    {
+     "blank": false,
+     "color_frame": false,
+     "estimated": false,
+     "frame_rate": "30nondrop",
+     "frames": 12,
+     "hours": 0,
+     "invalid": false,
+     "minutes": 22,
+     "name": "selected_time_code",
+     "negative": false,
+     "no_time_code": false,
+     "seconds": 5,
+     "type": "field_value",
+     "use_status_byte": true,
+     "video_field_1": false
+    },
+    {
+     "data": [
+      2,
+      127,
+      1
+     ],
+     "name": "motion_control_tally",
+     "type": "field_value"
+    }
+   ],
+   "status": "ok",
+   "type": "fields"
+  },
+  "rp013 slave: selected time code": {
+   "blank": false,
+   "color_frame": false,
+   "device_id": 2,
+   "estimated": false,
+   "frame_rate": "30nondrop",
+   "frames": 28,
+   "hours": 10,
+   "invalid": false,
+   "minutes": 1,
+   "name": "selected_time_code",
+   "negative": false,
+   "no_time_code": false,
+   "seconds": 58,
+   "status": "ok",
+   "type": "field_value",
+   "use_status_byte": true,
+   "video_field_1": false
   },
   "selected_time_code": {
    "blank": false,
@@ -1955,6 +2041,13 @@
    "type": "field_value",
    "use_status_byte": false
   },
+  "time_standard with count 0": {
+   "data": [],
+   "device_id": 1,
+   "name": "time_standard",
+   "status": "ok",
+   "type": "field_value"
+  },
   "track_mute bitmap": {
    "active_tracks": [
     1,
@@ -1971,10 +2064,17 @@
    "status": "ok",
    "type": "field_value"
   },
-  "unknown field": {
+  "unregistered 5-byte name": {
+   "data": [
+    1,
+    2,
+    3,
+    4,
+    5
+   ],
    "device_id": 1,
-   "note": "not decodable: only the 20 registered Information Fields plus RESPONSE ERROR are supported",
-   "raw_name_byte": 69,
+   "note": "not a registered Information Field",
+   "raw_name_byte": 16,
    "status": "ok",
    "type": "unknown"
   }
