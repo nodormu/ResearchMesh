@@ -3973,6 +3973,110 @@ _CUEING_INFO_DOCS = {
 }
 
 
+# MSC (RP-002/014) field docs.
+_MSC_Q_DOCS = {
+    "q_number": "cue number: ASCII digits and '.', e.g. '235.6'",
+    "q_list": "cue list, same format; needs 'q_number' when sent with it",
+    "q_path": "cue path, same format; needs 'q_list' when sent with it",
+}
+_MSC_TIME_DOCS = {**_TIME_CODE_DOCS, "fractional_frames": "0-99, required"}
+_MSC_2PC_DOCS = {
+    "checksum": ("0-16383, required; computed by the caller (MSC 6.5 sums 2-byte "
+                 "values without stating their byte order)"),
+    "sequence_number": "0-16383, required",
+}
+
+
+def _msc_doc(command: str, summary: str, fields: dict, example: dict) -> dict:
+    return {"summary": f"{summary} ({_COMMANDS['msc'][command]:02X}).", "fields": fields,
+            "example": {"type": "msc", "command_format": "lighting", "command": command,
+                        **example}}
+
+
+def _msc_docs() -> dict:
+    optional_cue = {name: f"{text}; optional" for name, text in _MSC_Q_DOCS.items()}
+    q_list_only = {"q_list": "cue list (ASCII digits and '.'); optional"}
+    out = {
+        **{name: _msc_doc(name, summary, optional_cue, {"q_number": "1"})
+           for name, summary in (
+               ("go", "Start a cue; with no cue, the next one"),
+               ("stop", "Stop a running cue; with no cue, all of them"),
+               ("resume", "Resume a stopped cue; with no cue, all of them"),
+               ("go_off", "Send a cue to its off state; with no cue, the current one"))},
+        "load": _msc_doc("load", "Load a cue into standby, ready for GO",
+                         {**optional_cue, "q_number": _MSC_Q_DOCS["q_number"] + "; required"},
+                         {"q_number": "12.5"}),
+        "timed_go": _msc_doc("timed_go", "GO at a stated time",
+                             {**_MSC_TIME_DOCS, **optional_cue},
+                             {**_TC_EXAMPLE, "frame_rate": "30nondrop",
+                              "fractional_frames": 0, "q_number": "3"}),
+        "set": _msc_doc("set", "Set a generic control to a value, optionally over a time",
+                        {"control_number": "0-16383, required",
+                         "control_value": "0-16383, required",
+                         **{name: f"{text.replace(', required', '')}; the 6 time fields "
+                                  "are given all together or not at all"
+                            for name, text in _MSC_TIME_DOCS.items()}},
+                        {"control_number": 1, "control_value": 8000}),
+        "fire": _msc_doc("fire", "Trigger a macro", {"macro_number": "0-127, required"},
+                         {"macro_number": 5}),
+        "all_off": _msc_doc("all_off", "Turn all outputs off; RESTORE brings them back", {}, {}),
+        "restore": _msc_doc("restore", "Restore what ALL_OFF turned off", {}, {}),
+        "reset": _msc_doc("reset", "Stop all cues and load the top of the show", {}, {}),
+        **{name: _msc_doc(name, summary, q_list_only, {})
+           for name, summary in (
+               ("standby_plus", "Sound: next cue to standby"),
+               ("standby_minus", "Sound: previous cue to standby"),
+               ("sequence_plus", "Sound: next parent cue to standby"),
+               ("sequence_minus", "Sound: previous parent cue to standby"),
+               ("start_clock", "Sound: start the auto-follow clock"),
+               ("stop_clock", "Sound: stop the auto-follow clock"),
+               ("zero_clock", "Sound: set the auto-follow clock to zero"),
+               ("mtc_chase_on", "Sound: make the auto-follow clock follow incoming MTC"),
+               ("mtc_chase_off", "Sound: stop following MTC"))},
+        "set_clock": _msc_doc("set_clock", "Sound: set the auto-follow clock",
+                              {**_MSC_TIME_DOCS, **q_list_only},
+                              {**_TC_EXAMPLE, "frame_rate": "25", "fractional_frames": 0}),
+        **{name: _msc_doc(name, summary, {field: f"{label} (ASCII digits and '.'); required"},
+                          {field: "2"})
+           for name, summary, field, label in (
+               ("open_cue_list", "Sound: make a cue list active", "q_list", "cue list"),
+               ("close_cue_list", "Sound: make a cue list inactive", "q_list", "cue list"),
+               ("open_cue_path", "Sound: make a cue path active", "q_path", "cue path"),
+               ("close_cue_path", "Sound: make a cue path inactive", "q_path", "cue path"))},
+    }
+    required_cue = {**optional_cue, "q_number": _MSC_Q_DOCS["q_number"] + "; required"}
+    cue_data = {"cue_data": "4 values 0-127 (d1-d4, meaning per device), default all 0"}
+    two_pc = {"checksum": 0, "sequence_number": 1}
+    out.update({
+        "standby": _msc_doc("standby", "Two-Phase Commit: controller asks a device to "
+                            "prepare a cue", {**_MSC_2PC_DOCS, **cue_data, **required_cue},
+                            {**two_pc, "q_number": "1"}),
+        "standing_by": _msc_doc("standing_by", "Two-Phase Commit: device is ready; the "
+                                "time is the most the cue can take",
+                                {**_MSC_2PC_DOCS, **_MSC_TIME_DOCS, **optional_cue},
+                                {**two_pc, **_TC_EXAMPLE, "frame_rate": "30nondrop",
+                                 "fractional_frames": 0, "q_number": "1"}),
+        "go_2pc": _msc_doc("go_2pc", "Two-Phase Commit: controller runs the cue",
+                           {**_MSC_2PC_DOCS, **cue_data, **required_cue},
+                           {**two_pc, "q_number": "1"}),
+        "complete": _msc_doc("complete", "Two-Phase Commit: device finished the cue",
+                             {**_MSC_2PC_DOCS, **optional_cue}, {**two_pc, "q_number": "1"}),
+        "cancel": _msc_doc("cancel", "Two-Phase Commit: controller cancels a cue",
+                           {**_MSC_2PC_DOCS, **required_cue}, {**two_pc, "q_number": "1"}),
+        "cancelled": _msc_doc("cancelled", "Two-Phase Commit: device reports a cue cancelled",
+                              {**_MSC_2PC_DOCS, "status": (
+                                  f"one of {', '.join(_MSC_CANCELLED_STATUS)}, or a "
+                                  "16-bit code with the low 2 bits 0; required")},
+                              {**two_pc, "status": "completing"}),
+        "abort": _msc_doc("abort", "Two-Phase Commit: device can't run the cue",
+                          {**_MSC_2PC_DOCS, "status": (
+                              f"one of {', '.join(_MSC_ABORT_STATUS)}, or a 16-bit "
+                              "code with the low 2 bits 0; required")},
+                          {**two_pc, "status": "timeout"}),
+    })
+    return out
+
+
 def _cueing_docs(msg_type: str, time_fields: dict, example_time: dict) -> dict:
     """The command entries shared by mtc_cueing and mtc_cueing_nrt (the
     latter adds a time and delete commands)."""
@@ -4469,6 +4573,20 @@ _DOCS: dict = {
                             "sample_number": 1, "loop_number": "all"},
             },
         },
+    },
+    "msc": {
+        "summary": ("MIDI Show Control (F0 7F id 02 format command): the General "
+                    "commands, the Sound commands and Two-Phase Commit."),
+        "fields": {
+            "device_id": ("0-127: 00-6F one device, 70-7E a group, 7F all "
+                          "(default 127)"),
+            "command_format": (f"one of {', '.join(_MSC_FORMATS)}; or give "
+                               "'command_format_raw'"),
+            "command_format_raw": ("0-127, in place of 'command_format', for a "
+                                   "narrower category (e.g. 0x02 moving lights, "
+                                   "0x04 strobes)"),
+        },
+        "commands": _msc_docs(),
     },
     "file_dump": {
         "summary": ("File Dump (F0 7E id 07 nn) and the generic handshakes "
