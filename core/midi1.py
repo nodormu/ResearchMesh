@@ -4100,6 +4100,169 @@ _DOCS: dict = {
         },
         "example": {"type": "mtc_user_bits", "characters": "ABCD"},
     },
+    "gm_system": {
+        "summary": "General MIDI System On/Off (F0 7E id 09 nn).",
+        "fields": {"device_id": _DEVICE_ID_DOC},
+        "commands": {
+            "on": _no_fields("GM1 System On (01).", {"type": "gm_system", "command": "on"}),
+            "off": _no_fields("GM System Off (02).", {"type": "gm_system", "command": "off"}),
+            "gm2_on": _no_fields("GM2 System On (03).",
+                                 {"type": "gm_system", "command": "gm2_on"}),
+        },
+    },
+    "device_inquiry": {
+        "summary": "Identity Request and Identity Reply (F0 7E id 06 nn).",
+        "fields": {"device_id": _DEVICE_ID_DOC},
+        "commands": {
+            "request": _no_fields("Identity Request (01); devices answer with a reply.",
+                                  {"type": "device_inquiry", "command": "request"}),
+            "reply": {
+                "summary": "Identity Reply (02), as a device sends it.",
+                "fields": {
+                    "manufacturer_id": ("required: 1-127, or a list of 3 bytes "
+                                        "starting with 0 (extended ID)"),
+                    "device_family_code": "0-16383, required",
+                    "device_family_member_code": "0-16383, required",
+                    "software_revision": "list of 4 bytes 0-127, required",
+                },
+                "example": {"type": "device_inquiry", "command": "reply", "device_id": 0x10,
+                            "manufacturer_id": 0x41, "device_family_code": 0x1C5,
+                            "device_family_member_code": 0,
+                            "software_revision": [0, 3, 0, 0]},
+            },
+        },
+    },
+    "device_control": {
+        "summary": "Device Control (F0 7F id 04 nn): settings for the whole device.",
+        "fields": {"device_id": _DEVICE_ID_DOC},
+        "commands": {
+            "master_volume": {
+                "summary": "Master Volume (01).",
+                "fields": {"value": "0-16383, required; 0 is off"},
+                "example": {"type": "device_control", "command": "master_volume",
+                            "value": 16383},
+            },
+            "master_balance": {
+                "summary": "Master Balance (02).",
+                "fields": {"value": "0-16383, required; 0 left, 8192 center, 16383 right"},
+                "example": {"type": "device_control", "command": "master_balance",
+                            "value": 8192},
+            },
+            "master_fine_tuning": {
+                "summary": "Master Fine Tuning (03, CA-025).",
+                "fields": {"value": "0-16383, required; 8192 is A440, the range +/-100 cents"},
+                "example": {"type": "device_control", "command": "master_fine_tuning",
+                            "value": 8192},
+            },
+            "master_coarse_tuning": {
+                "summary": "Master Coarse Tuning (04, CA-025), in semitones.",
+                "fields": {"value": "0-127, required; 64 is A440"},
+                "example": {"type": "device_control", "command": "master_coarse_tuning",
+                            "value": 64},
+            },
+            "global_parameter_control": {
+                "summary": "Global Parameter Control (05, GM2 4.4): effect parameters.",
+                "fields": {
+                    "effect": (f"one of {', '.join(_GPC_EFFECTS)}; or give "
+                               "'slot_path'. Allows the GM2 parameter names"),
+                    "slot_path": "list of [msb, lsb] pairs (0-127), in place of 'effect'",
+                    "parameter_width": "1-127 bytes per parameter, default 1",
+                    "value_width": "1-127 bytes per value, default 1",
+                    "parameters": (
+                        "list of {'parameter', 'value'}, required. With width 1: "
+                        "0-127, and with 'effect' a parameter can be a name ("
+                        + "; ".join(f"{effect}: {', '.join(names)}"
+                                    for effect, names in _GPC_PARAMETERS.items())
+                        + "). Wider: a list of that many bytes"),
+                },
+                "example": {"type": "device_control", "command": "global_parameter_control",
+                            "effect": "reverb",
+                            "parameters": [{"parameter": "type", "value": 4}]},
+            },
+        },
+    },
+    "controller_destination": {
+        "summary": ("Controller Destination Setting (F0 7F id 09 nn, CA-022): "
+                    "route a controller to sound parameters."),
+        "fields": {
+            "device_id": _DEVICE_ID_DOC,
+            "channel": _CHANNEL_DOC,
+            "destinations": (
+                "list of {'parameter', 'range'}, required. parameter: one of "
+                f"{', '.join(_CONTROLLER_DESTINATIONS)}, or 0-127. range: 0-127, "
+                "meaning per GM2 4.6: pitch 0x28-0x58 = -24 to +24 semitones; "
+                "filter_cutoff -9600 to +9450 cents; amplitude 0 to 127/64 x "
+                "100%; all three 0x40 = no change. lfo_pitch_depth 0-600 cents, "
+                "lfo_filter_depth 0-2400 cents, lfo_amplitude_depth 0-100%, "
+                "0 = none"),
+        },
+        "commands": {
+            "channel_pressure": {
+                "summary": "Channel Pressure as the source (01).",
+                "fields": {},
+                "example": {"type": "controller_destination", "command": "channel_pressure",
+                            "channel": 0,
+                            "destinations": [{"parameter": "pitch", "range": 0x42}]},
+            },
+            "poly_pressure": {
+                "summary": "Polyphonic Key Pressure as the source (02).",
+                "fields": {},
+                "example": {"type": "controller_destination", "command": "poly_pressure",
+                            "channel": 0,
+                            "destinations": [{"parameter": "amplitude", "range": 0x50}]},
+            },
+            "control_change": {
+                "summary": "A Control Change as the source (03).",
+                "fields": {"control": "required, 01-1F or 40-5F"},
+                "example": {"type": "controller_destination", "command": "control_change",
+                            "channel": 0, "control": 0x01,
+                            "destinations": [{"parameter": "filter_cutoff", "range": 0x60}]},
+            },
+        },
+    },
+    "key_based_instrument_control": {
+        "summary": ("Key-Based Instrument Control (F0 7F id 0A 01, CA-023): "
+                    "controller values for one key, such as one drum in a kit."),
+        "fields": {
+            "device_id": _DEVICE_ID_DOC,
+            "channel": _CHANNEL_DOC,
+            "key": "0-127, required",
+            "controllers": (
+                "list of {'control', 'value'} (each 0-127), required. Values are "
+                "relative (64 = as preset) except absolute ones such as pan and "
+                "the reverb/chorus sends; 0x78/0x79 mean fine/coarse tuning. Not "
+                "allowed: " + ", ".join(f"{c:#04x}" for c in sorted(_KEY_BASED_EXCLUDED_CONTROLS))),
+        },
+        "example": {"type": "key_based_instrument_control", "channel": 9, "key": 38,
+                    "controllers": [{"control": 0x07, "value": 0x50}]},
+    },
+    "notation": {
+        "summary": "Notation Information (F0 7F id 03 nn): bar markers and time signatures.",
+        "fields": {"device_id": _DEVICE_ID_DOC},
+        "commands": {
+            "bar_marker": {
+                "summary": "Bar Marker (01).",
+                "fields": {"bar_number": ("-8192 to 8191, required: -8192 not "
+                                          "running, 0 count-in, 8191 unknown")},
+                "example": {"type": "notation", "command": "bar_marker", "bar_number": 5},
+            },
+            **{name: {
+                "summary": f"Time Signature, {when} ({code}).",
+                "fields": {
+                    "numerator": "0-127, required",
+                    "denominator": "required, a power of 2 (the note value: 2, 4, 8, ...)",
+                    "clocks_per_click": "0-127, required (MIDI clocks per metronome click)",
+                    "notated_32nd_notes_per_beat": "0-127, required (usually 8)",
+                    "compound": "list of {'numerator', 'denominator'} for compound signatures",
+                },
+                "example": {"type": "notation", "command": name, "numerator": 3,
+                            "denominator": 4, "clocks_per_click": 24,
+                            "notated_32nd_notes_per_beat": 8},
+            } for name, when, code in (
+                ("time_signature_immediate", "taking effect now", "02"),
+                ("time_signature_delayed", "taking effect at the next bar", "42"))},
+        },
+    },
 }
 
 
