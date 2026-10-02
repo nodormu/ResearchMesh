@@ -1,0 +1,805 @@
+"""Byte-snapshot and behaviour tests for core/midi1.py.
+
+    python test_midi1.py            check against test_midi1_snapshot.json
+    python test_midi1.py --record   rewrite the snapshot from the current code
+
+The snapshot pins the exact wire bytes (and mido 'time' values) that
+_build_message_sequence produces for every message type and command, the
+exception type for invalid input, the output of decode_mmc_response, and the
+bytes of each meta message. It describes what the code does, not what the
+spec says: re-record only when a change to the output is intended, and review
+the snapshot diff when you do.
+
+Also checked, without the snapshot:
+  - worked examples printed in the official specs, byte for byte
+  - the TOOLS 'command' enum equals the commands the code accepts
+  - every TOOLS message 'type' has a builder
+  - poll's wait logic, with a fake input handle (no MIDI port)
+  - a live send/poll loopback over 'Midi Through', when that port exists
+"""
+
+import asyncio
+import json
+import os
+import re
+import sys
+import threading
+import time
+from collections import deque
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+SNAPSHOT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "test_midi1_snapshot.json"
+)
+
+FAILURES: list[str] = []
+
+
+def check(name: str, condition: bool, detail: str = "") -> None:
+    if condition:
+        print(f"  ok    {name}")
+    else:
+        print(f"  FAIL  {name}{' — ' + detail if detail else ''}")
+        FAILURES.append(name)
+
+
+# --- Cases -----------------------------------------------------------------
+# (name, message dict). A case whose name starts with "err:" must raise; its
+# exception type is snapshotted. Every other case must build.
+
+TC = {"hours": 1, "minutes": 37, "seconds": 52, "frames": 16}  # RP-004/008 example
+
+TUNING_NOTES = [
+    {"no_change": True} if k % 3 == 0 else {"semitone": k, "cents": (k * 7) % 100}
+    for k in range(128)
+]
+
+CASES: list[tuple[str, dict]] = [
+    # Channel Voice
+    ("note_on", {"type": "note_on", "channel": 3, "note": 60, "velocity": 100}),
+    ("note_on default velocity", {"type": "note_on", "note": 61}),
+    ("note_on with time", {"type": "note_on", "note": 62, "velocity": 1, "time": 480}),
+    ("note_off", {"type": "note_off", "channel": 15, "note": 60, "velocity": 40}),
+    ("note_off default velocity", {"type": "note_off", "note": 60}),
+    ("control_change", {"type": "control_change", "channel": 1, "control": 7, "value": 100}),
+    ("program_change", {"type": "program_change", "channel": 9, "program": 127}),
+    ("pitchwheel min", {"type": "pitchwheel", "pitch": -8192}),
+    ("pitchwheel max", {"type": "pitchwheel", "pitch": 8191}),
+    ("pitchwheel default", {"type": "pitchwheel"}),
+    ("aftertouch", {"type": "aftertouch", "channel": 2, "value": 90}),
+    ("polytouch", {"type": "polytouch", "channel": 2, "note": 64, "value": 33}),
+    # Channel Mode
+    *[(f"channel_mode {c}", {"type": "channel_mode", "command": c, "channel": 4})
+      for c in ("all_sound_off", "reset_all_controllers", "all_notes_off",
+                "omni_off", "omni_on", "poly_on")],
+    ("channel_mode local_control on", {"type": "channel_mode", "command": "local_control", "on": True}),
+    ("channel_mode local_control off", {"type": "channel_mode", "command": "local_control", "on": False}),
+    ("channel_mode mono_on 0", {"type": "channel_mode", "command": "mono_on", "channel_count": 0}),
+    ("channel_mode mono_on 4", {"type": "channel_mode", "command": "mono_on", "channel_count": 4}),
+    # System Common / Real-Time
+    ("quarter_frame", {"type": "quarter_frame", "frame_type": 7, "frame_value": 6}),
+    ("songpos", {"type": "songpos", "pos": 16383}),
+    ("songpos default", {"type": "songpos"}),
+    ("song_select", {"type": "song_select", "song": 5}),
+    ("tune_request", {"type": "tune_request"}),
+    *[(t, {"type": t}) for t in ("clock", "start", "stop", "continue", "active_sensing", "reset")],
+    # SysEx
+    ("sysex", {"type": "sysex", "data": [0x41, 0x10, 0x42, 0x12, 0x7F]}),
+    ("sysex empty", {"type": "sysex", "data": []}),
+    # MTC
+    *[(f"mtc_full {fr}", {"type": "mtc_full", **TC, "frame_rate": fr})
+      for fr in ("24", "25", "30drop", "30nondrop")],
+    ("mtc_full device_id", {"type": "mtc_full", **TC, "frame_rate": "25", "device_id": 5}),
+    ("mtc_nak", {"type": "mtc_nak"}),
+    ("mtc_nak device packet", {"type": "mtc_nak", "device_id": 3, "packet_number": 9}),
+    ("mtc_quarter_frame_sequence forward", {"type": "mtc_quarter_frame_sequence", **TC, "frame_rate": "30nondrop"}),
+    ("mtc_quarter_frame_sequence reverse", {"type": "mtc_quarter_frame_sequence", **TC, "frame_rate": "30nondrop", "direction": "reverse", "time": 12}),
+    # RPN / NRPN
+    *[(f"rpn {p}", {"type": "rpn", "parameter": p, "value": 300, "channel": 1})
+      for p in ("pitch_bend_sensitivity", "fine_tuning", "coarse_tuning",
+                "tuning_program_select", "tuning_bank_select")],
+    ("rpn mpe_configuration", {"type": "rpn", "parameter": "mpe_configuration", "value": 7, "msb_only": True}),
+    ("rpn parameter_number", {"type": "rpn", "parameter_number": 5, "value": 64, "msb_only": True, "time": 3}),
+    ("nrpn", {"type": "nrpn", "parameter_number": 0x1234, "value": 16383, "channel": 15}),
+    ("nrpn msb_only", {"type": "nrpn", "parameter_number": 1, "value": 127, "msb_only": True}),
+    # MMC: no-data transport commands
+    *[(f"mmc {c}", {"type": "mmc", "command": c})
+      for c in ("stop", "play", "deferred_play", "fast_forward", "rewind",
+                "record_strobe", "record_exit", "record_pause", "pause", "eject",
+                "chase", "command_error_reset", "mmc_reset")],
+    ("mmc stop device_id", {"type": "mmc", "command": "stop", "device_id": 2}),
+    # MMC: commands with data
+    ("mmc locate", {"type": "mmc", "command": "locate", **TC, "subframes": 50, "frame_rate": "30drop"}),
+    ("mmc step forward", {"type": "mmc", "command": "step", "quantity": 5}),
+    ("mmc step reverse", {"type": "mmc", "command": "step", "quantity": 63, "reverse": True}),
+    ("mmc assign_system_master", {"type": "mmc", "command": "assign_system_master", "target_device_id": 4}),
+    *[(f"mmc generator_command {a}", {"type": "mmc", "command": "generator_command", "action": a})
+      for a in ("stop", "run", "copy_jam")],
+    *[(f"mmc midi_time_code_command {a}", {"type": "mmc", "command": "midi_time_code_command", "action": a})
+      for a in ("off", "follow")],
+    *[(f"mmc {c} speed {s}{' rev' if r else ''}", {"type": "mmc", "command": c, "speed": s, "reverse": r})
+      for c in ("variable_play", "search", "shuttle", "deferred_variable_play", "record_strobe_variable")
+      for s, r in ((1.0, False), (0.5, True), (100.25, False))],
+    ("mmc variable_play speed 0", {"type": "mmc", "command": "variable_play", "speed": 0}),
+    ("mmc wait", {"type": "mmc", "command": "wait", "device_id": 9}),
+    ("mmc resume", {"type": "mmc", "command": "resume", "device_id": 9}),
+    ("mmc drop_frame_adjust", {"type": "mmc", "command": "drop_frame_adjust", "name": "gp3"}),
+    ("mmc move", {"type": "mmc", "command": "move", "destination": "gp0", "source": "actual_offset"}),
+    ("mmc add", {"type": "mmc", "command": "add", "destination": "gp1", "source_1": "gp2", "source_2": "selected_time_code"}),
+    ("mmc subtract", {"type": "mmc", "command": "subtract", "destination": "gp1", "source_1": "gp1", "source_2": "gp7"}),
+    ("mmc group assign", {"type": "mmc", "command": "group", "action": "assign", "group": 3, "device_ids": [1, 2, 5]}),
+    ("mmc group dis_assign all", {"type": "mmc", "command": "group", "action": "dis_assign", "group": 0x7F, "device_ids": [0x7F]}),
+    ("mmc procedure assemble", {"type": "mmc", "command": "procedure", "action": "assemble", "procedure": 2,
+                                "commands": [{"type": "mmc", "command": "stop"},
+                                             {"type": "mmc", "command": "locate", **TC, "subframes": 0, "frame_rate": "25"}]}),
+    *[(f"mmc procedure {a}", {"type": "mmc", "command": "procedure", "action": a, "procedure": 2})
+      for a in ("delete", "set", "execute")],
+    ("mmc procedure delete all", {"type": "mmc", "command": "procedure", "action": "delete", "procedure": 0x7F}),
+    ("mmc event define", {"type": "mmc", "command": "event", "action": "define", "event": 1,
+                          "direction": "both", "all_speeds": True, "non_delete": True,
+                          "trigger_source": "selected_time_code", "name": "gp4",
+                          "trigger_command": {"type": "mmc", "command": "play"}}),
+    ("mmc event define forward", {"type": "mmc", "command": "event", "action": "define", "event": 3,
+                                  "direction": "forward", "trigger_source": "midi_time_code_input",
+                                  "name": "gp0", "trigger_command": {"type": "mmc", "command": "stop"}}),
+    *[(f"mmc event {a}", {"type": "mmc", "command": "event", "action": a, "event": 1})
+      for a in ("delete", "set", "test")],
+    ("mmc read", {"type": "mmc", "command": "read", "names": ["selected_time_code", "track_mute"]}),
+    ("mmc write", {"type": "mmc", "command": "write", "fields": [
+        {"name": "gp0", **TC, "frame_rate": "30nondrop", "subframes": 12},
+        {"name": "generator_time_code", "hours": 0, "minutes": 0, "seconds": 1, "frames": 2,
+         "frame_rate": "24", "use_status_byte": True, "estimated": True, "no_time_code": True,
+         "color_frame": True, "blank": True, "negative": True}]}),
+    ("mmc masked_write", {"type": "mmc", "command": "masked_write", "fields": [
+        {"name": "track_mute", "byte_number": 0, "mask": 0x7F, "data": 0x15},
+        {"name": "track_record_ready", "byte_number": 2, "mask": 0x01, "data": 0x01}]}),
+    ("mmc update begin", {"type": "mmc", "command": "update", "action": "begin", "names": ["gp0", "track_mute"]}),
+    ("mmc update end", {"type": "mmc", "command": "update", "action": "end", "names": ["gp0"]}),
+    ("mmc update end all", {"type": "mmc", "command": "update", "action": "end", "names": ["all"]}),
+    # MSC
+    *[(f"msc {c}", {"type": "msc", "command_format": "lighting", "command": c})
+      for c in ("go", "stop", "resume", "all_off", "restore", "reset", "go_off")],
+    ("msc go cue list path", {"type": "msc", "command_format": "sound", "command": "go",
+                              "q_number": "235.6", "q_list": "36.6", "q_path": "59"}),
+    ("msc go cue number", {"type": "msc", "command_format": "all_types", "command": "go", "q_number": "1"}),
+    ("msc command_format_raw", {"type": "msc", "command_format_raw": 0x11, "command": "stop", "device_id": 3}),
+    ("msc load", {"type": "msc", "command_format": "video", "command": "load", "q_number": "12", "q_list": "3"}),
+    ("msc timed_go", {"type": "msc", "command_format": "machinery", "command": "timed_go",
+                      **TC, "fractional_frames": 40, "frame_rate": "30nondrop", "q_number": "7"}),
+    ("msc set", {"type": "msc", "command_format": "lighting", "command": "set",
+                 "control_number": 300, "control_value": 16000}),
+    ("msc set with time", {"type": "msc", "command_format": "lighting", "command": "set",
+                           "control_number": 1, "control_value": 2, **TC,
+                           "fractional_frames": 5, "frame_rate": "25"}),
+    ("msc fire", {"type": "msc", "command_format": "pyro", "command": "fire", "macro_number": 100}),
+    *[(f"msc format {f}", {"type": "msc", "command_format": f, "command": "go"})
+      for f in ("projection", "process_control")],
+    # General MIDI, Device Inquiry, Device Control
+    ("gm_system on", {"type": "gm_system", "command": "on"}),
+    ("gm_system off", {"type": "gm_system", "command": "off", "device_id": 16}),
+    ("device_inquiry request", {"type": "device_inquiry", "command": "request"}),
+    ("device_inquiry reply", {"type": "device_inquiry", "command": "reply", "device_id": 0x10,
+                              "manufacturer_id": 0x41, "device_family_code": 0x0123,
+                              "device_family_member_code": 300, "software_revision": [1, 2, 3, 4]}),
+    ("device_inquiry reply extended id", {"type": "device_inquiry", "command": "reply",
+                                          "manufacturer_id": [0, 0x20, 0x6B], "device_family_code": 2,
+                                          "device_family_member_code": 3, "software_revision": [0, 0, 0, 1]}),
+    ("device_control master_volume", {"type": "device_control", "command": "master_volume", "value": 16383}),
+    ("device_control master_balance", {"type": "device_control", "command": "master_balance", "value": 8192, "device_id": 1}),
+    # MIDI Tuning
+    ("midi_tuning bulk_dump_request", {"type": "midi_tuning", "command": "bulk_dump_request", "tuning_program": 3}),
+    ("midi_tuning bulk_dump_reply", {"type": "midi_tuning", "command": "bulk_dump_reply", "tuning_program": 3,
+                                     "tuning_name": "Just C", "notes": TUNING_NOTES}),
+    ("midi_tuning note_change", {"type": "midi_tuning", "command": "note_change", "tuning_program": 0,
+                                 "changes": [{"key": 69, "semitone": 69, "cents": 0},
+                                             {"key": 70, "semitone": 70, "cents": 99.99},
+                                             {"key": 71, "no_change": True}]}),
+    # Notation
+    *[(f"notation bar_marker {b}", {"type": "notation", "command": "bar_marker", "bar_number": b})
+      for b in (-8192, 0, 1, 8191)],
+    ("notation time_signature_immediate", {"type": "notation", "command": "time_signature_immediate",
+                                           "numerator": 6, "denominator": 8, "clocks_per_click": 36,
+                                           "notated_32nd_notes_per_beat": 8}),
+    ("notation time_signature_delayed compound", {"type": "notation", "command": "time_signature_delayed",
+                                                  "numerator": 3, "denominator": 4, "clocks_per_click": 24,
+                                                  "notated_32nd_notes_per_beat": 8,
+                                                  "compound": [{"numerator": 2, "denominator": 8},
+                                                               {"numerator": 5, "denominator": 16}]}),
+    # MTC Cueing, real time
+    ("mtc_cueing special_system_stop", {"type": "mtc_cueing", "command": "special_system_stop"}),
+    *[(f"mtc_cueing {c}", {"type": "mtc_cueing", "command": c, "event_number": 300})
+      for c in ("punch_in", "punch_out", "event_start", "event_stop", "cue_point")],
+    *[(f"mtc_cueing {c} message", {"type": "mtc_cueing", "command": c, "event_number": 1,
+                                   "additional_info_message": {"type": "note_on", "channel": 1, "note": 70, "velocity": 127}})
+      for c in ("event_start_with_info", "event_stop_with_info", "cue_point_with_info")],
+    ("mtc_cueing cue_point_with_info bytes", {"type": "mtc_cueing", "command": "cue_point_with_info",
+                                             "event_number": 2, "additional_info_bytes": [0x91, 0x46, 0x7F]}),
+    ("mtc_cueing event_name", {"type": "mtc_cueing", "command": "event_name", "event_number": 4, "event_name": "Hit"}),
+    # MTC Cueing, non-real time
+    *[(f"mtc_cueing_nrt {c}", {"type": "mtc_cueing_nrt", "command": c})
+      for c in ("special_enable_event_list", "special_disable_event_list",
+                "special_clear_event_list", "special_system_stop")],
+    *[(f"mtc_cueing_nrt {c}", {"type": "mtc_cueing_nrt", "command": c, **TC,
+                               "fractional_frames": 20, "frame_rate": "25"})
+      for c in ("special_time_code_offset", "special_event_list_request")],
+    *[(f"mtc_cueing_nrt {c}", {"type": "mtc_cueing_nrt", "command": c, **TC, "fractional_frames": 0,
+                               "frame_rate": "30drop", "event_number": 1000})
+      for c in ("punch_in", "punch_out", "delete_punch_in", "delete_punch_out",
+                "event_start", "event_stop", "delete_event_start", "delete_event_stop",
+                "cue_point", "delete_cue_point")],
+    *[(f"mtc_cueing_nrt {c}", {"type": "mtc_cueing_nrt", "command": c, **TC, "fractional_frames": 1,
+                               "frame_rate": "24", "event_number": 5,
+                               "additional_info_bytes": [0xB0, 0x07, 0x64]})
+      for c in ("event_start_with_info", "event_stop_with_info", "cue_point_with_info")],
+    ("mtc_cueing_nrt event_name", {"type": "mtc_cueing_nrt", "command": "event_name", **TC,
+                                   "fractional_frames": 0, "frame_rate": "25", "event_number": 6,
+                                   "event_name": "Intro"}),
+    # File Dump
+    ("file_dump request", {"type": "file_dump", "command": "request", "device_id": 1,
+                           "source_device_id": 2, "file_type": "MIDI", "filename": "song.mid"}),
+    ("file_dump header", {"type": "file_dump", "command": "header", "device_id": 1, "source_device_id": 2,
+                          "file_type": "BIN ", "filename": "a.bin", "length": 0x0ABCDEF}),
+    ("file_dump header unknown length", {"type": "file_dump", "command": "header", "device_id": 1,
+                                         "source_device_id": 2, "file_type": "TEXT", "length": 0}),
+    ("file_dump data_packet", {"type": "file_dump", "command": "data_packet", "device_id": 1, "packet_number": 3,
+                               "stored_bytes": [0x00, 0xFF, 0x80, 0x7F, 0x01, 0xFE, 0x55, 0xAA, 0x10, 0x90]}),
+    *[(f"file_dump {c}", {"type": "file_dump", "command": c, "device_id": 1, "packet_number": 4})
+      for c in ("ack", "nak")],
+    *[(f"file_dump {c}", {"type": "file_dump", "command": c, "device_id": 1})
+      for c in ("eof", "wait", "cancel")],
+    # Errors
+    ("err: unknown type", {"type": "bogus"}),
+    ("err: missing type", {}),
+    ("err: note_on missing note", {"type": "note_on"}),
+    ("err: note_on velocity 128", {"type": "note_on", "note": 1, "velocity": 128}),
+    ("err: sysex byte 128", {"type": "sysex", "data": [128]}),
+    ("err: sysex missing data", {"type": "sysex"}),
+    ("err: mtc_full missing frame_rate", {"type": "mtc_full", **TC}),
+    ("err: mtc_full minutes 60", {"type": "mtc_full", **TC, "minutes": 60, "frame_rate": "25"}),
+    ("err: mtc_full hours 24", {"type": "mtc_full", **TC, "hours": 24, "frame_rate": "25"}),
+    ("err: mtc_full bad frame_rate", {"type": "mtc_full", **TC, "frame_rate": "29.97"}),
+    ("err: mmc missing command", {"type": "mmc"}),
+    ("err: mmc bad command", {"type": "mmc", "command": "fly"}),
+    ("err: mmc device_id 128", {"type": "mmc", "command": "stop", "device_id": 128}),
+    ("err: mmc write read-only field", {"type": "mmc", "command": "write", "fields": [
+        {"name": "actual_offset", **TC, "frame_rate": "25"}]}),
+    ("err: mmc masked_write time code field", {"type": "mmc", "command": "masked_write", "fields": [
+        {"name": "gp0", "byte_number": 0, "mask": 1, "data": 1}]}),
+    ("err: mmc update begin all", {"type": "mmc", "command": "update", "action": "begin", "names": ["all"]}),
+    ("err: mmc group assign 7F", {"type": "mmc", "command": "group", "action": "assign", "group": 0x7F, "device_ids": [1]}),
+    ("err: mmc procedure execute 7F", {"type": "mmc", "command": "procedure", "action": "execute", "procedure": 0x7F}),
+    ("err: mmc procedure nested assemble", {"type": "mmc", "command": "procedure", "action": "assemble", "procedure": 1,
+                                            "commands": [{"type": "mmc", "command": "procedure", "action": "assemble",
+                                                          "procedure": 2, "commands": [{"type": "mmc", "command": "stop"}]}]}),
+    ("err: mmc speed negative", {"type": "mmc", "command": "shuttle", "speed": -1}),
+    ("err: msc both formats", {"type": "msc", "command_format": "lighting", "command_format_raw": 1, "command": "go"}),
+    ("err: msc q_list without q_number", {"type": "msc", "command_format": "lighting", "command": "go", "q_list": "1"}),
+    ("err: msc set partial time", {"type": "msc", "command_format": "lighting", "command": "set",
+                                   "control_number": 1, "control_value": 2, "hours": 1}),
+    ("err: device_inquiry mfr 0 as int", {"type": "device_inquiry", "command": "reply", "manufacturer_id": 0,
+                                          "device_family_code": 1, "device_family_member_code": 1,
+                                          "software_revision": [0, 0, 0, 0]}),
+    ("err: midi_tuning 127 notes", {"type": "midi_tuning", "command": "bulk_dump_reply", "tuning_program": 0,
+                                    "notes": TUNING_NOTES[:127]}),
+    ("err: midi_tuning cents 100", {"type": "midi_tuning", "command": "note_change", "tuning_program": 0,
+                                    "changes": [{"key": 1, "semitone": 1, "cents": 100}]}),
+    ("err: notation denominator 3", {"type": "notation", "command": "time_signature_immediate", "numerator": 3,
+                                     "denominator": 3, "clocks_per_click": 24, "notated_32nd_notes_per_beat": 8}),
+    ("err: mtc_cueing both info sources", {"type": "mtc_cueing", "command": "cue_point_with_info", "event_number": 1,
+                                           "additional_info_bytes": [1],
+                                           "additional_info_message": {"type": "clock"}}),
+    ("err: file_dump missing device_id", {"type": "file_dump", "command": "eof"}),
+    ("err: file_dump source 127", {"type": "file_dump", "command": "request", "device_id": 1,
+                                   "source_device_id": 127, "file_type": "MIDI"}),
+    ("err: file_dump file_type length", {"type": "file_dump", "command": "request", "device_id": 1,
+                                         "source_device_id": 1, "file_type": "MID"}),
+    ("err: rpn both parameter fields", {"type": "rpn", "parameter": "fine_tuning", "parameter_number": 1, "value": 1}),
+    ("err: rpn msb_only value 128", {"type": "rpn", "parameter": "fine_tuning", "value": 128, "msb_only": True}),
+    ("err: quarter_frame_sequence bad direction", {"type": "mtc_quarter_frame_sequence", **TC,
+                                                   "frame_rate": "25", "direction": "sideways"}),
+]
+
+MMC_RESPONSES: list[tuple[str, list[int]]] = [
+    ("selected_time_code", [0xF0, 0x7F, 0x01, 0x07, 0x01, 0x61, 0x25, 0x34, 0x10, 0x00, 0xF7]),
+    ("gp0 status byte", [0xF0, 0x7F, 0x01, 0x07, 0x08, 0x20, 0x40, 0x40, 0x60, 0x48, 0xF7]),
+    ("track_mute bitmap", [0xF0, 0x7F, 0x7F, 0x07, 0x62, 0x02, 0x05, 0x40, 0xF7]),
+    ("response_error", [0xF0, 0x7F, 0x01, 0x07, 0x42, 0x02, 0x01, 0x4C, 0xF7]),
+    ("unknown field", [0xF0, 0x7F, 0x01, 0x07, 0x45, 0x00, 0xF7]),
+    ("err not mmc response", [0xF0, 0x7F, 0x01, 0x06, 0x01, 0xF7]),
+    ("err missing F7", [0xF0, 0x7F, 0x01, 0x07, 0x01, 0x00]),
+    ("err wrong length", [0xF0, 0x7F, 0x01, 0x07, 0x01, 0x00, 0x00, 0xF7]),
+    ("err bitmap count mismatch", [0xF0, 0x7F, 0x01, 0x07, 0x62, 0x03, 0x05, 0xF7]),
+    ("err empty", []),
+]
+
+META_CASES: list[tuple[str, dict]] = [
+    ("track_name", {"type": "track_name", "name": "Piano"}),
+    ("set_tempo bpm", {"type": "set_tempo", "bpm": 120}),
+    ("set_tempo tempo", {"type": "set_tempo", "tempo": 400000, "time": 96}),
+    ("time_signature", {"type": "time_signature", "numerator": 7, "denominator": 8}),
+    ("key_signature", {"type": "key_signature", "key": "F#m"}),
+    ("smpte_offset", {"type": "smpte_offset", "frame_rate": 25, "hours": 1, "minutes": 2,
+                      "seconds": 3, "frames": 4, "sub_frames": 5}),
+    ("sequencer_specific", {"type": "sequencer_specific", "data": [0x41, 0x10]}),
+    ("end_of_track", {"type": "end_of_track"}),
+]
+
+
+# --- Snapshot ----------------------------------------------------------------
+
+def build_snapshot(midi1) -> dict:
+    out: dict = {"messages": {}, "mmc_responses": {}, "meta": {}}
+    for name, msg in CASES:
+        try:
+            built = midi1._build_message_sequence(dict(msg))
+            out["messages"][name] = [[m.hex(), m.time] for m in built]
+        except Exception as e:  # noqa: BLE001 - the type is what's recorded
+            out["messages"][name] = {"error": type(e).__name__}
+    for name, data in MMC_RESPONSES:
+        out["mmc_responses"][name] = json.loads(midi1._decode_mmc_response({"data": data}))
+    for name, msg in META_CASES:
+        m = midi1._build_meta_message(dict(msg))
+        out["meta"][name] = [bytes(m.bytes()).hex(" ").upper(), m.time]
+    return out
+
+
+def check_case_expectations(snapshot: dict) -> None:
+    """Every 'err:' case raises and every other case builds."""
+    wrong = [
+        name for name, _ in CASES
+        if isinstance(snapshot["messages"][name], dict) != name.startswith("err:")
+    ]
+    check("cases build or raise as named", not wrong, f"{wrong}")
+
+
+def compare_snapshot(current: dict, recorded: dict) -> None:
+    for section in ("messages", "mmc_responses", "meta"):
+        cur, rec = current[section], recorded.get(section, {})
+        changed = [k for k in cur if k in rec and cur[k] != rec[k]]
+        missing = [k for k in cur if k not in rec]
+        dropped = [k for k in rec if k not in cur]
+        detail = "; ".join(
+            f"{k}: recorded {rec[k]} != now {cur[k]}" for k in changed[:5]
+        )
+        check(f"snapshot {section}: {len(cur)} entries match", not changed, detail)
+        check(f"snapshot {section}: no unrecorded entries", not missing, f"{missing}")
+        check(f"snapshot {section}: no recorded entries dropped", not dropped, f"{dropped}")
+
+
+# --- Spec worked examples ------------------------------------------------------
+# Bytes printed in the official specs. Unlike the snapshot, these don't move
+# when the snapshot is re-recorded.
+
+SPEC_EXAMPLES: list[tuple[str, dict, list[str]]] = [
+    ("RP-004/008 quarter frames, 01:37:52:16 30fps non-drop",
+     {"type": "mtc_quarter_frame_sequence", **TC, "frame_rate": "30nondrop"},
+     ["F1 00", "F1 11", "F1 24", "F1 33", "F1 45", "F1 52", "F1 61", "F1 76"]),
+    ("MSC 1.0 cue 235.6 list 36.6 path 59",
+     {"type": "msc", "command_format": "sound", "command": "go",
+      "q_number": "235.6", "q_list": "36.6", "q_path": "59"},
+     ["F0 7F 7F 02 10 01 32 33 35 2E 36 00 33 36 2E 36 00 35 39 F7"]),
+    ("RP-013 p.39 GROUP dis-assign all devices from all groups",
+     {"type": "mmc", "command": "group", "action": "dis_assign", "group": 0x7F,
+      "device_ids": [0x7F]},
+     ["F0 7F 7F 06 52 03 01 7F 7F F7"]),
+    ("MTC spec additional info 91 46 7F nibblized",
+     {"type": "mtc_cueing", "command": "cue_point_with_info", "event_number": 0,
+      "additional_info_bytes": [0x91, 0x46, 0x7F]},
+     ["F0 7F 7F 05 0C 00 00 01 09 06 04 0F 07 F7"]),
+    ("MIDI Tuning 'Changing Tuning Programs' Bn 64 03 65 00 06 tt",
+     {"type": "rpn", "parameter": "tuning_program_select", "value": 5, "msb_only": True},
+     ["B0 64 03", "B0 65 00", "B0 06 05"]),
+    # Captured from real hardware, not printed in a spec.
+    ("Roland TR-8S Identity Reply (captured 2026-10-02)",
+     {"type": "device_inquiry", "command": "reply", "device_id": 0x10,
+      "manufacturer_id": 0x41, "device_family_code": 0x45 | (0x03 << 7),
+      "device_family_member_code": 0, "software_revision": [0, 3, 0, 0]},
+     ["F0 7E 10 06 02 41 45 03 00 00 00 03 00 00 F7"]),
+    ("Arturia KeyStep 37 Identity Reply, 3-byte manufacturer ID (captured 2026-10-02)",
+     {"type": "device_inquiry", "command": "reply", "device_id": 0x7F,
+      "manufacturer_id": [0x00, 0x20, 0x6B], "device_family_code": 0x02,
+      "device_family_member_code": 0x08, "software_revision": [0, 6, 1, 1]},
+     ["F0 7E 7F 06 02 00 20 6B 02 00 08 00 00 06 01 01 F7"]),
+]
+
+
+def check_spec_examples(midi1) -> None:
+    for name, msg, expected in SPEC_EXAMPLES:
+        got = [m.hex() for m in midi1._build_message_sequence(dict(msg))]
+        check(name, got == expected, f"got {got}")
+
+
+# --- Decoding --------------------------------------------------------------------
+
+# Bytes with two names decode to one of them.
+DECODE_ALIASES = {"mtc_nak": "file_dump"}
+
+# Multi-message types decode one wire message at a time.
+SEQUENCE_TYPES = {"rpn", "nrpn", "mtc_quarter_frame_sequence"}
+
+
+def check_round_trip(midi1) -> None:
+    """Every built wire message decodes to a dict that rebuilds to the same
+    bytes; every type that has a decoder decodes to itself."""
+    mismatched, decoded_as = [], {}
+    for name, msg in CASES:
+        if name.startswith("err:"):
+            continue
+        for wire in midi1._build_message_sequence(dict(msg)):
+            decoded = midi1._decode_message(wire)
+            rebuilt = midi1._build_message(dict(decoded))
+            if rebuilt.bytes() != wire.bytes():
+                mismatched.append(f"{name}: {decoded}")
+            decoded_as.setdefault(msg["type"], set()).add(decoded["type"])
+    check("round trip: decode then build gives the same bytes", not mismatched,
+          "; ".join(mismatched[:5]))
+
+    decodable = {t for kinds in decoded_as.values() for t in kinds}
+    partial = sorted(
+        t for t, kinds in decoded_as.items()
+        if t not in SEQUENCE_TYPES and DECODE_ALIASES.get(t, t) in decodable
+        and kinds != {DECODE_ALIASES.get(t, t)}
+    )
+    check("round trip: a type with a decoder always decodes to itself",
+          not partial, f"{[(t, sorted(decoded_as[t])) for t in partial]}")
+
+    raw = sorted(t for t, kinds in decoded_as.items()
+                 if kinds == {"sysex"} and t != "sysex")
+    check(f"round trip: all {len(decoded_as)} built types decode to a typed dict",
+          not raw, f"decoded as raw sysex: {raw}")
+
+    for kind in ("mmc", "msc"):
+        builders = set(getattr(midi1, f"_{kind.upper()}_DATA_BUILDERS"))
+        decoders = set(getattr(midi1, f"_{kind.upper()}_DATA_DECODERS"))
+        check(f"{kind}: every data builder has a decoder and vice versa",
+              builders == decoders,
+              f"no decoder: {sorted(builders - decoders)}; "
+              f"no builder: {sorted(decoders - builders)}")
+
+    for name, data in MMC_RESPONSES:
+        if name.startswith("err") or not data:
+            continue
+        got = midi1._decode_message(midi1.mido.Message("sysex", data=data[1:-1]))
+        action = json.loads(midi1._decode_mmc_response({"data": data}))
+        expected_response = {k: v for k, v in action.items() if k not in ("status", "device_id")}
+        check(f"receive decodes MMC Response: {name}",
+              got.get("type") == "mmc_response" and got.get("response") == expected_response,
+              f"got {got}")
+
+
+DEVICE_REPLIES = [
+    ("Roland TR-8S", [0x7E, 0x10, 0x06, 0x02, 0x41, 0x45, 0x03, 0x00, 0x00,
+                      0x00, 0x03, 0x00, 0x00],
+     {"type": "device_inquiry", "command": "reply", "device_id": 0x10,
+      "manufacturer_id": 0x41, "device_family_code": 0x1C5,
+      "device_family_member_code": 0, "software_revision": [0, 3, 0, 0]}),
+    ("Arturia KeyStep 37", [0x7E, 0x7F, 0x06, 0x02, 0x00, 0x20, 0x6B, 0x02, 0x00,
+                            0x08, 0x00, 0x00, 0x06, 0x01, 0x01],
+     {"type": "device_inquiry", "command": "reply", "device_id": 0x7F,
+      "manufacturer_id": [0x00, 0x20, 0x6B], "device_family_code": 2,
+      "device_family_member_code": 8, "software_revision": [0, 6, 1, 1]}),
+]
+
+
+def check_decode_edges(midi1) -> None:
+    """Wrong checksums are reported; malformed messages stay raw."""
+    def build(msg):
+        return list(midi1._build_message(msg).data)
+
+    def decode(data):
+        return midi1._decode_message(midi1.mido.Message("sysex", data=data))
+
+    for name, msg in (
+        ("midi_tuning bulk_dump_reply", dict(CASES)["midi_tuning bulk_dump_reply"]),
+        ("file_dump data_packet", dict(CASES)["file_dump data_packet"]),
+    ):
+        good = build(msg)
+        bad = good[:-1] + [good[-1] ^ 0x01]
+        d_good, d_bad = decode(good), decode(bad)
+        check(f"{name}: correct checksum decodes with checksum_ok true",
+              d_good.get("checksum_ok") is True, f"{d_good.get('checksum_ok')}")
+        same_fields = {k: v for k, v in d_bad.items() if k != "checksum_ok"} == \
+            {k: v for k, v in d_good.items() if k != "checksum_ok"}
+        check(f"{name}: wrong checksum decodes with checksum_ok false",
+              d_bad.get("checksum_ok") is False and same_fields, f"{d_bad.get('checksum_ok')}")
+
+    for name, data in (
+        ("truncated MTC Full", [0x7F, 0x7F, 0x01, 0x01, 0x61, 0x25]),
+        ("Identity Reply one byte short", [0x7E, 0x10, 0x06, 0x02, 0x41, 0x45, 0x03,
+                                           0x00, 0x00, 0x00, 0x03, 0x00]),
+        ("notation length byte wrong", [0x7F, 0x7F, 0x03, 0x02, 0x09, 0x04, 0x02, 0x18, 0x08]),
+        ("MTC User Bits (no decoder)", [0x7F, 0x7F, 0x01, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        ("manufacturer SysEx", [0x41, 0x10, 0x42, 0x12, 0x7F]),
+        ("minutes with a flag bit set", [0x7F, 0x7F, 0x01, 0x01, 0x61, 0x65, 0x34, 0x10]),
+    ):
+        got = decode(data)
+        check(f"malformed stays raw: {name}",
+              got == {"type": "sysex", "data": data}, f"got {got}")
+
+
+def check_stream_decoder(midi1) -> None:
+    """RPN/NRPN and Quarter Frame reassembly."""
+    M = midi1.mido.Message
+
+    def feed(msgs):
+        decoder = midi1._StreamDecoder()
+        return [c for c in (decoder.feed(m) for m in msgs) if c is not None]
+
+    def cc(control, value, channel=0):
+        return M("control_change", channel=channel, control=control, value=value)
+
+    wrong = []
+    for name, msg in CASES:
+        if name.startswith("err:") or msg["type"] not in SEQUENCE_TYPES:
+            continue
+        wire = midi1._build_message_sequence(dict(msg))
+        combined = feed(wire)
+        rebuilt = midi1._build_message_sequence(dict(combined[-1])) if combined else []
+        if [m.bytes() for m in rebuilt] != [m.bytes() for m in wire]:
+            wrong.append(f"{name}: {combined}")
+    check("stream: every rpn/nrpn/quarter frame case reassembles and rebuilds",
+          not wrong, "; ".join(wrong[:3]))
+
+    got = feed([cc(99, 0x24), cc(98, 0x34), cc(6, 0x40), cc(38, 0x05)])
+    check("stream: NRPN with MSB selected first (Hydrasynth order), 7- then 14-bit",
+          got == [
+              {"type": "nrpn", "channel": 0, "parameter_number": 0x1234, "value": 0x40, "msb_only": True},
+              {"type": "nrpn", "channel": 0, "parameter_number": 0x1234,
+               "value": (0x40 << 7) | 0x05, "msb_only": False},
+          ], f"{got}")
+
+    got = feed([cc(101, 0), cc(100, 0), cc(6, 2), cc(6, 12)])
+    check("stream: selection persists across data entries",
+          [c["value"] for c in got] == [2, 12]
+          and all(c.get("parameter") == "pitch_bend_sensitivity" for c in got), f"{got}")
+
+    got = feed([cc(99, 1, 0), cc(98, 2, 0), cc(99, 3, 1), cc(98, 4, 1),
+                cc(6, 9, 0), cc(6, 10, 1)])
+    check("stream: channels are tracked separately",
+          [(c["channel"], c["parameter_number"], c["value"]) for c in got]
+          == [(0, (1 << 7) | 2, 9), (1, (3 << 7) | 4, 10)], f"{got}")
+
+    check("stream: RPN Null ignores data entry",
+          feed([cc(101, 127), cc(100, 127), cc(6, 5)]) == [])
+    check("stream: Data Entry LSB with no MSB is ignored",
+          feed([cc(99, 1), cc(98, 2), cc(38, 5)]) == [])
+
+    def qf(**time):
+        return midi1._build_message_sequence(
+            {"type": "mtc_quarter_frame_sequence", "frame_rate": "25", **time})
+
+    a = qf(hours=1, minutes=2, seconds=3, frames=4)
+    b = qf(hours=1, minutes=2, seconds=3, frames=6)
+    got = feed(a[3:] + b + a)
+    check("stream: quarter frames joined mid-sequence complete on the next full run",
+          [(c["frames"], c["direction"]) for c in got] == [(6, "forward"), (4, "forward")],
+          f"{got}")
+    rev = qf(hours=0, minutes=59, seconds=58, frames=24, direction="reverse")
+    got = feed(rev)
+    check("stream: reverse quarter frames",
+          len(got) == 1 and got[0]["direction"] == "reverse" and got[0]["minutes"] == 59,
+          f"{got}")
+    check("stream: a missing quarter frame completes nothing",
+          feed(a[:5] + a[6:]) == [])
+
+
+def check_device_replies(midi1) -> None:
+    for device, data, expected in DEVICE_REPLIES:
+        got = midi1._decode_message(midi1.mido.Message("sysex", data=data))
+        check(f"decode {device} Identity Reply", got == expected, f"got {got}")
+
+
+# --- Schema consistency ---------------------------------------------------------
+
+COMMAND_TYPES = ("mmc", "msc", "gm_system", "device_inquiry", "device_control",
+                 "channel_mode", "midi_tuning", "notation", "mtc_cueing",
+                 "mtc_cueing_nrt", "file_dump")
+
+
+def check_schema(midi1) -> None:
+    props = midi1.TOOLS[0]["input_schema"]["properties"]["message"]["properties"]
+    accepted: set = set()
+    for t in COMMAND_TYPES:
+        msg = {"type": t, "command": "__bogus__", "device_id": 1,
+               "command_format": "lighting", "tuning_program": 0, "value": 0}
+        try:
+            midi1._build_message(msg)
+            check(f"{t} rejects an unknown command", False)
+        except ValueError as e:
+            found = re.search(r"must be one of (\[.*?\])", str(e))
+            accepted |= set(json.loads(found.group(1).replace("'", '"')))
+    enum = set(props["command"]["enum"])
+    check("command enum == commands the code accepts",
+          enum == accepted,
+          f"not in enum: {sorted(accepted - enum)}; not accepted: {sorted(enum - accepted)}")
+    no_builder = []
+    for t in props["type"]["enum"]:
+        try:
+            midi1._build_message_sequence({"type": t})
+        except Exception as e:  # noqa: BLE001
+            if "unknown message type" in str(e):
+                no_builder.append(t)
+    check("every type in the schema has a builder", not no_builder, f"{no_builder}")
+
+    mmc = set(midi1._COMMANDS["mmc"])
+    no_data = set(midi1._MMC_NO_DATA_COMMANDS) | {"wait", "resume"}
+    with_data = set(midi1._MMC_DATA_BUILDERS)
+    check("mmc: every command is either no-data or has a data builder",
+          mmc == no_data | with_data and not (no_data & with_data),
+          f"neither: {sorted(mmc - no_data - with_data)}; "
+          f"both: {sorted(no_data & with_data)}; "
+          f"unknown builders: {sorted(with_data - mmc)}")
+
+    msc = set(midi1._COMMANDS["msc"])
+    no_data = set(midi1._MSC_NO_DATA_COMMANDS)
+    with_data = set(midi1._MSC_DATA_BUILDERS)
+    check("msc: every command is either no-data or has a data builder",
+          msc == no_data | with_data and not (no_data & with_data),
+          f"neither: {sorted(msc - no_data - with_data)}; "
+          f"both: {sorted(no_data & with_data)}; "
+          f"unknown builders: {sorted(with_data - msc)}")
+
+
+# --- poll wait logic (fake handle, no port) -------------------------------------
+
+class _FakePort:
+    def close(self) -> None:
+        pass
+
+
+def _fake_input(midi1, name: str):
+    buf, event = deque(maxlen=10), threading.Event()
+    midi1._OPEN_PORTS[name] = ("input", _FakePort())
+    midi1._INPUT_BUFFERS[name] = buf
+    midi1._INPUT_EVENTS[name] = event
+    return buf, event
+
+
+def _timed_poll(midi1, name: str, timeout: float):
+    t0 = time.monotonic()
+    result = json.loads(midi1._poll({"handle": name, "timeout_seconds": timeout}))
+    return time.monotonic() - t0, result["messages"]
+
+
+def check_poll_wait(midi1) -> None:
+    buf, event = _fake_input(midi1, "fake-stale")
+    event.set()
+    elapsed, msgs = _timed_poll(midi1, "fake-stale", 0.5)
+    check("poll: leftover event doesn't end the wait early",
+          elapsed >= 0.45 and msgs == [], f"{elapsed:.3f}s")
+
+    buf, event = _fake_input(midi1, "fake-arrive")
+
+    def deliver() -> None:
+        time.sleep(0.2)
+        buf.append((time.time(), midi1.mido.Message("clock")))
+        event.set()
+
+    threading.Thread(target=deliver).start()
+    elapsed, msgs = _timed_poll(midi1, "fake-arrive", 2.0)
+    check("poll: message arriving mid-wait returns promptly",
+          0.15 <= elapsed < 1.0 and len(msgs) == 1, f"{elapsed:.3f}s, {len(msgs)} msgs")
+
+    buf, event = _fake_input(midi1, "fake-ready")
+    buf.append((time.time(), midi1.mido.Message("clock")))
+    elapsed, msgs = _timed_poll(midi1, "fake-ready", 2.0)
+    check("poll: buffered message returns without waiting",
+          elapsed < 0.1 and len(msgs) == 1, f"{elapsed:.3f}s")
+
+    _fake_input(midi1, "fake-zero")
+    elapsed, msgs = _timed_poll(midi1, "fake-zero", 0)
+    check("poll: timeout 0 returns at once", elapsed < 0.1 and msgs == [], f"{elapsed:.3f}s")
+
+    buf, event = _fake_input(midi1, "fake-decode")
+    midi1._STREAM_DECODERS["fake-decode"] = midi1._StreamDecoder()
+    M = midi1.mido.Message
+    for m in (M("sysex", data=DEVICE_REPLIES[0][1]),
+              M("control_change", control=99, value=0x24),
+              M("control_change", control=98, value=0x34),
+              M("control_change", control=6, value=0x40),
+              M("control_change", control=38, value=0x05)):
+        buf.append((time.time(), m))
+    _, msgs = _timed_poll(midi1, "fake-decode", 0)
+    check("poll: entries carry message, hex and decoded",
+          all({"received_at", "message", "hex", "decoded"} <= set(m) for m in msgs)
+          and msgs[0]["decoded"] == DEVICE_REPLIES[0][2]
+          and msgs[0]["hex"] == "F0 7E 10 06 02 41 45 03 00 00 00 03 00 00 F7",
+          f"{msgs[:1]}")
+    check("poll: NRPN data entries carry the completed change",
+          [m.get("completes", {}).get("value") for m in msgs]
+          == [None, None, None, 0x40, (0x40 << 7) | 0x05], f"{[m.get('completes') for m in msgs]}")
+
+    for name in ("fake-stale", "fake-arrive", "fake-ready", "fake-zero", "fake-decode"):
+        midi1._close({"handle": name})
+
+
+# --- Live loopback (only when 'Midi Through' exists) ----------------------------
+
+def check_live_loopback(midi1) -> None:
+    def call(**kw) -> dict:
+        return json.loads(asyncio.run(midi1.execute("midi1", kw)))
+
+    devices = call(action="list_devices")
+    out_port = next((p for p in devices.get("outputs", []) if "Midi Through" in p), None)
+    in_port = next((p for p in devices.get("inputs", []) if "Midi Through" in p), None)
+    if not (out_port and in_port):
+        print("  skip  live loopback (no 'Midi Through' port)")
+        return
+    i = call(action="open", port_name=in_port, direction="input")
+    o = call(action="open", port_name=out_port, direction="output")
+    try:
+        sent = [
+            {"type": "note_on", "note": 60, "velocity": 64},
+            {"type": "sysex", "data": [1, 2, 3]},
+            {"type": "rpn", "parameter": "pitch_bend_sensitivity", "value": 2, "msb_only": True},
+        ]
+        expected = []
+        for m in sent:
+            r = call(action="send", handle=o["handle"], message=m)
+            expected += r["sent"] if isinstance(r["sent"], list) else [r["sent"]]
+        got = call(action="poll", handle=i["handle"], timeout_seconds=2)
+        received = [m["message"] for m in got["messages"]]
+        check("live loopback: everything sent comes back", received == expected,
+              f"sent {expected}, got {received}")
+        t0 = time.monotonic()
+        empty = call(action="poll", handle=i["handle"], timeout_seconds=1)
+        elapsed = time.monotonic() - t0
+        check("live loopback: empty poll waits its timeout",
+              empty["messages"] == [] and elapsed >= 0.95, f"{elapsed:.3f}s")
+    finally:
+        call(action="close", handle=o["handle"])
+        call(action="close", handle=i["handle"])
+
+
+def main() -> int:
+    from core import midi1
+
+    if midi1.mido is None:
+        print("mido is not installed; nothing to test")
+        return 1
+
+    current = build_snapshot(midi1)
+    if "--record" in sys.argv[1:]:
+        with open(SNAPSHOT_PATH, "w") as f:
+            json.dump(current, f, indent=1, sort_keys=True)
+            f.write("\n")
+        counts = {k: len(v) for k, v in current.items()}
+        print(f"recorded {SNAPSHOT_PATH}: {counts}")
+
+    print("\ncases")
+    check_case_expectations(current)
+
+    print("\nsnapshot")
+    if not os.path.exists(SNAPSHOT_PATH):
+        check("snapshot file exists (run with --record)", False, SNAPSHOT_PATH)
+    else:
+        with open(SNAPSHOT_PATH) as f:
+            compare_snapshot(current, json.load(f))
+
+    print("\nspec examples")
+    check_spec_examples(midi1)
+
+    print("\ndecoding")
+    check_round_trip(midi1)
+    check_decode_edges(midi1)
+    check_stream_decoder(midi1)
+    check_device_replies(midi1)
+
+    print("\nschema")
+    check_schema(midi1)
+
+    print("\npoll wait")
+    check_poll_wait(midi1)
+
+    print("\nlive")
+    check_live_loopback(midi1)
+
+    total = len(FAILURES)
+    print(f"\n{'FAILED' if total else 'all checks passed'}"
+          + (f": {total} failure(s)" if total else ""))
+    return 1 if total else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

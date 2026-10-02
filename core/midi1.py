@@ -1,182 +1,50 @@
-"""MIDI 1.0 tool — device discovery, port I/O, and channel/system messages.
+"""MIDI 1.0 tool: device discovery, port I/O, typed message building, and
+.mid/.syx files.
 
-Built via `mido[ports-rtmidi]` (python-rtmidi backend). This started as the
-shared discovery surface for both a MIDI 1.0 and a MIDI 2.0 tool; the MIDI
-2.0 tool has since been removed from this project and moved to its own
-standalone project for further work.
+Built on mido with the python-rtmidi backend. If mido isn't installed, the
+module still imports and every action returns an install hint.
 
-Actions:
-  - list_devices : enumerate input/output port names
-  - open         : open a named port (as "input" or "output"), returns a
-                   handle string for later actions
-  - close        : close a previously opened handle
-  - send         : send a channel or system message, or a typed sysex
-                   convenience message, on an open output handle. Channel
-                   messages: note_on, note_off, control_change,
-                   program_change, pitchwheel, aftertouch (channel
-                   pressure), polytouch (poly key pressure), and
-                   channel_mode (a typed wrapper around Control Change's
-                   own controller numbers 120-127 — see the inline
-                   comment in `_build_message` for the full command list).
-                   System Common:
-                   quarter_frame, songpos, song_select, tune_request.
-                   System Real-Time: clock, start, stop, continue,
-                   active_sensing, reset. System Exclusive: sysex
-                   (arbitrary-payload — see the SysEx note below), plus
-                   twelve typed convenience messages built on top of that
-                   same sysex mechanism: mtc_full (MIDI Time Code Full
-                   Message), mmc (MIDI Machine Control transport commands),
-                   msc (MIDI Show Control General Category commands),
-                   gm_system (General MIDI System On/Off), device_inquiry
-                   (Identity Request/Reply), device_control (Master
-                   Volume/Balance), midi_tuning (Bulk Tuning Dump Request/
-                   Reply, Single Note Tuning Change), notation (Bar
-                   Marker, Time Signature Immediate/Delayed), and
-                   mtc_cueing (MTC Real-Time Cueing Set-Up messages), and
-                   mtc_cueing_nrt (the fuller Non-Real-Time Cueing
-                   Set-Up messages, incl. Delete variants and 5 Special
-                   sub-types), file_dump (transfer an arbitrary file
-                   — request/header/data_packet plus the ack/nak/cancel/
-                   wait/eof handshake flags), and mtc_nak (MTC "sync
-                   dropped" notification — a small dedicated alias for
-                   the same Non-Real-Time NAK handshake file_dump's own
-                   'nak' command already builds, without file_dump's
-                   unrelated required 'packet_number') — see each one's
-                   own inline comment in `_build_message` further down in
-                   this file for full field details. Three more typed
-                   convenience types, rpn and nrpn (Registered/Non-
-                   Registered Parameter Numbers) and mtc_quarter_frame_
-                   sequence (the 8-message Quarter Frame encoding of one
-                   SMPTE time — same information as mtc_full, different
-                   wire format, for receivers that only parse Quarter
-                   Frame), are NOT single messages — each is a short
-                   SEQUENCE built by the separate `_build_rpn_or_nrpn_
-                   sequence`/`_build_quarter_frame_sequence` further down.
-                   Because of
-                   this, a successful 'send' response's 'sent' field is a
-                   single string for every message type EXCEPT these
-                   three, where it's a list of strings (one per message actually
-                   transmitted) — check whether 'sent' is a str or a list
-                   if parsing this programmatically.
-  - poll         : check for buffered messages on an open input handle.
-                   Every message carries a real wall-clock 'received_at'
-                   timestamp (epoch seconds, float) captured at the exact
-                   moment it arrived — attached by a dedicated capture
-                   callback registered at 'open' time, NOT at poll() call
-                   time, so gaps between messages are measurable even if
-                   poll() itself is only called irregularly. Nothing is
-                   lost between calls while the port stays open: messages
-                   are captured continuously into a bounded per-handle
-                   buffer (10,000 most recent; oldest silently dropped
-                   only if that's exceeded between polls) regardless of
-                   whether/how often poll() runs.
-                   By default (no 'timeout_seconds', or 0) this returns
-                   instantly with whatever's already buffered — the
-                   original non-blocking behavior, unchanged. Pass
-                   'timeout_seconds' (0-60) to instead BLOCK until either
-                   something arrives or that many seconds elapse — wakes
-                   up as soon as a message shows up rather than always
-                   waiting the full duration, useful for "wait for the
-                   device to respond to what I just sent" instead of
-                   guessing a sleep duration and polling blind.
-                   Decodes ANY incoming mido message generically
-                   (str(msg)), so it already reports message types beyond
-                   what `send` explicitly constructs — confirmed live
-                   during hardware testing, where `poll` correctly
-                   surfaced `aftertouch` messages from a real keyboard
-                   before `send` even had aftertouch support.
+Actions (dispatched by `_run`):
+  - list_devices        input and output port names.
+  - open / close        open a named port as "input" or "output"; `open`
+                        returns a handle for later actions.
+  - send                build a message from a typed dict and send it.
+                        Most types are one wire message; rpn, nrpn and
+                        mtc_quarter_frame_sequence are several. 'sent' in the
+                        response is a string for one message and a list for
+                        several.
+  - poll                return messages buffered on an input handle: mido's
+                        text, the raw hex, the decoded dict (_decode_message),
+                        any RPN/NRPN or Quarter Frame change it completes
+                        (_StreamDecoder), and a wall-clock 'received_at'
+                        taken when the message arrived.
+                        'timeout_seconds' (0-60, default 0) waits until a
+                        message arrives or the timeout passes.
+  - read_midi_file      .mid/.midi (mido.MidiFile) or .syx
+                        (mido.read_syx_file): file info plus a per-track
+                        summary and message text, capped by 'max_messages'.
+  - write_midi_file     build a .mid/.midi or .syx file from typed message
+                        dicts, then re-read it with read_midi_file as a check.
+  - decode_mmc_response decode an MMC Response SysEx (F0 7F <dev> 07 ... F7,
+                        passed with F0/F7 included).
+  - run_clock           send MIDI Clock (24 per quarter note) at a set BPM for
+                        a fixed duration, with Start/Continue before and Stop
+                        after. One 'send' per tool call is too slow and uneven
+                        to drive a device's tempo.
 
-                   EXCEPTION: `active_sensing` will NEVER show up in `poll`
-                   results, even though `send` can transmit it fine. mido's
-                   rtmidi backend hardcodes
-                   `self._rt.ignore_types(False, False, True)` on every input
-                   port it opens — the third arg tells RtMidi itself to
-                   filter Active Sensing bytes before mido's parser ever
-                   sees them. Confirmed live (an offline smoke test sent 14
-                   message types, only 13 came back via poll, the missing
-                   one was active_sensing). Not fixable within mido's
-                   public API — would need raw rtmidi.MidiIn to change.
-  - read_midi_file  : read a .mid/.midi or .syx file from disk. See the
-                   file-I/O note below for full field details.
-  - write_midi_file : create a NEW .mid/.midi or .syx file from disk-
-                   supplied track/message data — the mirror-image write
-                   path to read_midi_file. See the file-I/O note below.
-  - decode_mmc_response : decode a raw MMC Response sysex (mcr=0x07 — the
-                   device-to-Controller direction, mirroring 'mmc's own
-                   commands which send mcc=0x06 the other way) back into a
-                   friendly structured result. Takes 'data' — the FULL
-                   sysex INCLUDING the leading 0xF0/trailing 0xF7 (the
-                   opposite convention from 'sysex' sends, chosen since
-                   this is meant to accept bytes copied from a real
-                   captured response). Currently decodes the 15
-                   Information Fields already registered for
-                   'read'/'write'/'update' (all sharing the 5-byte
-                   "Standard Time Code" format) plus RESPONSE ERROR;
-                   anything else comes back as an "unknown" type with the
-                   raw name byte rather than being guessed at.
-  - run_clock    : drive a real, precisely-paced 24-pulses-per-quarter-note
-                   MIDI Clock stream on an open output handle for a fixed
-                   duration, with a Start/Continue sent once before it
-                   begins if requested, and a Stop once it ends unless
-                   turned off.
-                   Exists because 'send' fires exactly one message per
-                   tool call — fine for one-off messages, but hopeless for
-                   anything needing real sub-20ms-at-typical-tempo pacing:
-                   confirmed live against a Roland TR-8S set to follow
-                   external (USB) clock — a bare 'send' of 'start' alone
-                   only armed the transport (solid, non-blinking Play LED,
-                   no actual playback), and manually looping individual
-                   'send' calls for Clock was far too slow/jittery to
-                   drive real tempo. 'run_clock' paces the whole stream
-                   itself using a real monotonic schedule (like the
-                   working ad-hoc `mido`-in-the-python-tool recipe this
-                   generalizes), entirely within one blocking call —
-                   see execute()'s duration-aware timeout extension
-                   below, the same mechanism 'poll's own
-                   'timeout_seconds' already uses.
+Where messages are built: single wire messages in `_build_message`,
+multi-message types in `_build_message_sequence`, file-only meta events in
+`_build_meta_message`. The 'type' enum in TOOLS lists every message type.
 
-SysEx note: 'sysex' takes a 'data' array of integers, each 0-127
-(7-bit data bytes only — MIDI's own spec forbids status-byte values 0x80+
-inside a SysEx payload). Do NOT include the leading 0xF0 or trailing 0xF7 —
-mido's mido.Message('sysex', data=...) adds both automatically on send and
-strips both automatically when decoding a received one. Confirmed live via
-mido.messages.specs.SPEC_BY_TYPE['sysex'] before writing this (status_byte
-240 = 0xF0, single value_name 'data', variable length) — same "check mido's
-spec before guessing kwarg names" discipline used throughout this file.
-mido itself raises a plain ValueError for any out-of-range byte (caught by
-the same broad except as every other message type here, no special-casing
-needed). 'poll' needed ZERO changes to support this — str(msg) already
-decodes an incoming sysex message generically, confirmed live
-(str(mido.Message('sysex', data=(1,2,3))) -> "sysex data=(1,2,3) time=0").
+SysEx 'data' excludes F0/F7; mido adds them on send and strips them on
+receive. Every data byte must be 0-127.
 
-File-I/O note (.mid/.syx read AND write support): 'read_midi_file' takes a
-'path' (absolute path to a .mid/.midi or .syx file) and 'max_messages' (not
-required, default 100, caps how many message strings are returned per
-track/file so a huge file can't flood the response — set 0 to get only
-metadata/counts with zero message bodies). For .mid/.midi: uses
-mido.MidiFile(path), returns file type (0/1/2), ticks_per_beat,
-length_seconds, and a per-track summary (index, track name, message count,
-first tempo_bpm/time_signature/key_signature/instrument_name meta values
-found, decoded messages up to the cap, truncated flag). For .syx: uses
-mido.read_syx_file(path), returns message_count + decoded sysex message
-strings up to the cap. Field names for all meta message types
-(track_name.name, set_tempo.tempo, time_signature.numerator/denominator/
-clocks_per_click/notated_32nd_notes_per_beat, key_signature.key,
-instrument_name.name, smpte_offset.hours/minutes/seconds/frames/
-sub_frames/frame_rate, etc.) verified live against
-mido.midifiles.meta._META_SPEC_BY_TYPE before writing any code — same
-discipline used throughout this file. mido.tempo2bpm() used to convert raw
-tempo (microseconds per quarter note) to a human BPM figure for the
-summary. 'write_midi_file' builds the corresponding mido.MidiFile/track
-objects from caller-supplied data and saves them to disk, then immediately
-calls 'read_midi_file' on what it just wrote as a built-in round-trip
-sanity check — see `_write_midi_file`'s own docstring further down for
-full detail.
+Limitation: incoming Active Sensing never reaches 'poll'. mido's rtmidi
+backend calls ignore_types(False, False, True) on every input port, so RtMidi
+drops it before mido sees it. Receiving it would need raw rtmidi.MidiIn.
 
-State (open ports) lives in this module's process memory (_OPEN_PORTS dict),
-same pattern as core/kernel.py's persistent IPython kernel or core/browser.py's
-one-page-per-session model — it does NOT persist across a ResearchMesh
-restart, and every handle is only valid within one running client process.
+Open ports and input buffers live in process memory; handles don't survive a
+ResearchMesh restart.
 """
 
 import asyncio
@@ -193,6 +61,116 @@ try:
 except ImportError as e:
     mido = None  # type: ignore[assignment]
     _MIDO_IMPORT_ERROR = e
+
+# --- Command tables ------------------------------------------------------
+# For each message type with a 'command' field: command name -> the byte that
+# selects it on the wire. _build_message validates 'command' against these,
+# and the TOOLS 'command' enum is generated from them.
+
+# MMC (RP-013) commands that carry no data: F0 7F <device_id> 06 <opcode> F7.
+_MMC_NO_DATA_COMMANDS = {
+    "stop": 0x01, "play": 0x02, "deferred_play": 0x03, "fast_forward": 0x04,
+    "rewind": 0x05, "record_strobe": 0x06, "record_exit": 0x07,
+    "record_pause": 0x08, "pause": 0x09, "eject": 0x0A, "chase": 0x0B,
+    "command_error_reset": 0x0C, "mmc_reset": 0x0D,
+}
+
+# Non-Real Time MTC Cueing special types, sent where the event number goes.
+_MTC_CUEING_NRT_SPECIAL_TYPES = {
+    "special_time_code_offset": 0x00,
+    "special_enable_event_list": 0x01,
+    "special_disable_event_list": 0x02,
+    "special_clear_event_list": 0x03,
+    "special_system_stop": 0x04,
+    "special_event_list_request": 0x05,
+}
+
+# File Dump handshakes: each is its own Non-Real Time sub-ID#1.
+_FILE_DUMP_HANDSHAKE = {
+    "eof": 0x7B, "wait": 0x7C, "cancel": 0x7D, "nak": 0x7E, "ack": 0x7F,
+}
+
+_COMMANDS: dict = {
+    # MMC opcodes (RP-013).
+    "mmc": {
+        **_MMC_NO_DATA_COMMANDS,
+        "write": 0x40, "masked_write": 0x41, "read": 0x42, "update": 0x43,
+        "locate": 0x44, "variable_play": 0x45, "search": 0x46,
+        "shuttle": 0x47, "step": 0x48, "assign_system_master": 0x49,
+        "generator_command": 0x4A, "midi_time_code_command": 0x4B,
+        "move": 0x4C, "add": 0x4D, "subtract": 0x4E,
+        "drop_frame_adjust": 0x4F, "procedure": 0x50, "event": 0x51,
+        "group": 0x52, "deferred_variable_play": 0x54,
+        "record_strobe_variable": 0x55, "wait": 0x7C, "resume": 0x7F,
+    },
+    # MSC General Category commands (RP-002/014).
+    "msc": {
+        "go": 0x01, "stop": 0x02, "resume": 0x03, "timed_go": 0x04,
+        "load": 0x05, "set": 0x06, "fire": 0x07, "all_off": 0x08,
+        "restore": 0x09, "reset": 0x0A, "go_off": 0x0B,
+    },
+    # Universal Non-Real Time 09 <code>.
+    "gm_system": {"on": 0x01, "off": 0x02},
+    # Universal Non-Real Time 06 <code>.
+    "device_inquiry": {"request": 0x01, "reply": 0x02},
+    # Universal Real Time 04 <code>.
+    "device_control": {"master_volume": 0x01, "master_balance": 0x02},
+    # Control Change controller numbers.
+    "channel_mode": {
+        "all_sound_off": 120, "reset_all_controllers": 121,
+        "local_control": 122, "all_notes_off": 123, "omni_off": 124,
+        "omni_on": 125, "mono_on": 126, "poly_on": 127,
+    },
+    # MIDI Tuning 08 <code>.
+    "midi_tuning": {
+        "bulk_dump_request": 0x00, "bulk_dump_reply": 0x01,
+        "note_change": 0x02,
+    },
+    # Notation 03 <code>.
+    "notation": {
+        "bar_marker": 0x01, "time_signature_immediate": 0x02,
+        "time_signature_delayed": 0x42,
+    },
+    # Real Time MTC Cueing 05 <code>.
+    "mtc_cueing": {
+        "special_system_stop": 0x00, "punch_in": 0x01, "punch_out": 0x02,
+        "event_start": 0x05, "event_stop": 0x06,
+        "event_start_with_info": 0x07, "event_stop_with_info": 0x08,
+        "cue_point": 0x0B, "cue_point_with_info": 0x0C, "event_name": 0x0E,
+    },
+    # Non-Real Time MTC Cueing 04 <code>; every special uses 00.
+    "mtc_cueing_nrt": {
+        **{name: 0x00 for name in _MTC_CUEING_NRT_SPECIAL_TYPES},
+        "punch_in": 0x01, "punch_out": 0x02,
+        "delete_punch_in": 0x03, "delete_punch_out": 0x04,
+        "event_start": 0x05, "event_stop": 0x06,
+        "event_start_with_info": 0x07, "event_stop_with_info": 0x08,
+        "delete_event_start": 0x09, "delete_event_stop": 0x0A,
+        "cue_point": 0x0B, "cue_point_with_info": 0x0C,
+        "delete_cue_point": 0x0D, "event_name": 0x0E,
+    },
+    # File Dump 07 <code>, plus the handshakes.
+    "file_dump": {
+        "header": 0x01, "data_packet": 0x02, "request": 0x03,
+        **_FILE_DUMP_HANDSHAKE,
+    },
+}
+
+# MSC command_format names (RP-002/014).
+_MSC_FORMATS = {
+    "lighting": 0x01, "sound": 0x10, "machinery": 0x20, "video": 0x30,
+    "projection": 0x40, "process_control": 0x50, "pyro": 0x60,
+    "all_types": 0x7F,
+}
+
+
+def _command_enum() -> list:
+    """Every command name in _COMMANDS, each once, grouped by type."""
+    names: list = []
+    for table in _COMMANDS.values():
+        names += [name for name in table if name not in names]
+    return names
+
 
 TOOLS = [
     {
@@ -267,6 +245,12 @@ TOOLS = [
             "'poll' checks for buffered messages on an open input handle "
             "— decodes any incoming MIDI message generically, not just "
             "the types 'send' explicitly supports. Each returned message "
+            "has 'message' (mido's text), 'hex' (the raw bytes), "
+            "'decoded' (the same dict 'send' takes; SysEx with no decoder "
+            "comes back as type 'sysex', MMC replies as type "
+            "'mmc_response'), and, when it finishes a multi-message "
+            "change, 'completes' (an 'rpn'/'nrpn' parameter change or an "
+            "'mtc_quarter_frame_sequence' time). Each also "
             "includes a real wall-clock 'received_at' timestamp (epoch "
             "seconds) captured at actual arrival time, and nothing is "
             "lost between calls while the port stays open (continuously "
@@ -546,19 +530,13 @@ TOOLS = [
                                 # System Real-Time
                                 "clock", "start", "stop", "continue",
                                 "active_sensing", "reset",
-                                # System Exclusive: generic passthrough...
+                                # System Exclusive, raw and typed
                                 "sysex",
-                                # ...plus typed convenience wrappers built
-                                # on top of it, one mido.Message each
                                 "mtc_full", "mtc_nak", "mmc", "msc",
                                 "gm_system", "device_inquiry",
                                 "device_control", "midi_tuning", "notation",
                                 "mtc_cueing", "mtc_cueing_nrt", "file_dump",
-                                # Typed convenience types that build a
-                                # SEQUENCE of multiple wire messages instead
-                                # of one (see _build_message_sequence) —
-                                # 'sent' comes back as a list of strings
-                                # for these three, not a single string
+                                # Several wire messages each; 'sent' is a list
                                 "rpn", "nrpn", "mtc_quarter_frame_sequence",
                             ],
                         },
@@ -617,44 +595,15 @@ TOOLS = [
                         },
                         "command": {
                             "type": "string",
-                            "enum": [
-                                # mmc values (36 total: the original 13
-                                # no-data transport commands, PLUS 23
-                                # added later — further transport
-                                # extensions, the procedure/event/group
-                                # trio, and the Information-Field register
-                                # commands read/write/masked_write/update)
-                                "stop", "play", "deferred_play",
-                                "fast_forward", "rewind", "record_strobe",
-                                "record_exit", "record_pause", "pause",
-                                "eject", "chase", "command_error_reset",
-                                "mmc_reset", "locate", "step",
-                                "assign_system_master", "generator_command",
-                                "midi_time_code_command", "variable_play",
-                                "search", "shuttle",
-                                "deferred_variable_play",
-                                "record_strobe_variable", "wait", "resume",
-                                "drop_frame_adjust", "move", "add",
-                                "subtract", "group", "procedure", "event",
-                                "read", "write", "masked_write", "update",
-                                # msc values (a DIFFERENT meaning of the
-                                # same field name, disambiguated by the
-                                # message's own 'type' — 'stop'/'resume'
-                                # are DELIBERATELY shared spellings with
-                                # mmc above, both are the same real-world
-                                # gesture in each protocol; everything
-                                # else here is msc-only)
-                                "timed_go", "load", "set", "fire",
-                                "all_off", "restore", "reset", "go_off",
-                                "go",
-                            ],
+                            "enum": _command_enum(),
                             "description": (
-                                "Required for 'mmc' (36 values) or 'msc' "
-                                "(11 values, 2 of which — 'stop'/"
-                                "'resume' — deliberately share a "
-                                "spelling with an mmc value above) — "
-                                "which set applies depends on the "
-                                "message's own 'type'."
+                                "Sub-command for mmc, msc, gm_system, "
+                                "device_inquiry, device_control, channel_mode, "
+                                "midi_tuning, notation, mtc_cueing, "
+                                "mtc_cueing_nrt and file_dump. Valid values "
+                                "depend on 'type' (grouped by type in this "
+                                "enum); a wrong one returns an error listing "
+                                "the valid values for that type."
                             ),
                         },
                         "subframes": {
@@ -771,40 +720,21 @@ TOOLS = [
 ]
 
 _TOOL_NAMES = {t["name"] for t in TOOLS}
+_MESSAGE_TYPES = TOOLS[0]["input_schema"]["properties"]["message"]["properties"]["type"]["enum"]
 
-# handle -> (direction, mido port object). Process-lifetime only, same
-# statefulness caveat as core/kernel.py's persistent IPython kernel.
+# handle -> (direction, mido port object). Process memory only.
 _OPEN_PORTS: dict = {}
 _HANDLE_COUNTER = itertools.count(1)
 
-# Per-INPUT-handle message buffer + wakeup event, populated by a real
-# rtmidi-level callback registered at 'open' time (see _open below) rather
-# than relying on mido's own default behavior (an untimed internal queue
-# only drainable via port.iter_pending()). Confirmed live: mido's rtmidi
-# backend already registers its OWN background callback the moment a port
-# opens, continuously feeding an UNBOUNDED queue regardless of whether/how
-# often 'poll' gets called — so messages were never actually being lost
-# between polls, contrary to what "manual, caller-driven" might suggest.
-# What WAS missing: (1) a wall-clock arrival timestamp (mido's own queue
-# only carries relative delta-time, meant for file playback, not live
-# capture) and (2) any way to block-and-wait for something to arrive
-# instead of only "check right now". This buffer/event pair, plus a
-# CUSTOM callback (which REPLACES mido's default queue -- Input only ever
-# feeds ONE destination, see mido/backends/rtmidi.py's
-# `(self._callback or self._queue.put)(msg)`), fixes both: every message
-# gets a real time.time() timestamp at the moment the callback fires (on
-# rtmidi's own background OS thread), and the Event lets 'poll' block with
-# a caller-specified timeout instead of only ever returning instantly.
-#
-# Bounded via maxlen to avoid unbounded memory growth if a port is left
-# open and unpolled for a long time on a busy input (e.g. dense MIDI clock
-# or CC automation) -- deque(maxlen=N) silently drops the OLDEST entries
-# once full, same "graceful degradation over unbounded growth" tradeoff
-# real hardware sysex buffers already make elsewhere in this file (e.g.
-# the Standard Track Bitmap's own "not included = assumed inactive").
+# Per input handle: a deque of (received_at, mido.Message), an Event that
+# _poll waits on, and a _StreamDecoder that _poll feeds in arrival order. The callback _open registers fills both. It replaces mido's
+# internal queue (mido's rtmidi Input delivers each message to the callback
+# or the queue, never both) so each message gets a time.time() stamp when it
+# arrives. The deque drops its oldest entries past _INPUT_BUFFER_MAXLEN.
 _INPUT_BUFFER_MAXLEN = 10_000
 _INPUT_BUFFERS: dict = {}
 _INPUT_EVENTS: dict = {}
+_STREAM_DECODERS: dict = {}
 
 
 def handles(name: str) -> bool:
@@ -815,65 +745,25 @@ def _err(message: str) -> str:
     return json.dumps({"error": message})
 
 
-# Guards `open`/`send`/`close` against a hung ALSA/JACK driver or a
-# misbehaving physical device — `_run` calls straight into python-rtmidi's C
-# bindings via `asyncio.to_thread`, and without this a stuck call would wait
-# forever with zero feedback to the caller.
-#
-# `poll` USED to be exempt from needing any real thought here (mido's old
-# `iter_pending()` path was non-blocking, so it was covered by this wrapper
-# only incidentally/harmlessly). That's no longer true now that `poll`
-# supports a genuine blocking wait via `timeout_seconds` (see `_poll` and
-# _MAX_POLL_TIMEOUT below) — a caller legitimately asking to wait, say, 30
-# real seconds for a device's reply must not get cut off early by this
-# wrapper's own blanket timeout. `execute()` below computes the actual
-# `asyncio.wait_for` timeout per-call instead of always using the same
-# constant, specifically to accommodate that.
-#
-# Known limitation, stated plainly rather than hidden: this makes the *tool
-# call* return promptly on a timeout, but does NOT kill the underlying OS
-# thread — Python cannot forcibly cancel a running thread, so a genuinely
-# stuck rtmidi call (or a `poll` blocked in `event.wait()`) keeps occupying
-# its slot in the shared default asyncio thread-pool executor (the same
-# pool nearly every other local tool in this app also uses) until the
-# whole process exits. Fixing that half would mean moving off
-# `asyncio.to_thread` onto something killable (e.g. a subprocess) —
-# deliberately out of scope here; this timeout only bounds how long the
-# *caller* waits, not how long the leak persists. This is WHY
-# _MAX_POLL_TIMEOUT (below) is capped at 60s rather than left unbounded —
-# a longer blocking wait means a longer-lived potential thread-pool leak
-# if the caller is ever abandoned mid-wait.
+# execute() runs every action in a worker thread under asyncio.wait_for, so
+# a hung driver or device can't block the caller forever. A timeout only ends
+# the wait: Python can't kill the thread, so a stuck call holds its slot in
+# the shared thread pool until the process exits. That's why poll's wait and
+# run_clock's duration have caps.
 _DEFAULT_TIMEOUT = 10.0
 
-# Upper bound on `poll`'s own `timeout_seconds` parameter (see `_poll`) — a
-# generous allowance for "wait for a device to respond" without permitting
-# an effectively-unbounded blocking wait (see the thread-pool-leak note
-# above for why that matters more here than for other actions).
+# Largest 'timeout_seconds' poll accepts.
 _MAX_POLL_TIMEOUT = 60.0
 
-# How much longer than the caller's own requested `timeout_seconds` this
-# wrapper waits before giving up on a blocking `poll` — must be enough
-# that `_poll`'s own `event.wait(timeout=timeout_seconds)` always has a
-# chance to return (empty-handed or not) on its own terms first, rather
-# than racing exactly at the boundary and this outer wrapper winning by a
-# hair and reporting a generic "hung driver" timeout for what was actually
-# just an empty, well-behaved wait.
+# Extra time execute() allows past poll's own wait, so an empty wait returns
+# normally instead of being reported as a hung driver.
 _POLL_TIMEOUT_MARGIN = 2.0
 
-# Upper bound on 'run_clock's own `duration_seconds` parameter (see
-# `_run_clock`). Deliberately much shorter than _MAX_POLL_TIMEOUT: `poll`
-# with a long timeout is just idly waiting, but `run_clock` is ACTIVELY
-# generating hardware I/O the entire time it runs, so an abandoned/long
-# call here means real MIDI traffic (and a real occupied thread-pool
-# slot, see the leak note above) for the full duration, not just a wait.
-# Call again for a longer run rather than raising this.
+# Largest 'duration_seconds' run_clock accepts. Call again for a longer run.
 _MAX_CLOCK_DURATION = 120.0
 
-# Mirrors _POLL_TIMEOUT_MARGIN's role but for 'run_clock': how much longer
-# than the caller's own requested `duration_seconds` the outer
-# asyncio.wait_for wrapper allows before it gives up — must comfortably
-# exceed the time `_run_clock`'s own internal clock loop needs to finish
-# and send its trailing Stop message, when one is due.
+# Extra time execute() allows past run_clock's duration, for the loop to
+# finish and send Stop.
 _CLOCK_TIMEOUT_MARGIN = 5.0
 
 
@@ -963,32 +853,26 @@ def _open(tool_input: dict) -> str:
 
     try:
         if direction == "input":
-            # Own buffer + event, wired in via a CUSTOM callback (see the
-            # _INPUT_BUFFERS/_INPUT_EVENTS comment above for why this
-            # replaces rather than supplements mido's default queue).
-            # `msg` here is already a fully-parsed mido.Message — rtmidi's
-            # raw bytes + mido's own Parser have already run by the time
-            # this fires (see mido/backends/rtmidi.py's
-            # Input._callback_wrapper). This callback runs on rtmidi's own
-            # background OS thread, NOT the thread `_poll` runs on — deque
-            # append/popleft and Event.set/.wait/.clear are all
-            # individually GIL-safe for this single-producer/single-
-            # consumer pattern, no extra lock needed.
+            # Runs on rtmidi's thread with an already-parsed mido.Message.
+            # deque append/popleft and Event set/wait/clear need no lock
+            # with one producer and one consumer.
             buf: deque = deque(maxlen=_INPUT_BUFFER_MAXLEN)
             event = threading.Event()
 
             def _on_message(msg: "mido.Message", _buf: deque = buf, _event: threading.Event = event) -> None:
-                _buf.append((time.time(), str(msg)))
+                _buf.append((time.time(), msg))
                 _event.set()
 
             port = mido.open_input(port_name, callback=_on_message)
             _INPUT_BUFFERS[handle] = buf
             _INPUT_EVENTS[handle] = event
+            _STREAM_DECODERS[handle] = _StreamDecoder()
         else:
             port = mido.open_output(port_name)
     except Exception as e:
         _INPUT_BUFFERS.pop(handle, None)
         _INPUT_EVENTS.pop(handle, None)
+        _STREAM_DECODERS.pop(handle, None)
         return _err(
             f"failed to open {direction} port {port_name!r}: "
             f"{type(e).__name__}: {e}"
@@ -1006,9 +890,10 @@ def _close(tool_input: dict) -> str:
     if entry is None:
         return _err(f"no open port for handle {handle!r}")
     _, port = entry
-    # Harmless .pop(..., None) for an output handle (never had an entry).
+    # Output handles have no buffer entries; pop(..., None) covers both.
     _INPUT_BUFFERS.pop(handle, None)
     _INPUT_EVENTS.pop(handle, None)
+    _STREAM_DECODERS.pop(handle, None)
     try:
         port.close()
     except Exception as e:
@@ -1017,33 +902,23 @@ def _close(tool_input: dict) -> str:
 
 
 def close_all() -> None:
-    """Close every still-open port. Called by local_tools.shutdown() on the
-    way out — safe to call even if nothing was ever opened (mirrors every
-    other tool's cleanup callback registered there, e.g. browser.shutdown/
-    kernel.shutdown/data.close, all of which tolerate an idle/never-used
-    state the same way).
-
-    Best-effort per handle, same "one failure must not block the rest"
-    contract local_tools.shutdown() itself already documents for the whole
-    list of registered cleanups — a single stuck/already-dead port here
-    must not prevent the others from being released.
+    """Close every open port; called by local_tools.shutdown(). Safe when
+    nothing is open. A failure on one port doesn't stop the others.
     """
     for handle in list(_OPEN_PORTS):
         _, port = _OPEN_PORTS.pop(handle)
         _INPUT_BUFFERS.pop(handle, None)
         _INPUT_EVENTS.pop(handle, None)
+        _STREAM_DECODERS.pop(handle, None)
         try:
             port.close()
         except Exception as e:
             print(f"[midi1] close_all: failed to close {handle!r} (ignored): {e}")
 
 
-# Shared by 'mtc_full' and MMC's 'locate' command — both encode an
-# SMPTE-style hour byte as 0yyzzzzz (yy = frame-rate type,
-# zzzzz = hours), confirmed identical in both specs (somascape.org's MTC
-# section and MMC's Locate/Goto section use the exact same bit layout).
-# Factored out here rather than duplicated so the two call sites can't
-# silently drift apart from each other over time.
+# Hour byte 0yyzzzzz (yy = frame rate, zzzzz = hours), shared by every
+# SMPTE-style time field in this file: MTC Full Message, MMC Standard Time
+# Code, MSC time, and MTC Cueing time.
 _FRAME_RATE_BITS = {"24": 0b00, "25": 0b01, "30drop": 0b10, "30nondrop": 0b11}
 
 
@@ -1059,22 +934,14 @@ def _encode_smpte_hour_byte(hours: int, frame_rate: str) -> int:
 
 
 def _encode_standard_speed(speed: float, reverse: bool) -> tuple:
-    """MMC's "Standard Speed Specification" (RP-013 p.10) — a 3-byte
-    (sh/sm/sl) block-floating-point encoding shared by the VARIABLE PLAY,
-    SEARCH, and SHUTTLE commands. `speed` is the magnitude of the
-    play-speed multiple (0 to ~1023.99); direction is the separate
-    `reverse` flag, same "value + direction flag" pattern as `step`'s
-    `quantity`+`reverse`.
+    """MMC Standard Speed (RP-013 p.10): 3 bytes sh sm sl, used by
+    VARIABLE PLAY, SEARCH and SHUTTLE. `speed` is the play-speed multiple
+    (0 to ~1023.99); `reverse` sets the sign bit.
 
-    Layout: sh = "0 g sss ppp" (g=sign, sss=shift-left count 0-7,
-    ppp=top 3 bits of a 17-bit raw magnitude), sm/sl = middle/bottom 7
-    bits of that same 17-bit value. What changes per `sss` is only the
-    SCALE those 17 bits represent (raw = round(speed * 2**(14-sss)));
-    `sss` has no effect on the decoded value, so the smallest `sss` that
-    fits is chosen automatically for maximum precision — not exposed as
-    a caller field. Confirmed self-consistent against RP-013's own
-    range/resolution table (total bits = (3+sss)+(14-sss) = 17 for every
-    row) and round-trip tested against test vectors before use here.
+    sh = 0 g sss ppp (g = sign, sss = shift 0-7, ppp = top 3 bits of a
+    17-bit magnitude); sm/sl = the middle and low 7 bits. The magnitude is
+    round(speed * 2**(14 - sss)). The smallest sss that fits is used, for
+    the most precision.
     """
     if speed < 0:
         raise ValueError(
@@ -1098,17 +965,11 @@ def _encode_standard_speed(speed: float, reverse: bool) -> tuple:
     return sh, sm, sl
 
 
-# MMC "Information Field" name registry (RP-013 pp.14-16, the Index List /
-# alphabetical Response-and-Information-Field table / categorized-by-type
-# table -- cross-checked across all three, they agree). Only the "5-byte
-# group" names 01h-0Fh are included: RP-013's own command text for MOVE/
-# ADD/SUBTRACT/DROP_FRAME_ADJUST says fields are "names 01 thru 1F", but
-# 10h-1Fh have no actual assignment anywhere in the spec's own tables --
-# reserved/unused headroom, not real names today. Consumed by the not-yet-
-# wired MOVE/ADD/SUBTRACT/DROP_FRAME_ADJUST mmc commands (see standing
-# memory file for the wiring plan) -- this dict/set and the lookup helper
-# below are deliberately built and verified in isolation FIRST, before any
-# dispatch code touches them.
+# MMC Information Field names (RP-013 pp.14-16). 01h-0Fh use the 5-byte
+# Standard Time Code format; 10h-1Fh are unassigned in the spec. Used by
+# the mmc commands move/add/subtract/drop_frame_adjust/read/write/
+# masked_write/update and by _decode_mmc_response. RP-013 defines more
+# fields than are registered here.
 _INFO_FIELD_NAMES = {
     "selected_time_code": 0x01,
     "selected_master_code": 0x02,
@@ -1125,19 +986,9 @@ _INFO_FIELD_NAMES = {
     "gp5": 0x0D,
     "gp6": 0x0E,
     "gp7": 0x0F,
-    # Standard Track Bitmap fields (RP-013 p.17 opcode table + p.?? "STANDARD
-    # TRACK BITMAP" section, confirmed via targeted pdftotext pull) -- a
-    # DIFFERENT wire format from every field above (variable-length
-    # <count><bitmap bytes...>, one bit per track, NOT the 5-byte Standard
-    # Time Code). See _TRACK_BITMAP_INFO_FIELDS/_MASK_WRITEABLE_INFO_FIELDS
-    # below -- these 5 names are deliberately NOT added to
-    # _WRITEABLE_INFO_FIELDS above, since that set (and everything gated by
-    # it: 'write', 'move'/'add'/'subtract'/'drop_frame_adjust') only knows
-    # how to encode/decode Standard Time Code. TRACK_RECORD_STATUS is
-    # genuinely read-only per the spec; the other 4 are read/write but only
-    # reachable today via 'read'/'update' (whole-field) or 'masked_write'
-    # (single bit-masked byte) -- a future full-bitmap 'write' path is not
-    # built.
+    # Standard Track Bitmap fields (RP-013 p.17): <count> <bitmap bytes...>,
+    # one bit per track. Reachable through read/update (whole field) and
+    # masked_write. 'write' doesn't support them (see _WRITEABLE_INFO_FIELDS).
     "track_record_status": 0x4E,
     "track_record_ready": 0x4F,
     "track_sync_monitor": 0x52,
@@ -1145,35 +996,24 @@ _INFO_FIELD_NAMES = {
     "track_mute": 0x62,
 }
 
-# The subset of _INFO_FIELD_NAMES marked Read/Writeable in RP-013's own
-# table -- the only names valid as a MOVE/ADD/SUBTRACT/DROP_FRAME_ADJUST
-# *destination*. Source fields may be ANY name in _INFO_FIELD_NAMES,
-# writeable or not (e.g. reading the read-only ACTUAL_OFFSET as an ADD
-# input is valid; writing a result INTO it is not).
-# NOTE: this set is scoped to Standard-Time-Code-format fields only (see
-# _TRACK_BITMAP_INFO_FIELDS below for the other format) -- do not add the
-# Track Bitmap fields here even though 4 of the 5 are genuinely writeable
-# per spec, since 'write'/'move'/'add'/'subtract'/'drop_frame_adjust' would
-# then wrongly try to encode/decode them as 5-byte time codes.
+# Read/Writeable Standard Time Code fields: valid destinations for write/
+# move/add/subtract/drop_frame_adjust. Sources may be any registered name.
+# Track Bitmap fields stay out even when writeable, because those commands
+# encode the 5-byte time code format only.
 _WRITEABLE_INFO_FIELDS = frozenset({
     "selected_time_code", "requested_offset", "generator_time_code",
     "gp0", "gp1", "gp2", "gp3", "gp4", "gp5", "gp6", "gp7",
 })
 
-# Every Information Field whose data is the variable-length Standard Track
-# Bitmap format (<count> <bitmap byte 0> <bitmap byte 1> ...) rather than
-# the 5-byte Standard Time Code -- used by _decode_mmc_response to branch
-# on format instead of assuming every field is time-code shaped.
+# Fields in Standard Track Bitmap format; _decode_mmc_response branches on
+# this.
 _TRACK_BITMAP_INFO_FIELDS = frozenset({
     "track_record_status", "track_record_ready", "track_sync_monitor",
     "track_input_monitor", "track_mute",
 })
 
-# The subset of _TRACK_BITMAP_INFO_FIELDS that's actually mask-writeable
-# (RP-013's MASKED WRITE Note *1: "the only mask-writeable Information
-# Fields currently defined are those which employ the Standard Track
-# Bitmap" -- but TRACK_RECORD_STATUS is read-only per its own R/W column,
-# so it's excluded here despite sharing the same bitmap format).
+# Valid masked_write targets: the writeable Track Bitmap fields (RP-013
+# MASKED WRITE note 1). TRACK_RECORD_STATUS is read-only.
 _MASK_WRITEABLE_INFO_FIELDS = frozenset({
     "track_record_ready", "track_sync_monitor", "track_input_monitor",
     "track_mute",
@@ -1186,17 +1026,12 @@ def _resolve_info_field_name(
     require_writeable: bool = False,
     require_mask_writeable: bool = False,
 ) -> int:
-    """Look up an MMC Information Field name and return its single-byte
-    hex value (see _INFO_FIELD_NAMES above for the full table and source).
-    Pass `require_writeable=True` when resolving a *destination* field
-    (MOVE/ADD/SUBTRACT/DROP_FRAME_ADJUST all require a Read/Writeable
-    destination); leave it False for *source* fields, which may be any
-    valid name regardless of R/W status. Pass `require_mask_writeable=True`
-    instead when resolving a MASKED WRITE target -- a DIFFERENT, narrower
-    gate (see _MASK_WRITEABLE_INFO_FIELDS above): only Track-Bitmap-format
-    fields that are also genuinely writeable qualify, which is why this is
-    its own flag rather than reusing `require_writeable` (that one is
-    scoped to Standard-Time-Code fields only).
+    """Return the name byte for an MMC Information Field name.
+
+    require_writeable: the field must be in _WRITEABLE_INFO_FIELDS (a
+    destination for write/move/add/subtract/drop_frame_adjust).
+    require_mask_writeable: the field must be in
+    _MASK_WRITEABLE_INFO_FIELDS (a masked_write target).
     """
     if name not in _INFO_FIELD_NAMES:
         raise ValueError(
@@ -1223,33 +1058,17 @@ def _encode_nested_mmc_command(
     forbid_define: bool = False,
     forbid_execute_name: "int | None" = None,
 ) -> tuple:
-    """Encode one nested MMC command dict for use INSIDE a PROCEDURE
-    [ASSEMBLE] or EVENT [DEFINE] payload (RP-013 pp.34-37).
+    """Encode an mmc command dict for use inside PROCEDURE [ASSEMBLE] or
+    EVENT [DEFINE] (RP-013 pp.34-37).
 
-    A "nested command" is NOT a separate wire format -- it's the exact
-    same `<opcode> <count> <data...>` bytes any standalone mmc command
-    already produces via `_build_message`, just WITHOUT the shared
-    `0x7F <device_id> 0x06` envelope prefix (that envelope is written
-    ONCE by the enclosing PROCEDURE/EVENT message, not repeated per
-    nested command -- confirmed against the spec's own multi-command
-    worked example in the EVENT [DEFINE] NOTES). So this function simply
-    re-enters the SAME `_build_message` used for every top-level command
-    (any current or future mmc command type works as a nested command
-    for free, no duplicated encoding logic) and strips that 3-byte
-    prefix off the result.
+    Returns _mmc_command_bytes(nested): the command without the
+    `7F <device_id> 06` prefix, which the enclosing message writes once.
 
-    The two spec-mandated nesting restrictions are validated here, since
-    both callers (PROCEDURE [ASSEMBLE], EVENT [DEFINE]) need at least
-    one of them:
-    - `forbid_assemble`: reject a nested PROCEDURE [ASSEMBLE] (both
-      callers forbid this -- ASSEMBLE can't nest ASSEMBLE, and DEFINE
-      can't nest an ASSEMBLE either).
-    - `forbid_define`: reject a nested EVENT [DEFINE] (EVENT [DEFINE]
-      can't nest another DEFINE; PROCEDURE [ASSEMBLE] has no such
-      restriction on EVENT [DEFINE] itself).
-    - `forbid_execute_name`: (PROCEDURE [ASSEMBLE] only) reject a nested
-      PROCEDURE [EXECUTE] naming the SAME procedure currently being
-      assembled (a "recursive PROCEDURE [EXECUTE]" error per spec).
+    Nesting rules from the spec:
+    - forbid_assemble: no nested PROCEDURE [ASSEMBLE] (both callers).
+    - forbid_define: no nested EVENT [DEFINE] (EVENT [DEFINE] only).
+    - forbid_execute_name: no nested PROCEDURE [EXECUTE] of the procedure
+      being assembled (PROCEDURE [ASSEMBLE] only).
     """
     if nested.get("type") != "mmc":
         raise ValueError(
@@ -1286,8 +1105,7 @@ def _encode_nested_mmc_command(
             f"naming the SAME procedure ({forbid_execute_name!r}) "
             f"currently being assembled (recursive EXECUTE)"
         )
-    built = _build_message(nested)
-    return tuple(built.data[3:])
+    return _mmc_command_bytes(nested)
 
 
 def _encode_standard_time_code(
@@ -1307,32 +1125,17 @@ def _encode_standard_time_code(
     video_field_1: bool = False,
     no_time_code: bool = False,
 ) -> tuple:
-    """RP-013's 5-byte "Standard Time Code" format (Section 3, "Standard
-    Specifications") -- the wire format shared by ALL 15 Information
-    Fields currently in _INFO_FIELD_NAMES (SELECTED_TIME_CODE through
-    GP7). Their "Time"/"Sync"/"Gen"/"Math"/"MTC" category labels in the
-    spec's own table describe MEANING, not a different byte layout --
-    all 15 use this identical 5-byte shape, confirmed against the
-    table's own "5" byte-count column for every one of them.
+    """MMC Standard Time Code (RP-013 section 3), 5 bytes: the format of
+    Information Fields 01h-0Fh. With the flags off it is also the MTC, MSC
+    and MTC Cueing time layout (see _time_code_bytes).
 
-    Layout: hr = "0 tt hhhhh" (SAME 2-bit time-type + 5-bit hours
-    pattern as _encode_smpte_hour_byte, directly reused here -- the two
-    formats are bit-for-bit identical for this one byte).
-    mn = "0 c mmmmmm" (c = color-frame flag, copied from the source time
-    code stream).
-    sc = "0 k ssssss" (k = "blank" flag -- data never loaded since
-    power-up/MMC RESET).
-    fr = "0 g i fffff" (g = sign, permitted only where signed time code
-    is allowed; i = which format the 5th byte uses).
-    5th byte is EITHER subframes (i=0, plain 0-99, fractional frames)
-    OR a 4-flag status byte "0 e v d n xxx" (i=1: estimated/invalid/
-    video_field_1/no_time_code flags, top 3 bits reserved=000).
-
-    The common case (a plain time code, with subframes if needed) only
-    needs the first 5 positional args -- every rarer per-bit flag
-    defaults to its "normal"/off state, same "friendly fields with
-    sensible defaults, not a raw bitfield" pattern used elsewhere (e.g.
-    `step`'s `reverse`).
+    hr = 0 tt hhhhh  (_encode_smpte_hour_byte)
+    mn = 0 c mmmmmm  (c = color frame)
+    sc = 0 k ssssss  (k = blank: never loaded since power-up or MMC RESET)
+    fr = 0 g i fffff (g = sign; i selects the 5th byte's format)
+    5th byte: subframes 0-99 when i=0, or status flags 0 e v d n 000
+    (estimated, invalid, video field 1, no time code) when i=1.
+    All flags default to off.
     """
     if not (0 <= minutes <= 59):
         raise ValueError(f"'minutes' must be 0-59, got {minutes!r}")
@@ -1367,11 +1170,8 @@ def _encode_standard_time_code(
 def _decode_standard_time_code(
     hr_byte: int, mn_byte: int, sc_byte: int, fr_byte: int, fifth_byte: int
 ) -> dict:
-    """Inverse of `_encode_standard_time_code` above — decodes RP-013's
-    5-byte "Standard Time Code" format back into a friendly dict. See
-    that function's own docstring for the full bit layout being
-    reversed here; this simply masks/shifts the same bit positions back
-    out rather than re-deriving them.
+    """Decode MMC Standard Time Code; inverse of
+    _encode_standard_time_code.
     """
     frame_rate_names = {v: k for k, v in _FRAME_RATE_BITS.items()}
     result: dict = {
@@ -1396,43 +1196,80 @@ def _decode_standard_time_code(
     return result
 
 
-def _decode_mmc_response(tool_input: dict) -> str:
-    """Decode a raw MMC Response sysex (Universal Real-Time SysEx,
-    Sub-ID#2 `mcr`=0x07 — the DEVICE-to-Controller direction, the
-    mirror image of the Controller-to-device `mcc`=0x06 that `mmc`'s
-    own commands use) into a structured result.
-
-    Takes `data` — the FULL sysex byte sequence INCLUDING the leading
-    0xF0 and trailing 0xF7 (unlike the generic `sysex` send type, which
-    deliberately EXCLUDES both — chosen the opposite way here since
-    this is meant to accept bytes copied straight from a real captured
-    response, e.g. a `poll()` result's own raw bytes, which naturally
-    include both delimiters).
-
-    Scoped to what's actually decodable today: the 15 Information
-    Fields already in `_INFO_FIELD_NAMES` (all sharing the 5-byte
-    Standard Time Code format decoded by `_decode_standard_time_code`)
-    plus RESPONSE ERROR (name byte 0x42, a variable-length list of
-    field names that failed — confirmed via the spec's own 3-field
-    worked example). Anything else (COMMAND ERROR, the ~50 other
-    unregistered Information Fields, a segmented/multi-part response)
-    is reported as `"type": "unknown"` with the raw name byte rather
-    than guessed at.
+def _time_code_bytes(
+    message: dict, subframe_field: "str | None" = None,
+    context: "str | None" = None,
+) -> tuple:
+    """Read the time fields from `message` and encode them as Standard Time
+    Code (_encode_standard_time_code, flags off): hr mn sc fr, plus the 5th
+    byte when `subframe_field` names the field that holds it. MTC, MSC and
+    MTC Cueing times all use this layout.
     """
-    data = tool_input.get("data")
-    if not data:
-        return _err(
-            "'data' (required, a non-empty list of ints — the full "
-            "sysex including the leading 0xF0 and trailing 0xF7)"
+    extra = (subframe_field,) if subframe_field else ()
+    hours, minutes, seconds, frames, frame_rate, *rest = _time_code_fields(
+        message, *extra, context=context,
+    )
+    encoded = _encode_standard_time_code(
+        hours, minutes, seconds, frames, frame_rate,
+        subframes=rest[0] if rest else 0,
+    )
+    return encoded if subframe_field else encoded[:4]
+
+
+def _additional_info_bytes(message: dict, command: str) -> list:
+    """MTC Cueing additional info, before nibblizing: the bytes of
+    'additional_info_message' (built with _build_message) or the raw
+    'additional_info_bytes'. Exactly one of the two."""
+    info_message = message.get("additional_info_message")
+    raw_bytes = message.get("additional_info_bytes")
+    if info_message is not None and raw_bytes is not None:
+        raise ValueError(
+            "specify only ONE of 'additional_info_message' or "
+            "'additional_info_bytes', not both"
         )
-    data = list(data)
+    if info_message is None and raw_bytes is None:
+        raise KeyError(
+            f"'additional_info_message' (or 'additional_info_bytes') — "
+            f"required for {command!r}"
+        )
+    if info_message is not None:
+        return _build_message(info_message).bytes()
+    return list(raw_bytes)
+
+
+def _cueing_event(message: dict, command: str) -> tuple:
+    """sl sm <additional info> for both MTC Cueing types: the 14-bit event
+    number, then nibblized ASCII for event_name or a nibblized MIDI message
+    for the *_with_info commands."""
+    sl, sm = _split14("event_number", _required(message, "event_number"))
+    if command == "event_name":
+        name = _required(message, "event_name", command)
+        info = _nibblize(_ascii("event_name", name))
+    elif command.endswith("_with_info"):
+        info = _nibblize(_additional_info_bytes(message, command))
+    else:
+        info = ()
+    return (sl, sm, *info)
+
+
+def _mmc_response_fields(data: list) -> dict:
+    """Decode an MMC Response (F0 7F <device_id> 07 <name> ... F7; 07 is
+    mcr, device to controller), given the whole SysEx including F0 and F7.
+    Raises ValueError for a malformed one.
+
+    Decodes the fields in _INFO_FIELD_NAMES (Standard Time Code or Track
+    Bitmap format) and RESPONSE ERROR (42h, a count then the failed field
+    names). Any other name byte, including COMMAND ERROR and segmented
+    responses, comes back as type "unknown" with the raw byte. A response
+    carrying several fields isn't supported.
+    """
     if len(data) < 5 or data[0] != 0xF0 or data[-1] != 0xF7:
-        return _err(
+        raise ValueError(
             "'data' must be a complete sysex, including the leading "
             "0xF0 and trailing 0xF7"
         )
-    if data[1] != 0x7F or data[3] != 0x06 + 1:
-        return _err(
+    if data[1] != 0x7F or data[3] != 0x07:
+        raise ValueError(
             "'data' is not an MMC Response sysex — expected "
             "F0 7F <device_id> 07 ... F7"
         )
@@ -1443,44 +1280,39 @@ def _decode_mmc_response(tool_input: dict) -> str:
         field_names_by_byte = {v: k for k, v in _INFO_FIELD_NAMES.items()}
         unsupported = [
             field_names_by_byte.get(b, f"0x{b:02X}")
-            for b in payload[1:]  # payload[0] is RESPONSE ERROR's own
-                                   # leading count byte, not a name
+            for b in payload[1:]  # payload[0] is the count byte
         ]
-        return json.dumps({
-            "status": "ok",
+        return {
             "device_id": device_id,
             "type": "response_error",
             "unsupported_fields": unsupported,
-        })
+        }
     field_name = {v: k for k, v in _INFO_FIELD_NAMES.items()}.get(name_byte)
     if field_name is None:
-        return json.dumps({
-            "status": "ok",
+        return {
             "device_id": device_id,
             "type": "unknown",
             "raw_name_byte": name_byte,
             "note": (
-                "not yet decodable — only the 15 registered Information "
-                "Fields plus RESPONSE ERROR are currently supported"
+                f"not decodable: only the {len(_INFO_FIELD_NAMES)} "
+                "registered Information Fields plus RESPONSE ERROR are "
+                "supported"
             ),
-        })
+        }
     if field_name in _TRACK_BITMAP_INFO_FIELDS:
-        # Standard Track Bitmap format: <count> <bitmap byte 0> ... --
-        # count says how many bitmap bytes follow (a device may omit
-        # trailing all-zero bytes per spec, "any track not included...
-        # will be assumed to be inactive"). Decode into both the raw
-        # bytes (for masked_write's byte#/mask bookkeeping) and a plain
-        # list of active (1-indexed) track numbers, bit 0 of byte 0 =
-        # track 1.
+        # <count> <bitmap bytes...>. A device may leave out trailing zero
+        # bytes; missing tracks are inactive. Returns the raw bytes (for
+        # masked_write) and the active track numbers (bit 0 of byte 0 is
+        # track 1).
         if not payload:
-            return _err(
+            raise ValueError(
                 f"expected at least a <count> byte for field "
                 f"{field_name!r}, got an empty payload"
             )
         bitmap_count = payload[0]
         bitmap_bytes = payload[1:]
         if len(bitmap_bytes) != bitmap_count:
-            return _err(
+            raise ValueError(
                 f"'{field_name}' declared byte count {bitmap_count} but "
                 f"{len(bitmap_bytes)} bitmap byte(s) actually followed"
             )
@@ -1490,38 +1322,47 @@ def _decode_mmc_response(tool_input: dict) -> str:
             for bit_index in range(7)
             if byte_value & (1 << bit_index)
         ]
-        return json.dumps({
-            "status": "ok",
+        return {
             "device_id": device_id,
             "type": "field_value",
             "name": field_name,
             "byte_count": bitmap_count,
             "bitmap_bytes": list(bitmap_bytes),
             "active_tracks": active_tracks,
-        })
+        }
     if len(payload) != 5:
-        return _err(
+        raise ValueError(
             f"expected exactly 5 data bytes for field {field_name!r}, "
             f"got {len(payload)}"
         )
-    decoded = _decode_standard_time_code(*payload)
-    return json.dumps({
-        "status": "ok",
+    return {
         "device_id": device_id,
         "type": "field_value",
         "name": field_name,
-        **decoded,
-    })
+        **_decode_standard_time_code(*payload),
+    }
+
+
+def _decode_mmc_response(tool_input: dict) -> str:
+    """The decode_mmc_response action: _mmc_response_fields on 'data'."""
+    data = tool_input.get("data")
+    if not data:
+        return _err(
+            "'data' is required: a non-empty list of ints, the full "
+            "sysex including the leading 0xF0 and trailing 0xF7"
+        )
+    try:
+        fields = _mmc_response_fields(list(data))
+    except ValueError as e:
+        return _err(str(e))
+    return json.dumps({"status": "ok", **fields})
 
 
 def _encode_msc_ascii_field(name: str, value: str) -> tuple:
-    """MSC Q_number/Q_list/Q_path are plain ASCII digit strings
-    with '.' as the decimal-point delimiter (confirmed against a literal
-    worked example in the MSC 1.0 spec itself: cue "235.6" list "36.6" path
-    "59" encodes as 32 33 35 2E 36 00 33 36 2E 36 00 35 39). Only validates
-    the character set here — the spec's own leniency rules about repeated/
-    misplaced dots are a RECEIVER tolerance requirement, not something a
-    well-behaved sender needs to enforce on itself.
+    """Encode an MSC Q_number/Q_list/Q_path: ASCII digits with '.' as
+    the decimal point (MSC 1.0 example: cue "235.6" -> 32 33 35 2E 36).
+    Only the character set is checked; the spec's rules for stray dots
+    apply to receivers.
     """
     if not value or any(c not in "0123456789." for c in value):
         raise ValueError(
@@ -1532,12 +1373,9 @@ def _encode_msc_ascii_field(name: str, value: str) -> tuple:
 
 
 def _encode_msc_cue_data(q_number, q_list, q_path) -> tuple:
-    """Shared by the 5 MSC General Category commands that carry
-    trailing cue-targeting data, when present (GO, STOP, RESUME, TIMED_GO,
-    GO_OFF) — factored out once rather than repeated 5 times. Per spec:
-    Q_list requires Q_number to also be present, Q_path requires Q_list.
-    A single 0x00 delimiter separates each field that's actually present;
-    trailing fields are simply omitted, not delimited with nothing after.
+    """Cue data for MSC GO, STOP, RESUME, TIMED_GO and GO_OFF: the
+    fields present, separated by 00. Q_list needs Q_number; Q_path needs
+    Q_list. Absent trailing fields are left off.
     """
     if q_number is None:
         if q_list is not None or q_path is not None:
@@ -1555,65 +1393,14 @@ def _encode_msc_cue_data(q_number, q_list, q_path) -> tuple:
     return tuple(out)
 
 
-def _encode_msc_time(
-    hours: int, minutes: int, seconds: int, frames: int,
-    fractional_frames: int, frame_rate: str,
-) -> tuple:
-    """MSC's own "Standard Time Code" — same 5-byte SHAPE as
-    mtc_full/MMC-locate's time fields, but a MORE elaborate bit layout:
-    minutes carries an extra "colour frame" flag bit, seconds carries a
-    reserved-must-be-zero bit, and frames carries BOTH a sign bit and a
-    subframes-vs-status identification bit, per somascape.org's MSC
-    section (cross-referenced against the actual MSC 1.0 spec PDF, which
-    confirms "MIDI Show Control time code ... specifications are entirely
-    consistent with ... MIDI Time Code"). Deliberately narrowed scope:
-    this tool always sends colour-frame=0, sign=positive, and the
-    subframes (not "status") variant — none of those three flags are
-    exposed as separate inputs,
-    since they're rare edge cases and hardcoding safe defaults matches the
-    same philosophy already used for e.g. mtc_full's device_id default.
-    Only the hour byte's encoding is IDENTICAL to mtc_full/MMC's, hence
-    still reusing _encode_smpte_hour_byte for that one byte only — minutes/
-    seconds/frames/fractional_frames need their own construction here.
-    """
-    if not (0 <= minutes <= 59):
-        raise ValueError(f"'minutes' must be 0-59, got {minutes!r}")
-    if not (0 <= seconds <= 59):
-        raise ValueError(f"'seconds' must be 0-59, got {seconds!r}")
-    if not (0 <= frames <= 29):
-        raise ValueError(f"'frames' must be 0-29, got {frames!r}")
-    if not (0 <= fractional_frames <= 99):
-        raise ValueError(
-            f"'fractional_frames' must be 0-99, got {fractional_frames!r}"
-        )
-    hr_byte = _encode_smpte_hour_byte(hours, frame_rate)
-    return (hr_byte, minutes, seconds, frames, fractional_frames)
-
-
 def _encode_tuning_frequency(entry: dict) -> tuple:
-    """Encode ONE MIDI Tuning frequency entry as the 3-byte format shared
-    by both the Bulk Tuning Dump and Single Note Tuning Change messages
-    (primary spec's "Frequency Data Format" section): byte 1 = nearest
-    equal-tempered semitone BELOW the frequency (0-127), bytes 2-3 = a
-    14-bit fraction of 100 cents ABOVE that semitone, MSB byte then LSB
-    byte (confirmed via the byte-layout diagram `0xxxxxxx 0abcdefg
-    0hijklmn` — 'a' is the fraction's most-significant bit, 'n' the
-    least — this is MSB-then-LSB wire order, NOT the LSB-first convention
-    used elsewhere in this file for e.g. RPN/MSC 14-bit fields; verified
-    by hand-computing all 4 of the spec's own worked examples before
-    writing this function, not assumed from the other fields' convention).
+    """Encode one MIDI Tuning frequency (Frequency Data Format), used by
+    Bulk Tuning Dump and Single Note Tuning Change: the equal-tempered
+    semitone at or below the frequency (0-127), then a 14-bit fraction of
+    100 cents above it, MSB byte first.
 
-    Accepts EITHER `{"semitone": int 0-127, "cents": float 0-100
-    exclusive}` (the tool computes the 14-bit fraction internally: 100
-    cents = the full 14-bit range, per the spec's own stated resolution
-    "100 cents / 2**14 = .0061 cents") OR `{"no_change": True}` for the
-    spec's reserved (7F,7F,7F) sentinel meaning "make no change to this
-    key's stored tuning" — deliberately NOT accepting a target frequency
-    in Hz directly, to avoid introducing floating-point equal-temperament
-    conversion as a NEW source of rounding/precision bugs on top of an
-    already spec-precise encoding; semitone+cents mirrors the spec's own
-    conceptual model exactly and is directly hand-verifiable against its
-    worked examples (which is exactly how this function was verified).
+    Takes {"semitone": 0-127, "cents": 0 <= cents < 100}, or
+    {"no_change": true} for the 7F 7F 7F "leave this key unchanged" value.
     """
     if entry.get("no_change"):
         return (0x7F, 0x7F, 0x7F)
@@ -1628,22 +1415,14 @@ def _encode_tuning_frequency(entry: dict) -> tuple:
     if not (0 <= cents < 100):
         raise ValueError(f"'cents' must be 0 <= cents < 100, got {cents!r}")
     frac14 = round(cents / 100.0 * 16384)
-    frac14 = min(frac14, 16383)  # guard the round()-to-16384 edge at cents just under 100
+    frac14 = min(frac14, 16383)  # cents just under 100 can round to 16384
     return (semitone, (frac14 >> 7) & 0x7F, frac14 & 0x7F)
 
 
 def _encode_time_signature_pair(numerator: int, denominator: int) -> tuple:
-    """Encode ONE (numerator, denominator) pair as the 2-byte `nn dd`
-    format Notation Information's Time Signature messages use — shared by
-    the primary pair and each additional compound-signature pair.
-    `denominator` is accepted as the ACTUAL value (2, 4, 8, 16, ...), NOT
-    the spec's own "negative power of 2" exponent — mirrors mido's own
-    EXISTING `time_signature` MetaMessage field (already used elsewhere in
-    this file for .mid files), confirmed live by constructing one and
-    checking its encoded bytes (`denominator=4` produces byte value `2` =
-    log2(4)) before writing this function, so a caller who already knows
-    how to build a .mid time_signature meta event recognizes the same
-    convention here.
+    """Encode one Notation Time Signature pair as nn dd. `denominator` is
+    the note value (2, 4, 8, ...), as in mido's time_signature meta event;
+    the wire byte is its power of 2.
     """
     if not (0 <= numerator <= 127):
         raise ValueError(f"'numerator' must be 0-127, got {numerator!r}")
@@ -1660,46 +1439,10 @@ def _encode_time_signature_pair(numerator: int, denominator: int) -> tuple:
     return (numerator, exponent)
 
 
-def _encode_mtc_cueing_time(
-    hours: int, minutes: int, seconds: int, frames: int,
-    fractional_frames: int, frame_rate: str,
-) -> tuple:
-    """MTC (Non-Real-Time) Cueing's plain 5-byte time field (hr mn sc fr
-    ff) — deliberately NOT reusing `_encode_msc_time` despite that
-    function numerically producing the same bytes today for equivalent
-    inputs: `_encode_msc_time`'s own docstring is explicit that it encodes
-    MSC's OWN more-elaborate bit layout (extra colour-frame/sign/status
-    flag bits, just hardcoded to safe defaults) — reusing it here would
-    be semantically misleading for a future reader even though the output
-    happens to coincide. This is MTC Cueing's own plain encoding: only the
-    hour byte is shared (via `_encode_smpte_hour_byte`, the same one
-    `mtc_full`/MMC-locate/MSC all already use), minutes/seconds/frames/
-    fractional_frames have no extra bits at all.
-    """
-    if not (0 <= minutes <= 59):
-        raise ValueError(f"'minutes' must be 0-59, got {minutes!r}")
-    if not (0 <= seconds <= 59):
-        raise ValueError(f"'seconds' must be 0-59, got {seconds!r}")
-    if not (0 <= frames <= 29):
-        raise ValueError(f"'frames' must be 0-29, got {frames!r}")
-    if not (0 <= fractional_frames <= 99):
-        raise ValueError(
-            f"'fractional_frames' must be 0-99, got {fractional_frames!r}"
-        )
-    hr_byte = _encode_smpte_hour_byte(hours, frame_rate)
-    return (hr_byte, minutes, seconds, frames, fractional_frames)
-
-
 def _nibblize(raw_bytes) -> tuple:
-    """Nibblize a list of raw 8-bit bytes into MIDI-safe 7-bit values, LS
-    nibble first per byte — the encoding MTC Cueing's "additional info"
-    field uses to embed an arbitrary MIDI message inside a Cueing Set-Up
-    message (per the separate MTC spec's own "Additional Information"
-    section). Verified against the spec's own worked example before
-    writing any message-building code around it: `0x91 0x46 0x7F` (a real
-    Note On status byte with its high bit set, plus 2 data bytes) nibblizes
-    to `01 09 06 04 0F 07` — confirmed byte-for-byte via this exact
-    function before it was ever wired into `_build_message`.
+    """Split 8-bit bytes into nibbles, low nibble first, for MTC Cueing
+    additional info (MTC spec, "Additional Information"). Example:
+    91 46 7F -> 01 09 06 04 0F 07.
     """
     out: list = []
     for b in raw_bytes:
@@ -1714,24 +1457,10 @@ def _nibblize(raw_bytes) -> tuple:
 
 
 def _encode_file_dump_data(stored_bytes) -> tuple:
-    """Encode up to 112 raw 8-bit "stored" file-content bytes into File
-    Dump's own "7-bit-ized" wire format — a COMPLETELY DIFFERENT scheme
-    from `_nibblize` above (bit-level sign-extraction, not a nibble
-    split), used only by File Dump's Data Packet message. Per the
-    spec's own words: "the sign bits of the seven [stored] bytes are
-    sent, followed by the low-order 7 bits of each byte" — groups of up
-    to 7 stored bytes become groups of up to 8 transmitted bytes: one
-    "sign byte" (each original byte's bit 7, packed MSB-first, so the
-    first original byte's sign lands in bit 6 and so on), followed by
-    each original byte's own low 7 bits verbatim, in original order.
-
-    Verified with two hand-constructed numeric examples before writing
-    any message-building code around it (the spec itself only gives a
-    symbolic example, not concrete numbers): a full 7-byte group with
-    alternating sign bits, and a short 3-byte trailing group — the short
-    case specifically confirms the spec's own symbolic example
-    ("0ABC0000") produces the sign bits left-justified with the
-    remainder zero-padded, not right-justified.
+    """Encode 1-112 file bytes for a File Dump Data Packet. Each group of
+    up to 7 bytes becomes a sign byte (bit 7 of each byte, first byte in
+    bit 6, left-justified for a short group) followed by each byte's low 7
+    bits.
     """
     if not (1 <= len(stored_bytes) <= 112):
         raise ValueError(
@@ -1753,1375 +1482,608 @@ def _encode_file_dump_data(stored_bytes) -> tuple:
     return tuple(out)
 
 
-def _build_message(message: dict) -> "mido.Message":
-    """Build a channel/system/sysex mido.Message from a tool-supplied dict.
+# --- Shared message-building helpers ---------------------------------------
+# Missing required field -> KeyError; bad value -> ValueError. _send and
+# _write_midi_file report both.
 
-    Shared by both live `send` and `write_midi_file`'s per-track messages —
-    kept as one function rather than duplicated so the two stay in sync.
-    Same required-field KeyErrors, same mido-raised ValueErrors for bad
-    values, callers still catch both. `time` (delta ticks, meaningful for
-    file-writing, harmless/ignored-by-hardware for live send) is read from
-    the dict and passed through uniformly — confirmed live that mido.Message
-    accepts a `time` kwarg for every message category (channel, system
-    common/real-time, and sysex all tested), not just some.
+
+def _required(message: dict, field: str, context: "str | None" = None):
+    value = message.get(field)
+    if value is None:
+        where = f" (required for {context!r})" if context else ""
+        raise KeyError(f"'{field}'{where}")
+    return value
+
+
+def _check_range(field: str, value, low: int, high: int):
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"'{field}' must be an integer, got {value!r}")
+    if not (low <= value <= high):
+        raise ValueError(f"'{field}' must be {low}-{high}, got {value!r}")
+    return value
+
+
+def _choice(message: dict, field: str, table, context: str):
+    """Read a required field whose value must be a key of `table`."""
+    value = _required(message, field)
+    if value not in table:
+        raise ValueError(
+            f"'{field}' must be one of {sorted(table)} for {context!r}, "
+            f"got {value!r}"
+        )
+    return value
+
+
+def _device_id(message: dict, default: "int | None" = 0x7F) -> int:
+    """SysEx device ID, 0-127. default=None makes it required."""
+    device_id = message.get("device_id", default)
+    if device_id is None:
+        raise KeyError("'device_id'")
+    return _check_range("device_id", device_id, 0, 127)
+
+
+def _sysex(*data: int, time: int = 0) -> "mido.Message":
+    """A SysEx message; `data` excludes F0/F7."""
+    return mido.Message("sysex", data=data, time=time)
+
+
+def _split14(field: str, value: int) -> tuple:
+    """A 0-16383 value as (LSB, MSB) 7-bit bytes."""
+    _check_range(field, value, 0, 0x3FFF)
+    return value & 0x7F, (value >> 7) & 0x7F
+
+
+def _xor_checksum(data) -> int:
+    checksum = 0
+    for b in data:
+        checksum ^= b
+    return checksum
+
+
+def _ascii(field: str, text: str, *, printable: bool = False) -> tuple:
+    """Encode text as 7-bit ASCII bytes; printable=True allows 20h-7Eh only."""
+    low, high = (0x20, 0x7E) if printable else (0x00, 0x7F)
+    for c in text:
+        if not (low <= ord(c) <= high):
+            kind = "printable ASCII (0x20-0x7E)" if printable else "7-bit ASCII"
+            raise ValueError(f"'{field}' must be {kind}, got {c!r}")
+    return tuple(ord(c) for c in text)
+
+
+def _time_code_fields(message: dict, *extra: str, context: "str | None" = None) -> tuple:
+    """The required hours, minutes, seconds, frames, frame_rate fields, plus
+    any `extra` ones, in that order."""
+    names = ("hours", "minutes", "seconds", "frames", "frame_rate", *extra)
+    return tuple(_required(message, name, context) for name in names)
+
+
+def _required_list(message: dict, field: str, context: str) -> list:
+    """A required field that must be a non-empty list."""
+    value = message.get(field)
+    if not value:
+        raise KeyError(f"'{field}' (required non-empty list for {context!r})")
+    return list(value)
+
+
+# --- MIDI Machine Control (RP-013) -------------------------------------------
+# Every command is F0 7F <device_id> 06 <opcode> [<count> <data...>] F7.
+# _mmc_command_bytes builds <opcode> [<count> <data...>]. Commands that carry
+# data have a builder in _MMC_DATA_BUILDERS that returns <data>; the 13
+# transport commands in _MMC_NO_DATA_COMMANDS, WAIT and RESUME have none.
+
+_MMC_GENERATOR_ACTIONS = {"stop": 0x00, "run": 0x01, "copy_jam": 0x02}
+_MMC_MTC_COMMAND_ACTIONS = {"off": 0x00, "follow": 0x02}
+_MMC_GROUP_ACTIONS = {"assign": 0x00, "dis_assign": 0x01}
+_MMC_PROCEDURE_ACTIONS = {
+    "assemble": 0x00, "delete": 0x01, "set": 0x02, "execute": 0x03,
+}
+_MMC_EVENT_ACTIONS = {"define": 0x00, "delete": 0x01, "set": 0x02, "test": 0x03}
+_MMC_EVENT_DIRECTIONS = {"forward": 0b00, "reverse": 0b01, "both": 0b10}
+_MMC_EVENT_TRIGGER_SOURCES = (
+    "selected_time_code", "selected_master_code", "generator_time_code",
+    "midi_time_code_input",
+)
+_MMC_GP_REGISTERS = ("gp0", "gp1", "gp2", "gp3", "gp4", "gp5", "gp6", "gp7")
+_MMC_UPDATE_ACTIONS = {"begin": 0x00, "end": 0x01}
+
+# Always sent to the all-call device ID 7F, whatever 'device_id' says
+# (RP-013 pp.30-31 and p.42).
+_MMC_ALL_CALL = frozenset({"assign_system_master", "wait", "resume"})
+
+# The per-bit flags of Standard Time Code (_encode_standard_time_code).
+_TIME_CODE_FLAGS = (
+    "color_frame", "blank", "negative", "use_status_byte", "estimated",
+    "invalid", "video_field_1", "no_time_code",
+)
+
+
+def _each(field: str, entries, encode) -> tuple:
+    """encode(entry) for every entry of a list field, concatenated. An error
+    is re-raised with the entry's index in front."""
+    out: list = []
+    for index, entry in enumerate(entries):
+        try:
+            out += encode(entry)
+        except KeyError as e:
+            raise KeyError(f"'{field}'[{index}]: {e}") from e
+        except ValueError as e:
+            raise ValueError(f"'{field}'[{index}]: {e}") from e
+    return tuple(out)
+
+
+def _mmc_locate(message: dict, command: str) -> tuple:
+    # LOCATE [TARGET] (44h, RP-013 p.28): 01 then Standard Time Code with
+    # subframes. LOCATE [I/F] (sub-command 00, locate to a GP register)
+    # isn't implemented.
+    return (0x01, *_time_code_bytes(message, "subframes"))
+
+
+def _mmc_step(message: dict, command: str) -> tuple:
+    # STEP (48h, RP-013 p.30): one byte 0 g ssssss (g = reverse,
+    # s = quantity 0-63).
+    quantity = _check_range(
+        "quantity", _required(message, "quantity", command), 0, 63,
+    )
+    return ((0x40 if message.get("reverse", False) else 0x00) | quantity,)
+
+
+def _mmc_assign_system_master(message: dict, command: str) -> tuple:
+    # ASSIGN SYSTEM MASTER (49h, RP-013 pp.30-31). target_device_id 7F
+    # dis-assigns. Sent to all-call (_MMC_ALL_CALL).
+    target = _required(message, "target_device_id", command)
+    return (_check_range("target_device_id", target, 0, 127),)
+
+
+def _mmc_generator_command(message: dict, command: str) -> tuple:
+    # GENERATOR COMMAND (4Ah, RP-013 p.31): stop, run, or copy/jam the time
+    # code generator. The GENERATOR SET UP Information Field isn't
+    # registered.
+    action = _choice(message, "action", _MMC_GENERATOR_ACTIONS, command)
+    return (_MMC_GENERATOR_ACTIONS[action],)
+
+
+def _mmc_midi_time_code_command(message: dict, command: str) -> tuple:
+    # MIDI TIME CODE COMMAND (4Bh, RP-013 p.31). The spec defines only 00 and
+    # 02. The MIDI TIME CODE SET UP Information Field isn't registered.
+    action = _choice(message, "action", _MMC_MTC_COMMAND_ACTIONS, command)
+    return (_MMC_MTC_COMMAND_ACTIONS[action],)
+
+
+def _mmc_speed(message: dict, command: str) -> tuple:
+    # VARIABLE PLAY 45h, SEARCH 46h, SHUTTLE 47h (RP-013 pp.29-30), DEFERRED
+    # VARIABLE PLAY 54h (p.37), RECORD STROBE VARIABLE 55h (p.41): sh sm sl
+    # (_encode_standard_speed).
+    speed = _required(message, "speed", command)
+    return _encode_standard_speed(speed, message.get("reverse", False))
+
+
+def _mmc_drop_frame_adjust(message: dict, command: str) -> tuple:
+    # DROP FRAME ADJUST (4Fh, RP-013 p.33): converts a writeable field to
+    # drop-frame in place (the device ignores it unless the field is 30fps
+    # non-drop).
+    name = _required(message, "name", command)
+    return (_resolve_info_field_name(name, require_writeable=True),)
+
+
+def _mmc_move(message: dict, command: str) -> tuple:
+    # MOVE (4Ch, RP-013 p.32): destination = source. The destination must be
+    # writeable; the source can be any field.
+    destination = _required(message, "destination", command)
+    source = _required(message, "source", command)
+    return (
+        _resolve_info_field_name(destination, require_writeable=True),
+        _resolve_info_field_name(source),
+    )
+
+
+def _mmc_math(message: dict, command: str) -> tuple:
+    # ADD (4Dh) / SUBTRACT (4Eh), RP-013 pp.32-33:
+    # destination = source_1 +/- source_2. Same field rules as MOVE. The
+    # destination may also be a source.
+    destination, source_1, source_2 = (
+        _required(message, field, command)
+        for field in ("destination", "source_1", "source_2")
+    )
+    return (
+        _resolve_info_field_name(destination, require_writeable=True),
+        _resolve_info_field_name(source_1),
+        _resolve_info_field_name(source_2),
+    )
+
+
+def _mmc_group(message: dict, command: str) -> tuple:
+    # GROUP (52h, RP-013 p.39):
+    #   assign (00): device_ids join group; group can't be 7F.
+    #   dis_assign (01): device_ids leave group; group 7F means all groups.
+    #     7F in device_ids means all devices.
+    # Spec example (all devices, all groups): F0 7F 7F 06 52 03 01 7F 7F F7.
+    action = _choice(message, "action", _MMC_GROUP_ACTIONS, command)
+    group = _check_range("group", _required(message, "group", command), 0, 127)
+    if action == "assign" and group == 0x7F:
+        raise ValueError(
+            "'group' must not be 0x7F (127) for action='assign' -- 0x7F is "
+            "the all-call address, not a group number"
+        )
+    device_ids = _required_list(message, "device_ids", command)
+    for device_id in device_ids:
+        _check_range("device_ids entry", device_id, 0, 127)
+    return (_MMC_GROUP_ACTIONS[action], group, *device_ids)
+
+
+def _mmc_slot(message: dict, field: str, command: str, all_allowed: bool) -> int:
+    """A procedure or event number. 7F means "all" where `all_allowed`
+    (delete, set) and is reserved otherwise."""
+    value = _required(message, field, command)
+    return _check_range(field, value, 0, 0x7F if all_allowed else 0x7E)
+
+
+def _mmc_procedure(message: dict, command: str) -> tuple:
+    # PROCEDURE (50h, RP-013 pp.34-35): stored command lists.
+    #   assemble (00): procedure + nested 'commands'.
+    #   delete (01), set (02): procedure 7F means all procedures.
+    #   execute (03).
+    action = _choice(message, "action", _MMC_PROCEDURE_ACTIONS, command)
+    procedure = _mmc_slot(
+        message, "procedure", command, all_allowed=action in ("delete", "set"),
+    )
+    if action != "assemble":
+        return (_MMC_PROCEDURE_ACTIONS[action], procedure)
+    nested: list = []
+    for entry in _required_list(message, "commands", "assemble"):
+        nested += _encode_nested_mmc_command(
+            entry, forbid_assemble=True, forbid_execute_name=procedure,
+        )
+    return (0x00, procedure, *nested)
+
+
+def _mmc_event(message: dict, command: str) -> tuple:
+    # EVENT (51h, RP-013 pp.35-38): commands triggered at a time.
+    # define (00), delete (01), set (02), test (03); event 7F means all events
+    # for delete/set and is reserved for define/test.
+    # define payload: event, flags, trigger_source, name, trigger_command.
+    #   flags = 0 k 0 a 00 dd: k = non_delete (stays armed after firing),
+    #     a = all_speeds, dd = direction (00 forward, 01 reverse, 10 both).
+    #   trigger_source: a time code field.
+    #   name: the GP0-GP7 register holding the trigger time.
+    #   trigger_command: one nested mmc command; it can't be an EVENT
+    #     [DEFINE] or PROCEDURE [ASSEMBLE].
+    action = _choice(message, "action", _MMC_EVENT_ACTIONS, command)
+    event = _mmc_slot(
+        message, "event", command, all_allowed=action in ("delete", "set"),
+    )
+    if action != "define":
+        return (_MMC_EVENT_ACTIONS[action], event)
+    direction = _choice(message, "direction", _MMC_EVENT_DIRECTIONS, "define")
+    flags = (
+        (0x40 if message.get("non_delete", False) else 0x00)
+        | (0x10 if message.get("all_speeds", False) else 0x00)
+        | _MMC_EVENT_DIRECTIONS[direction]
+    )
+    trigger_source = _choice(
+        message, "trigger_source", _MMC_EVENT_TRIGGER_SOURCES, "define",
+    )
+    name = _choice(message, "name", _MMC_GP_REGISTERS, "define")
+    # Not 'command': that key already holds "event".
+    trigger_command = _required(message, "trigger_command", "define")
+    nested = _encode_nested_mmc_command(
+        trigger_command, forbid_assemble=True, forbid_define=True,
+    )
+    return (
+        0x00, event, flags, _INFO_FIELD_NAMES[trigger_source],
+        _INFO_FIELD_NAMES[name], *nested,
+    )
+
+
+def _mmc_read(message: dict, command: str) -> tuple:
+    # READ (42h, RP-013 p.26): ask for the current value of any registered
+    # fields, read-only ones included. The device answers with an MMC
+    # Response (decode with decode_mmc_response), or RESPONSE ERROR for
+    # fields it doesn't support.
+    names = _required_list(message, "names", command)
+    return tuple(_resolve_info_field_name(name) for name in names)
+
+
+def _mmc_write(message: dict, command: str) -> tuple:
+    # WRITE (40h, RP-013 p.25): <name> <data> for each entry in 'fields'.
+    # Only writeable Standard Time Code fields are accepted, so <data> is
+    # always 5 bytes with no length prefix. Count-prefixed fields (such as
+    # the Track Bitmaps) aren't supported.
+    data: list = []
+    for field in _required_list(message, "fields", command):
+        name = _required(field, "name", "each 'fields' entry")
+        data.append(_resolve_info_field_name(name, require_writeable=True))
+        data += _encode_standard_time_code(
+            *_time_code_fields(field, context=name),
+            subframes=field.get("subframes", 0),
+            **{flag: field.get(flag, False) for flag in _TIME_CODE_FLAGS},
+        )
+    return tuple(data)
+
+
+def _mmc_masked_write(message: dict, command: str) -> tuple:
+    # MASKED WRITE (41h, RP-013 pp.25-26): change selected bits of a Track
+    # Bitmap field. Each entry in 'fields' becomes <name> <byte#> <mask>
+    # <data>. byte# 0 is the first bitmap byte after the field's own count
+    # byte. mask and data are 7-bit, so 7F means all ones.
+    data: list = []
+    for field in _required_list(message, "fields", command):
+        name = _required(field, "name", "each 'fields' entry")
+        data.append(_resolve_info_field_name(name, require_mask_writeable=True))
+        for key in ("byte_number", "mask", "data"):
+            data.append(_check_range(key, _required(field, key, name), 0, 127))
+    return tuple(data)
+
+
+def _mmc_update(message: dict, command: str) -> tuple:
+    # UPDATE (43h, RP-013 pp.26-27):
+    #   begin (00): send the named fields now, then again whenever they
+    #     change (limited by the UPDATE RATE field).
+    #   end (01): stop updating the named fields. The name "all" (sent as 7F)
+    #     stops every update; it is valid only here.
+    action = _choice(message, "action", _MMC_UPDATE_ACTIONS, command)
+    names = _required_list(message, "names", command)
+    return (_MMC_UPDATE_ACTIONS[action], *(
+        0x7F if action == "end" and name == "all"
+        else _resolve_info_field_name(name)
+        for name in names
+    ))
+
+
+_MMC_DATA_BUILDERS = {
+    "locate": _mmc_locate,
+    "step": _mmc_step,
+    "assign_system_master": _mmc_assign_system_master,
+    "generator_command": _mmc_generator_command,
+    "midi_time_code_command": _mmc_midi_time_code_command,
+    "variable_play": _mmc_speed,
+    "search": _mmc_speed,
+    "shuttle": _mmc_speed,
+    "deferred_variable_play": _mmc_speed,
+    "record_strobe_variable": _mmc_speed,
+    "drop_frame_adjust": _mmc_drop_frame_adjust,
+    "move": _mmc_move,
+    "add": _mmc_math,
+    "subtract": _mmc_math,
+    "group": _mmc_group,
+    "procedure": _mmc_procedure,
+    "event": _mmc_event,
+    "read": _mmc_read,
+    "write": _mmc_write,
+    "masked_write": _mmc_masked_write,
+    "update": _mmc_update,
+}
+
+
+def _mmc_command_bytes(message: dict) -> tuple:
+    """<opcode> [<count> <data...>] for one mmc command dict; the count is
+    the length of the data."""
+    command = _choice(message, "command", _COMMANDS["mmc"], "mmc")
+    opcode = _COMMANDS["mmc"][command]
+    builder = _MMC_DATA_BUILDERS.get(command)
+    if builder is None:
+        return (opcode,)
+    data = builder(message, command)
+    return (opcode, len(data), *data)
+
+
+# --- MIDI Show Control (RP-002/014) ------------------------------------------
+# F0 7F <device_id> 02 <command_format> <command> <data> F7. Commands that
+# carry data have a builder in _MSC_DATA_BUILDERS returning <data>; the ones
+# in _MSC_NO_DATA_COMMANDS have none.
+
+_MSC_NO_DATA_COMMANDS = frozenset({"all_off", "restore", "reset"})
+
+# The time fields of MSC TIMED_GO and SET.
+_MSC_TIME_FIELDS = (
+    "hours", "minutes", "seconds", "frames", "fractional_frames", "frame_rate",
+)
+
+
+def _msc_command_format(message: dict) -> int:
+    """The command_format byte: a name from _MSC_FORMATS, or
+    'command_format_raw' (0-127) for a narrower sub-category. Exactly one."""
+    name = message.get("command_format")
+    raw = message.get("command_format_raw")
+    if name is not None and raw is not None:
+        raise ValueError(
+            "specify only ONE of 'command_format' or 'command_format_raw', "
+            "not both"
+        )
+    if raw is not None:
+        return _check_range("command_format_raw", raw, 0, 127)
+    if name is None:
+        raise KeyError("'command_format' (or 'command_format_raw')")
+    return _MSC_FORMATS[_choice(message, "command_format", _MSC_FORMATS, "msc")]
+
+
+def _msc_cue(message: dict, command: str) -> tuple:
+    # GO, STOP, RESUME, GO_OFF: optional cue data. LOAD: q_number required.
+    if command == "load":
+        q_number = _required(message, "q_number", command)
+    else:
+        q_number = message.get("q_number")
+    return _encode_msc_cue_data(
+        q_number, message.get("q_list"), message.get("q_path"),
+    )
+
+
+def _msc_timed_go(message: dict, command: str) -> tuple:
+    # TIMED_GO: MSC time (hr mn sc fr ff), then the same cue data as GO.
+    return (
+        *_time_code_bytes(message, "fractional_frames", command),
+        *_msc_cue(message, command),
+    )
+
+
+def _msc_set(message: dict, command: str) -> tuple:
+    # SET: control number and value, 14 bits each, LSB first, then the MSC
+    # time when all six time fields are given (none or all).
+    control_number = _required(message, "control_number", command)
+    control_value = _required(message, "control_value", command)
+    data = (
+        *_split14("control_number", control_number),
+        *_split14("control_value", control_value),
+    )
+    given = [field for field in _MSC_TIME_FIELDS if message.get(field) is not None]
+    if not given:
+        return data
+    if len(given) != len(_MSC_TIME_FIELDS):
+        raise ValueError(
+            f"SET's time fields ({'/'.join(_MSC_TIME_FIELDS)}) must be given "
+            f"all together or not at all; got {given}"
+        )
+    return (*data, *_time_code_bytes(message, "fractional_frames", command))
+
+
+def _msc_fire(message: dict, command: str) -> tuple:
+    # FIRE: one macro number.
+    macro = _required(message, "macro_number", command)
+    return (_check_range("macro_number", macro, 0, 127),)
+
+
+_MSC_DATA_BUILDERS = {
+    "go": _msc_cue,
+    "stop": _msc_cue,
+    "resume": _msc_cue,
+    "go_off": _msc_cue,
+    "load": _msc_cue,
+    "timed_go": _msc_timed_go,
+    "set": _msc_set,
+    "fire": _msc_fire,
+}
+
+
+# --- Channel and system messages ---------------------------------------------
+# The types mido builds directly: type -> {field: default}, where _REQUIRED
+# marks a field with no default. Types in _CHANNEL_TYPES also take 'channel'
+# (default 0). mido checks the values' ranges.
+
+_REQUIRED = object()
+
+_MIDO_FIELDS = {
+    "note_on": {"note": _REQUIRED, "velocity": 64},
+    "note_off": {"note": _REQUIRED, "velocity": 0},
+    "control_change": {"control": _REQUIRED, "value": 0},
+    "program_change": {"program": _REQUIRED},
+    "pitchwheel": {"pitch": 0},
+    "aftertouch": {"value": 0},  # Channel Pressure: one value per channel
+    "polytouch": {"note": _REQUIRED, "value": 0},  # Polyphonic Key Pressure
+    "quarter_frame": {"frame_type": _REQUIRED, "frame_value": _REQUIRED},
+    "songpos": {"pos": 0},  # 0-16383
+    "song_select": {"song": _REQUIRED},
+    "tune_request": {},
+    # System Real-Time: status byte only.
+    "clock": {}, "start": {}, "stop": {}, "continue": {},
+    "active_sensing": {}, "reset": {},
+}
+_CHANNEL_TYPES = frozenset({
+    "note_on", "note_off", "control_change", "program_change", "pitchwheel",
+    "aftertouch", "polytouch",
+})
+
+
+def _build_message(message: dict) -> "mido.Message":
+    """Build one mido.Message (channel, system or SysEx) from a typed dict.
+
+    Used by send (through _build_message_sequence) and write_midi_file.
+    Raises KeyError for a missing required field and ValueError for a bad
+    value; callers catch both. 'time' is the delta in ticks, used only in
+    files.
     """
     msg_type = message.get("type")
     channel = message.get("channel", 0)
     time = message.get("time", 0)
-    if msg_type == "note_on":
-        return mido.Message(
-            "note_on", channel=channel, note=message["note"],
-            velocity=message.get("velocity", 64), time=time,
-        )
-    if msg_type == "note_off":
-        return mido.Message(
-            "note_off", channel=channel, note=message["note"],
-            velocity=message.get("velocity", 0), time=time,
-        )
-    if msg_type == "control_change":
-        return mido.Message(
-            "control_change", channel=channel, control=message["control"],
-            value=message.get("value", 0), time=time,
-        )
-    if msg_type == "program_change":
-        return mido.Message(
-            "program_change", channel=channel, program=message["program"],
-            time=time,
-        )
-    if msg_type == "pitchwheel":
-        return mido.Message(
-            "pitchwheel", channel=channel, pitch=message.get("pitch", 0),
-            time=time,
-        )
-    if msg_type == "aftertouch":
-        # Channel Pressure (After-touch) — applies to all currently
-        # sounding notes on the channel, single value, no note number.
-        return mido.Message(
-            "aftertouch", channel=channel, value=message.get("value", 0),
-            time=time,
-        )
-    if msg_type == "polytouch":
-        # Polyphonic Key Pressure — per-note aftertouch.
-        return mido.Message(
-            "polytouch", channel=channel, note=message["note"],
-            value=message.get("value", 0), time=time,
-        )
-    if msg_type == "quarter_frame":
-        # MIDI Time Code Quarter Frame (System Common).
-        return mido.Message(
-            "quarter_frame", frame_type=message["frame_type"],
-            frame_value=message["frame_value"], time=time,
-        )
-    if msg_type == "songpos":
-        # Song Position Pointer (System Common), 0-16383.
-        return mido.Message("songpos", pos=message.get("pos", 0), time=time)
-    if msg_type == "song_select":
-        # Song Select (System Common).
-        return mido.Message("song_select", song=message["song"], time=time)
-    if msg_type == "tune_request":
-        # System Common, no data bytes.
-        return mido.Message("tune_request", time=time)
-    if msg_type in ("clock", "start", "stop", "continue", "active_sensing", "reset"):
-        # System Real-Time messages — single status byte, no data at all,
-        # no channel. mido accepts the type name directly.
-        return mido.Message(msg_type, time=time)
+    if msg_type in _MIDO_FIELDS:
+        fields = {
+            name: message[name] if default is _REQUIRED else message.get(name, default)
+            for name, default in _MIDO_FIELDS[msg_type].items()
+        }
+        if msg_type in _CHANNEL_TYPES:
+            fields["channel"] = channel
+        return mido.Message(msg_type, time=time, **fields)
     if msg_type == "sysex":
-        # System Exclusive — arbitrary payload. mido adds the
-        # leading 0xF0 / trailing 0xF7 automatically; data bytes must each
-        # be 0-127, mido itself raises ValueError otherwise (caught by the
-        # broad except in every caller, same as every other message type).
+        # Payload without F0/F7 (mido adds them). mido raises ValueError for
+        # a byte outside 0-127.
         raw_data = message.get("data")
         if raw_data is None:
             raise KeyError("'data'")
         return mido.Message("sysex", data=tuple(raw_data), time=time)
     if msg_type == "mtc_full":
-        # MIDI Time Code Full Message — a Universal Real Time
-        # SysEx convenience wrapper (built on the SAME generic sysex path
-        # above, not a separate one), for jumping the timeline to an exact
-        # position in one message rather than accumulating Quarter Frames.
-        # Wire format, confirmed against an independent technical reference
-        # (somascape.org/midi/tech/spec.html), consistent with mido's own
-        # existing System Common 'quarter_frame' handling already above:
+        # MTC Full Message (RP-004/008): jumps to a position in one
+        # message instead of eight Quarter Frames.
         #   F0 7F <device_id> 01 01 hr mn sc fr F7
-        #   hr = 0yyzzzzz : yy = frame-rate type (00=24fps 01=25fps
-        #        10=30fps-drop 11=30fps-nondrop), zzzzz = hours (0-23)
-        #   mn = minutes (0-59), sc = seconds (0-59), fr = frames (0-29)
-        # `frame_rate` is REQUIRED (not defaulted) — it changes what the
-        # position actually means downstream, so guessing wrong here would
-        # be a real correctness bug, not just a missing convenience default,
-        # unlike e.g. `channel` defaulting to 0 elsewhere in this function.
-        # `device_id` defaults to 0x7F (all devices) — that IS the spec's
-        # own stated default ("id = ID of target device (default = 7F = All
-        # devices)"), a genuinely safe default to carry over, unlike
-        # frame_rate above.
-        hours = message.get("hours")
-        minutes = message.get("minutes")
-        seconds = message.get("seconds")
-        frames = message.get("frames")
-        frame_rate = message.get("frame_rate")
-        if hours is None:
-            raise KeyError("'hours'")
-        if minutes is None:
-            raise KeyError("'minutes'")
-        if seconds is None:
-            raise KeyError("'seconds'")
-        if frames is None:
-            raise KeyError("'frames'")
-        if frame_rate is None:
-            raise KeyError("'frame_rate'")
-        device_id = message.get("device_id", 0x7F)
-
-        if not (0 <= minutes <= 59):
-            raise ValueError(f"'minutes' must be 0-59, got {minutes!r}")
-        if not (0 <= seconds <= 59):
-            raise ValueError(f"'seconds' must be 0-59, got {seconds!r}")
-        if not (0 <= frames <= 29):
-            raise ValueError(f"'frames' must be 0-29, got {frames!r}")
-        if not (0 <= device_id <= 127):
-            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
-
-        hr_byte = _encode_smpte_hour_byte(hours, frame_rate)
-
-        return mido.Message(
-            "sysex",
-            data=(0x7F, device_id, 0x01, 0x01, hr_byte, minutes, seconds, frames),
-            time=time,
+        # hr: _encode_smpte_hour_byte. frame_rate has no default because it
+        # changes what the position means. device_id defaults to 7F (all
+        # devices), the spec's default.
+        device_id = _device_id(message)
+        return _sysex(
+            0x7F, device_id, 0x01, 0x01, *_time_code_bytes(message), time=time,
         )
     if msg_type == "mtc_nak":
-        # MTC "synchronization dropped" notification — RP-004/008 p.4:
-        # "If synchronization is dropped the transmitter should send a
-        # NAK message. The receiver should interpret this as 'tape has
-        # stopped' and should turn of any lingering notes, etc." The doc
-        # gives no separate wire format of its own for this — it's
-        # reusing the SAME generic Universal Non-Real-Time handshake
-        # family (sub-ID#1 7E, "NAK") that 'file_dump's own 'nak' command
-        # already builds. That command still exists and produces
-        # IDENTICAL bytes, but requiring a 'packet_number' (which packet
-        # failed) makes no sense for "MTC lock was lost" — there's no
-        # packet here, just a lock-loss notification — and burying this
-        # under 'file_dump' means nobody would think to look there for an
-        # MTC concern. This is a small, dedicated, better-named/
-        # documented alternative for exactly this one use, not a new wire
-        # format: F0 7E <device_id> 7E <packet_number=0 default> F7.
-        # `device_id` defaults to 0x7F (all devices), same convention as
-        # 'mtc_full'/'mtc_quarter_frame_sequence' above — a genuine
-        # "lock lost" notification is naturally broadcast-style, unlike
-        # 'file_dump's point-to-point transfer (which has no default for
-        # exactly that reason).
-        device_id = message.get("device_id", 0x7F)
-        packet_number = message.get("packet_number", 0)
-        if not (0 <= device_id <= 127):
-            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
-        if not (0 <= packet_number <= 127):
-            raise ValueError(
-                f"'packet_number' must be 0-127, got {packet_number!r}"
-            )
-        return mido.Message(
-            "sysex",
-            data=(0x7E, device_id, 0x7E, packet_number),
-            time=time,
+        # MTC sync-dropped NAK (RP-004/008 p.4): the receiver treats it as
+        # "tape stopped". Same bytes as file_dump's 'nak', without its
+        # required packet_number:
+        #   F0 7E <device_id> 7E <packet_number, default 0> F7
+        # device_id defaults to 7F (all devices).
+        device_id = _device_id(message)
+        packet_number = _check_range(
+            "packet_number", message.get("packet_number", 0), 0, 127,
         )
+        return _sysex(0x7E, device_id, 0x7E, packet_number, time=time)
     if msg_type == "mmc":
-        # MIDI Machine Control — a Universal Real Time SysEx
-        # convenience wrapper (built on the SAME generic sysex path, same
-        # rule the user set for 'mtc_full'). ONE typed message covers
-        # MULTIPLE commands via a required 'command' sub-field, rather than
-        # a dozen separate top-level message types (e.g. 'mmc_stop',
-        # 'mmc_play', ...) — mirrors the same "one type, variable
-        # data/sub-field" shape 'sysex' itself already has, and keeps the
-        # message 'type' enum from ballooning. Wire format, confirmed
-        # against somascape.org's MMC section, cross-checked against
-        # en.wikipedia.org/wiki/MIDI_Machine_Control (matches exactly):
-        #   No-data commands:  F0 7F <device_id> 06 <cc> F7
-        #   Locate/Goto:       F0 7F <device_id> 06 44 06 01 hr mn sc fr sf F7
-        #     (44 = Sub-ID#2/Locate, 06 = byte count that follows, 01 =
-        #     sub-format, hr = SAME 0yyzzzzz encoding as mtc_full above —
-        #     hence the shared _encode_smpte_hour_byte helper — sf = SMPTE
-        #     sub-frame 0-99, a field mtc_full's own Full Message doesn't
-        #     have)
-        # Added later (RP-013 v1.0, the ACTUAL MMC spec PDF): 'step',
-        # 'assign_system_master', 'generator_command',
-        # 'midi_time_code_command', 'variable_play', 'search', 'shuttle',
-        # 'deferred_variable_play', 'record_strobe_variable', 'wait',
-        # 'resume', 'drop_frame_adjust', 'move', 'add', 'subtract',
-        # 'group', 'procedure', 'event', 'read', 'write', 'update' —
-        # see each one's own inline comment below for wire format/
-        # verification detail. 'move'/'add'/'subtract'/
-        # 'drop_frame_adjust'/'read'/'write'/'update' all share the
-        # _INFO_FIELD_NAMES/_WRITEABLE_INFO_FIELDS/
-        # _resolve_info_field_name Information Field name registry
-        # above; 'write' additionally uses _encode_standard_time_code
-        # (also above) to encode each field's actual 5-byte data.
-        # 'procedure' and 'event' both use _encode_nested_mmc_command
-        # (also above) for embedding other mmc commands inside their
-        # own payload. 'read'/'update' also accept the Standard Track
-        # Bitmap fields (_TRACK_BITMAP_INFO_FIELDS); 'write' accepts
-        # only the Standard Time Code fields. 'masked_write' (0x41,
-        # built) accepts only _MASK_WRITEABLE_INFO_FIELDS. A device's
-        # replies are decoded by the separate 'decode_mmc_response'
-        # action, not here.
-        # NOT IMPLEMENTED: Information Field names beyond those
-        # registered in _INFO_FIELD_NAMES — add one to that registry
-        # when a real device needs it.
-        # Command Error Reset (0x0C) IS included — cheap to include, one
-        # more dict entry, no reason to leave it out just because Wikipedia's
-        # table happened to omit it while somascape's didn't contradict it.
-        _MMC_COMMANDS = {
-            "stop": 0x01, "play": 0x02, "deferred_play": 0x03,
-            "fast_forward": 0x04, "rewind": 0x05, "record_strobe": 0x06,
-            "record_exit": 0x07, "record_pause": 0x08, "pause": 0x09,
-            "eject": 0x0A, "chase": 0x0B, "command_error_reset": 0x0C,
-            "mmc_reset": 0x0D,
-        }
-        command = message.get("command")
-        if command is None:
-            raise KeyError("'command'")
-        device_id = message.get("device_id", 0x7F)
-        if not (0 <= device_id <= 127):
-            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
-
-        if command == "locate":
-            hours = message.get("hours")
-            minutes = message.get("minutes")
-            seconds = message.get("seconds")
-            frames = message.get("frames")
-            subframes = message.get("subframes")
-            frame_rate = message.get("frame_rate")
-            if hours is None:
-                raise KeyError("'hours'")
-            if minutes is None:
-                raise KeyError("'minutes'")
-            if seconds is None:
-                raise KeyError("'seconds'")
-            if frames is None:
-                raise KeyError("'frames'")
-            if subframes is None:
-                raise KeyError("'subframes'")
-            if frame_rate is None:
-                raise KeyError("'frame_rate'")
-            if not (0 <= minutes <= 59):
-                raise ValueError(f"'minutes' must be 0-59, got {minutes!r}")
-            if not (0 <= seconds <= 59):
-                raise ValueError(f"'seconds' must be 0-59, got {seconds!r}")
-            if not (0 <= frames <= 29):
-                raise ValueError(f"'frames' must be 0-29, got {frames!r}")
-            if not (0 <= subframes <= 99):
-                raise ValueError(
-                    f"'subframes' must be 0-99, got {subframes!r}"
-                )
-            hr_byte = _encode_smpte_hour_byte(hours, frame_rate)
-            return mido.Message(
-                "sysex",
-                data=(
-                    0x7F, device_id, 0x06, 0x44, 0x06, 0x01,
-                    hr_byte, minutes, seconds, frames, subframes,
-                ),
-                time=time,
-            )
-
-        if command == "step":
-            # STEP (0x48) — RP-013 p.30, visually re-verified against a
-            # rendered page image (this section's raw text extraction was
-            # garbled). Payload is ONE byte: bit6=sign (1=reverse), bits
-            # 5-0=quantity (0-63), bit7 always 0 (ordinary MIDI data byte
-            # constraint) — spec's own notation "0 g ssssss".
-            reverse = message.get("reverse", False)
-            quantity = message.get("quantity")
-            if quantity is None:
-                raise KeyError("'quantity' (required for 'step')")
-            if not (0 <= quantity <= 63):
-                raise ValueError(
-                    f"'quantity' must be 0-63, got {quantity!r}"
-                )
-            steps_byte = (0x40 if reverse else 0x00) | quantity
-            return mido.Message(
-                "sysex",
-                data=(0x7F, device_id, 0x06, 0x48, 0x01, steps_byte),
-                time=time,
-            )
-        if command == "assign_system_master":
-            # ASSIGN SYSTEM MASTER (0x49) — RP-013 p.30-31, visually
-            # re-verified. `target_device_id` = the device being assigned
-            # master (0x7F = dis-assign, per spec's own reserved meaning).
-            # The message's ENVELOPE device_id is deliberately hardcoded
-            # to 0x7F here (NOT read from the general 'device_id' field
-            # above) — the spec states outright "The ASSIGN SYSTEM MASTER
-            # message MUST be transmitted via the 'All-Call' device ID
-            # (7F)", so exposing it as a configurable field would just be
-            # a footgun for silently violating the spec.
-            target_device_id = message.get("target_device_id")
-            if target_device_id is None:
-                raise KeyError(
-                    "'target_device_id' (required for "
-                    "'assign_system_master')"
-                )
-            if not (0 <= target_device_id <= 127):
-                raise ValueError(
-                    f"'target_device_id' must be 0-127, got "
-                    f"{target_device_id!r}"
-                )
-            return mido.Message(
-                "sysex",
-                data=(0x7F, 0x7F, 0x06, 0x49, 0x01, target_device_id),
-                time=time,
-            )
-        if command == "generator_command":
-            # GENERATOR COMMAND (0x4A) — RP-013 p.31, visually
-            # re-verified. Controls the time-code generator's running
-            # state; see also the (not yet built) GENERATOR SET UP
-            # Information Field.
-            _GENERATOR_ACTIONS = {"stop": 0x00, "run": 0x01, "copy_jam": 0x02}
-            action = message.get("action")
-            if action is None:
-                raise KeyError(
-                    "'action' (required for 'generator_command')"
-                )
-            if action not in _GENERATOR_ACTIONS:
-                raise ValueError(
-                    f"'action' must be one of "
-                    f"{sorted(_GENERATOR_ACTIONS)} for "
-                    f"'generator_command', got {action!r}"
-                )
-            return mido.Message(
-                "sysex",
-                data=(
-                    0x7F, device_id, 0x06, 0x4A, 0x01,
-                    _GENERATOR_ACTIONS[action],
-                ),
-                time=time,
-            )
-        if command == "midi_time_code_command":
-            # MIDI TIME CODE COMMAND (0x4B) — RP-013 p.31, visually
-            # re-verified. Only 00/02 are defined (NOT a typo/OCR gap —
-            # 01 is genuinely skipped in the source); see also the (not
-            # yet built) MIDI TIME CODE SET UP Information Field.
-            _MTC_COMMAND_ACTIONS = {"off": 0x00, "follow": 0x02}
-            action = message.get("action")
-            if action is None:
-                raise KeyError(
-                    "'action' (required for 'midi_time_code_command')"
-                )
-            if action not in _MTC_COMMAND_ACTIONS:
-                raise ValueError(
-                    f"'action' must be one of "
-                    f"{sorted(_MTC_COMMAND_ACTIONS)} for "
-                    f"'midi_time_code_command', got {action!r}"
-                )
-            return mido.Message(
-                "sysex",
-                data=(
-                    0x7F, device_id, 0x06, 0x4B, 0x01,
-                    _MTC_COMMAND_ACTIONS[action],
-                ),
-                time=time,
-            )
-
-        if command in (
-            "variable_play", "search", "shuttle", "deferred_variable_play",
-            "record_strobe_variable",
-        ):
-            # VARIABLE PLAY (0x45) / SEARCH (0x46) / SHUTTLE (0x47) /
-            # DEFERRED VARIABLE PLAY (0x54) / RECORD STROBE VARIABLE
-            # (0x55) — RP-013 p.29-30 (VARIABLE PLAY/SEARCH/SHUTTLE),
-            # p.37 (DEFERRED VARIABLE PLAY), p.41 (RECORD STROBE
-            # VARIABLE), all confirmed via targeted pdftotext pulls of
-            # the "STANDARD SPEED" section (not a full-doc OCR pass) plus
-            # en.wikipedia.org/wiki/MIDI_Machine_Control's Shuttle
-            # description — all matched exactly. All FIVE share the
-            # IDENTICAL payload shape (only the opcode differs): a fixed
-            # byte count of 3, followed by the Standard Speed
-            # Specification (sh/sm/sl, see _encode_standard_speed).
-            # DEFERRED VARIABLE PLAY's own spec text states "Identical
-            # to the VARIABLE PLAY command..."; RECORD STROBE VARIABLE's
-            # own text gives the same 3-byte payload directly
-            # (`<count=03> sh sm sl / Standard Speed Specification`) —
-            # its device-side record/rehearse-entry behavior (switching
-            # into an automatic VARIABLE PLAY from a stopped state, per
-            # its own NOTES) is receiver-side, not something a stateless
-            # sender encodes differently.
-            _SPEED_COMMAND_OPCODES = {
-                "variable_play": 0x45, "search": 0x46, "shuttle": 0x47,
-                "deferred_variable_play": 0x54,
-                "record_strobe_variable": 0x55,
-            }
-            speed = message.get("speed")
-            if speed is None:
-                raise KeyError(f"'speed' (required for {command!r})")
-            reverse = message.get("reverse", False)
-            sh, sm, sl = _encode_standard_speed(speed, reverse)
-            return mido.Message(
-                "sysex",
-                data=(
-                    0x7F, device_id, 0x06,
-                    _SPEED_COMMAND_OPCODES[command], 0x03, sh, sm, sl,
-                ),
-                time=time,
-            )
-
-        if command == "wait":
-            # WAIT (0x7C) — RP-013 p.42, confirmed via a targeted
-            # pdftotext pull (clean OCR). A no-data handshake command:
-            # tells the Controlled Device to hold off on Response
-            # transmissions until a RESUME is received. Cross-checked
-            # against TWO separate clean listings elsewhere in the doc
-            # (p.17/p.36 Index Lists) to confirm the opcode, since this
-            # particular section's OWN nearby text had some unrelated
-            # OCR noise. **Envelope device_id is hardcoded to 0x7F**
-            # (the "all-call" address) — the spec states outright "The
-            # WAIT command is always the only command in its Sysex, and
-            # is directed to the 'all-call' address i.e. F0 7F 7F <mcc>
-            # <WAIT> F7" — same footgun-prevention reasoning already
-            # used for `assign_system_master` above (deliberately does
-            # NOT read the general `device_id` field for this one).
-            return mido.Message(
-                "sysex",
-                data=(0x7F, 0x7F, 0x06, 0x7C),
-                time=time,
-            )
-
-        if command == "resume":
-            # RESUME (0x7F) — RP-013 p.42, confirmed via the same
-            # targeted pdftotext pull as WAIT above (same cross-check
-            # against two separate clean Index List listings elsewhere
-            # in the doc). A no-data handshake command: signals the
-            # Controller is ready to receive Machine Control Responses
-            # again after a WAIT (default/power-up state is already
-            # "ready to receive"). Same hardcoded-envelope pattern as
-            # WAIT — spec states outright "The RESUME command is always
-            # the only command in its Sysex, and is directed to the
-            # 'all-call' address i.e. F0 7F 7F <mcc> <RESUME> F7" —
-            # deliberately does NOT read the general `device_id` field.
-            return mido.Message(
-                "sysex",
-                data=(0x7F, 0x7F, 0x06, 0x7F),
-                time=time,
-            )
-
-        if command == "drop_frame_adjust":
-            # DROP FRAME ADJUST (0x4F) — RP-013 p.33, confirmed via a
-            # targeted pdftotext pull (this section's OCR was clean, no
-            # rendering needed). Converts the named Information Field's
-            # contents to drop-frame format in place; a no-op device-side
-            # if the field isn't currently 30fps non-drop. `name` must be
-            # one of the Read/Writeable "5-byte group" fields (01h-0Fh) —
-            # see _INFO_FIELD_NAMES/_WRITEABLE_INFO_FIELDS/
-            # _resolve_info_field_name above for the registry and why
-            # only writeable fields are valid here (per spec's own text:
-            # "Valid Information Fields are the Read/Writeable fields").
-            name = message.get("name")
-            if name is None:
-                raise KeyError("'name' (required for 'drop_frame_adjust')")
-            field_byte = _resolve_info_field_name(name, require_writeable=True)
-            return mido.Message(
-                "sysex",
-                data=(0x7F, device_id, 0x06, 0x4F, 0x01, field_byte),
-                time=time,
-            )
-
-        if command == "move":
-            # MOVE (0x4C) — RP-013 p.32, confirmed via a targeted
-            # pdftotext pull (clean OCR, no rendering needed). Transfers
-            # the contents of `source` into `destination` device-side.
-            # `destination` must be a Read/Writeable field (spec: "Valid
-            # destination Information Fields are the Read/Writeable
-            # fields"); `source` may be ANY valid field, writeable or not
-            # (spec: "Valid source Information Fields are all of the
-            # [named group]"). Byte count is always 2 (one name each).
-            destination = message.get("destination")
-            source = message.get("source")
-            if destination is None:
-                raise KeyError("'destination' (required for 'move')")
-            if source is None:
-                raise KeyError("'source' (required for 'move')")
-            dest_byte = _resolve_info_field_name(
-                destination, require_writeable=True
-            )
-            source_byte = _resolve_info_field_name(source)
-            return mido.Message(
-                "sysex",
-                data=(
-                    0x7F, device_id, 0x06, 0x4C, 0x02, dest_byte, source_byte,
-                ),
-                time=time,
-            )
-
-        if command in ("add", "subtract"):
-            # ADD (0x4D) / SUBTRACT (0x4E) — RP-013 p.32-33, confirmed
-            # via a targeted pdftotext pull (clean OCR, no rendering
-            # needed). Both share the IDENTICAL payload shape (only the
-            # opcode differs), same "shared dispatch block" pattern as
-            # variable_play/search/shuttle above:
-            #   [Destination] = [Source #1] + [Source #2]      (ADD)
-            #   [Destination] = [Source #1] - [Source #2]      (SUBTRACT)
-            # `destination` must be Read/Writeable (same rule as MOVE);
-            # `source_1`/`source_2` may be ANY valid field, writeable or
-            # not. Byte count is always 3 (three names). Per spec text,
-            # it's explicitly permissible for `destination` to equal one
-            # of the sources (caller's responsibility to avoid clobbering
-            # a source before it's read, same note the spec itself gives
-            # — not something a stateless sender can enforce).
-            _MATH_OPCODES = {"add": 0x4D, "subtract": 0x4E}
-            destination = message.get("destination")
-            source_1 = message.get("source_1")
-            source_2 = message.get("source_2")
-            if destination is None:
-                raise KeyError(f"'destination' (required for {command!r})")
-            if source_1 is None:
-                raise KeyError(f"'source_1' (required for {command!r})")
-            if source_2 is None:
-                raise KeyError(f"'source_2' (required for {command!r})")
-            dest_byte = _resolve_info_field_name(
-                destination, require_writeable=True
-            )
-            source_1_byte = _resolve_info_field_name(source_1)
-            source_2_byte = _resolve_info_field_name(source_2)
-            return mido.Message(
-                "sysex",
-                data=(
-                    0x7F, device_id, 0x06, _MATH_OPCODES[command], 0x03,
-                    dest_byte, source_1_byte, source_2_byte,
-                ),
-                time=time,
-            )
-
-        if command == "group":
-            # GROUP (0x52) — RP-013 p.39, confirmed via a targeted
-            # pdftotext pull (clean OCR, no rendering needed). Two
-            # sub-commands, same "action" sub-field pattern already used
-            # by generator_command/midi_time_code_command above:
-            #   [ASSIGN] (0x00): device(s) join <group>. <group> may be
-            #     any device_id EXCEPT 0x7F (0x7F is reserved/all-call,
-            #     cannot itself be assigned as a group number).
-            #   [DIS-ASSIGN] (0x01): device(s) leave <group>. <group>
-            #     0x7F means "dis-assign from ALL groups" (a DIFFERENT
-            #     meaning than ASSIGN's restriction on the same byte).
-            #     0x7F ANYWHERE in `device_ids` also means "all devices"
-            #     (spec's own worked example: dis-assign all devices from
-            #     all groups is `F0 7F 7F <mcc> 52 03 01 7F 7F F7`,
-            #     reproduced exactly as one of the byte-exact test cases
-            #     below).
-            # Byte count = 2 + len(device_ids) (sub_id byte + group byte
-            # + one byte per device_id) — confirmed against that same
-            # worked example (count=03 for a 1-entry device_ids list).
-            _GROUP_ACTIONS = {"assign": 0x00, "dis_assign": 0x01}
-            action = message.get("action")
-            if action is None:
-                raise KeyError("'action' (required for 'group')")
-            if action not in _GROUP_ACTIONS:
-                raise ValueError(
-                    f"'action' must be one of {sorted(_GROUP_ACTIONS)} "
-                    f"for 'group', got {action!r}"
-                )
-            group = message.get("group")
-            if group is None:
-                raise KeyError("'group' (required for 'group')")
-            if not (0 <= group <= 127):
-                raise ValueError(f"'group' must be 0-127, got {group!r}")
-            if action == "assign" and group == 0x7F:
-                raise ValueError(
-                    "'group' must not be 0x7F (127) for action='assign' "
-                    "-- 0x7F is reserved for the 'all-call' address and "
-                    "cannot itself be used as a group number"
-                )
-            device_ids = message.get("device_ids")
-            if not device_ids:
-                raise KeyError(
-                    "'device_ids' (required, non-empty list, for 'group')"
-                )
-            for entry in device_ids:
-                if not (0 <= entry <= 127):
-                    raise ValueError(
-                        f"each 'device_ids' entry must be 0-127, "
-                        f"got {entry!r}"
-                    )
-            return mido.Message(
-                "sysex",
-                data=(
-                    0x7F, device_id, 0x06, 0x52, 2 + len(device_ids),
-                    _GROUP_ACTIONS[action], group, *device_ids,
-                ),
-                time=time,
-            )
-
-        if command == "procedure":
-            # PROCEDURE (0x50) — RP-013 pp.34-35, confirmed via a
-            # targeted pdftotext pull (mostly clean OCR). Device-side
-            # named macro storage, 4 sub-commands via the same 'action'
-            # sub-field pattern as group/generator_command/etc.:
-            #   [ASSEMBLE] (0x00): <procedure> + one or more NESTED mmc
-            #     commands (see _encode_nested_mmc_command above) stored
-            #     for later playback. 'procedure' 0x7F is RESERVED here
-            #     (not "assemble all" -- that's not a defined concept).
-            #   [DELETE] (0x01) / [SET] (0x02): <procedure> only.
-            #     0x7F means "all procedures" for BOTH of these (per
-            #     spec's own stated meaning) -- unlike ASSEMBLE/EXECUTE.
-            #   [EXECUTE] (0x03): <procedure> only. 0x7F is RESERVED
-            #     here too (executing "all procedures at once" is not a
-            #     defined concept, unlike delete-all/set-all).
-            # Byte count is always 2 + (nested bytes, ASSEMBLE only).
-            _PROCEDURE_ACTIONS = {
-                "assemble": 0x00, "delete": 0x01, "set": 0x02,
-                "execute": 0x03,
-            }
-            action = message.get("action")
-            if action is None:
-                raise KeyError("'action' (required for 'procedure')")
-            if action not in _PROCEDURE_ACTIONS:
-                raise ValueError(
-                    f"'action' must be one of "
-                    f"{sorted(_PROCEDURE_ACTIONS)} for 'procedure', "
-                    f"got {action!r}"
-                )
-            procedure = message.get("procedure")
-            if procedure is None:
-                raise KeyError("'procedure' (required for 'procedure')")
-            if action in ("assemble", "execute"):
-                if not (0 <= procedure <= 0x7E):
-                    raise ValueError(
-                        f"'procedure' must be 0-0x7E for action="
-                        f"{action!r} (0x7F is reserved, not a valid "
-                        f"'all procedures' target for this action), "
-                        f"got {procedure!r}"
-                    )
-            else:
-                if not (0 <= procedure <= 0x7F):
-                    raise ValueError(
-                        f"'procedure' must be 0-0x7F, got {procedure!r}"
-                    )
-            if action == "assemble":
-                commands = message.get("commands")
-                if not commands:
-                    raise KeyError(
-                        "'commands' (required, non-empty list, for "
-                        "action='assemble')"
-                    )
-                nested_bytes: tuple = ()
-                for nested in commands:
-                    nested_bytes += _encode_nested_mmc_command(
-                        nested,
-                        forbid_assemble=True,
-                        forbid_execute_name=procedure,
-                    )
-                procedure_payload = (0x00, procedure, *nested_bytes)
-            else:
-                procedure_payload = (_PROCEDURE_ACTIONS[action], procedure)
-            return mido.Message(
-                "sysex",
-                data=(
-                    0x7F, device_id, 0x06, 0x50, len(procedure_payload),
-                    *procedure_payload,
-                ),
-                time=time,
-            )
-
-        if command == "event":
-            # EVENT (0x51) — RP-013 pp.35-38, confirmed via a targeted
-            # pdftotext pull. Same 4-sub-command shape as PROCEDURE
-            # (define/delete/set/test via 'action'), 'event' name range
-            # follows the SAME asymmetric 0x7F rule as PROCEDURE: 0x7F
-            # is RESERVED for define/test, but means "ALL events" for
-            # delete/set.
-            #
-            # [DEFINE]'s flags byte ("0 k 0 a 00 dd" per spec) — bit
-            # positions confirmed against the spec's OWN worked example
-            # (a looping Event using flags=0x40, which is bit6 alone
-            # set): k=bit6 ("non-delete": 1=Event stays armed after
-            # triggering, matches the worked example's looping use
-            # case), a=bit4 ("all speeds": 1=trigger regardless of
-            # play-speed), dd=bits1-0 (direction: 00=forward-only,
-            # 01=reverse-only, 10=either direction). Exposed as 3
-            # friendly fields (direction/all_speeds/non_delete) packed
-            # here, same "friendly flags, not a raw bitfield" pattern as
-            # `step`'s `reverse`.
-            #
-            # `trigger_source`/`name` reuse the SAME byte values as
-            # _INFO_FIELD_NAMES, but EVENT restricts each to its own
-            # narrower subset (spec's own text): trigger_source may only
-            # be a time-code-bearing field (SELECTED_TIME_CODE/
-            # SELECTED_MASTER_CODE/GENERATOR_TIME_CODE/
-            # MIDI_TIME_CODE_INPUT), `name` (the register holding the
-            # trigger TIME value) may only be a GP0-GP7 register.
-            #
-            # `trigger_command` = ONE nested mmc command (not a list,
-            # unlike PROCEDURE's `commands`) — reuses
-            # _encode_nested_mmc_command, forbidding a nested EVENT
-            # [DEFINE] (can't nest itself) AND a nested PROCEDURE
-            # [ASSEMBLE] (spec's own stated exception, distinct from
-            # PROCEDURE [ASSEMBLE]'s own restrictions). Deliberately NOT
-            # named 'command' -- that's the OUTER dict's own dispatch
-            # key (holding "event"), reusing it here would collide.
-            _EVENT_ACTIONS = {
-                "define": 0x00, "delete": 0x01, "set": 0x02, "test": 0x03,
-            }
-            action = message.get("action")
-            if action is None:
-                raise KeyError("'action' (required for 'event')")
-            if action not in _EVENT_ACTIONS:
-                raise ValueError(
-                    f"'action' must be one of {sorted(_EVENT_ACTIONS)} "
-                    f"for 'event', got {action!r}"
-                )
-            event = message.get("event")
-            if event is None:
-                raise KeyError("'event' (required for 'event')")
-            if action in ("define", "test"):
-                if not (0 <= event <= 0x7E):
-                    raise ValueError(
-                        f"'event' must be 0-0x7E for action={action!r} "
-                        f"(0x7F is reserved, not a valid 'all events' "
-                        f"target for this action), got {event!r}"
-                    )
-            else:
-                if not (0 <= event <= 0x7F):
-                    raise ValueError(
-                        f"'event' must be 0-0x7F, got {event!r}"
-                    )
-            if action == "define":
-                _EVENT_DIRECTION_BITS = {
-                    "forward": 0b00, "reverse": 0b01, "both": 0b10,
-                }
-                direction = message.get("direction")
-                if direction is None:
-                    raise KeyError(
-                        "'direction' (required for action='define')"
-                    )
-                if direction not in _EVENT_DIRECTION_BITS:
-                    raise ValueError(
-                        f"'direction' must be one of "
-                        f"{sorted(_EVENT_DIRECTION_BITS)}, "
-                        f"got {direction!r}"
-                    )
-                all_speeds = message.get("all_speeds", False)
-                non_delete = message.get("non_delete", False)
-                flags_byte = (
-                    (0x40 if non_delete else 0x00)
-                    | (0x10 if all_speeds else 0x00)
-                    | _EVENT_DIRECTION_BITS[direction]
-                )
-                _EVENT_TRIGGER_SOURCES = {
-                    "selected_time_code", "selected_master_code",
-                    "generator_time_code", "midi_time_code_input",
-                }
-                trigger_source = message.get("trigger_source")
-                if trigger_source is None:
-                    raise KeyError(
-                        "'trigger_source' (required for action='define')"
-                    )
-                if trigger_source not in _EVENT_TRIGGER_SOURCES:
-                    raise ValueError(
-                        f"'trigger_source' must be one of "
-                        f"{sorted(_EVENT_TRIGGER_SOURCES)}, "
-                        f"got {trigger_source!r}"
-                    )
-                trigger_source_byte = _INFO_FIELD_NAMES[trigger_source]
-                _EVENT_TRIGGER_TIME_FIELDS = {
-                    "gp0", "gp1", "gp2", "gp3", "gp4", "gp5", "gp6", "gp7",
-                }
-                trigger_time_name = message.get("name")
-                if trigger_time_name is None:
-                    raise KeyError(
-                        "'name' (required for action='define')"
-                    )
-                if trigger_time_name not in _EVENT_TRIGGER_TIME_FIELDS:
-                    raise ValueError(
-                        f"'name' must be one of "
-                        f"{sorted(_EVENT_TRIGGER_TIME_FIELDS)}, "
-                        f"got {trigger_time_name!r}"
-                    )
-                trigger_time_byte = _INFO_FIELD_NAMES[trigger_time_name]
-                # NOTE: this field is deliberately named 'trigger_command'
-                # (NOT 'command') -- the outer message dict's own
-                # top-level dispatch key IS 'command' (holding "event"),
-                # so reusing that name for the nested field would
-                # silently collide/overwrite it in the same dict.
-                nested_command_dict = message.get("trigger_command")
-                if nested_command_dict is None:
-                    raise KeyError(
-                        "'trigger_command' (required, a nested mmc "
-                        "message dict, for action='define')"
-                    )
-                nested_bytes = _encode_nested_mmc_command(
-                    nested_command_dict,
-                    forbid_assemble=True,
-                    forbid_define=True,
-                )
-                event_payload = (
-                    0x00, event, flags_byte, trigger_source_byte,
-                    trigger_time_byte, *nested_bytes,
-                )
-            else:
-                event_payload = (_EVENT_ACTIONS[action], event)
-            return mido.Message(
-                "sysex",
-                data=(
-                    0x7F, device_id, 0x06, 0x51, len(event_payload),
-                    *event_payload,
-                ),
-                time=time,
-            )
-
-        if command == "read":
-            # READ (0x42) — RP-013 p.26, confirmed via a targeted
-            # pdftotext pull, including the spec's OWN literal worked
-            # example (a READ of SELECTED_TIME_CODE): "Command: F0 7F
-            # <device_ID> <mcc> <READ> <count=01> <SELECTED TIME CODE>
-            # F7" — reproduced exactly as a hand-computed test case.
-            # Requests transmission of one or more Information Fields'
-            # current values; the Controlled Device replies with an mcr
-            # (Response) sysex — NOT YET DECODABLE by this tool (that's
-            # the separate, not-yet-built `mmc_response` message type;
-            # today `poll` would just show the raw undecoded bytes). If
-            # a requested field is unsupported by the device, a
-            # RESPONSE ERROR is generated device-side — receiver
-            # behavior, not something a sender encodes.
-            #
-            # `names` reuses the EXISTING `_INFO_FIELD_NAMES` registry
-            # built for MOVE/ADD/SUBTRACT/DROP_FRAME_ADJUST — no
-            # writeable restriction here (a read-only field like
-            # ACTUAL_OFFSET is perfectly valid to READ; `_resolve_info_
-            # field_name` is called WITHOUT `require_writeable`).
-            # Broader Information Fields beyond this registry's 15
-            # entries (e.g. RESPONSE_ERROR/COMMAND_ERROR) are
-            # deliberately not expanded here — kept as a separate,
-            # smaller, future addition rather than growing this change.
-            names = message.get("names")
-            if not names:
-                raise KeyError(
-                    "'names' (required, non-empty list, for 'read')"
-                )
-            name_bytes = tuple(_resolve_info_field_name(n) for n in names)
-            return mido.Message(
-                "sysex",
-                data=(
-                    0x7F, device_id, 0x06, 0x42, len(name_bytes),
-                    *name_bytes,
-                ),
-                time=time,
-            )
-
-        if command == "write":
-            # WRITE (0x40) — RP-013 p.25, confirmed via a targeted
-            # pdftotext pull. Loads data into one or more Information
-            # Fields: a concatenated series of `<name> <data..>` pairs,
-            # one per field, with NO extra per-field length prefix for
-            # these fields — the receiver already knows each field's
-            # fixed byte length from its own definition. (A per-field
-            # `<count>` prefix inside the data IS used by a different
-            # subset of "count-prefixed" fields, per MASKED WRITE's own
-            # note — none of those are registered yet, so not relevant
-            # to this first WRITE step.) `name` must be WRITEABLE (spec:
-            # "The specified Information Field must be writeable").
-            #
-            # `fields` = a list of dicts, each `{"name": ...,
-            # "hours"/"minutes"/"seconds"/"frames"/"frame_rate": ...,
-            # [subframes/flags, if present]}` — every field currently in
-            # _INFO_FIELD_NAMES uses the IDENTICAL 5-byte Standard Time
-            # Code format (see _encode_standard_time_code above), so one
-            # encoder covers all of them; no per-field-type branching
-            # needed yet.
-            fields = message.get("fields")
-            if not fields:
-                raise KeyError(
-                    "'fields' (required, non-empty list, for 'write')"
-                )
-            write_payload: list = []
-            for field in fields:
-                field_name = field.get("name")
-                if field_name is None:
-                    raise KeyError(
-                        "'name' (required within each 'fields' entry)"
-                    )
-                field_byte = _resolve_info_field_name(
-                    field_name, require_writeable=True
-                )
-                field_hours = field.get("hours")
-                field_minutes = field.get("minutes")
-                field_seconds = field.get("seconds")
-                field_frames = field.get("frames")
-                field_frame_rate = field.get("frame_rate")
-                if field_hours is None:
-                    raise KeyError(
-                        f"'hours' (required for field {field_name!r})"
-                    )
-                if field_minutes is None:
-                    raise KeyError(
-                        f"'minutes' (required for field {field_name!r})"
-                    )
-                if field_seconds is None:
-                    raise KeyError(
-                        f"'seconds' (required for field {field_name!r})"
-                    )
-                if field_frames is None:
-                    raise KeyError(
-                        f"'frames' (required for field {field_name!r})"
-                    )
-                if field_frame_rate is None:
-                    raise KeyError(
-                        f"'frame_rate' (required for field {field_name!r})"
-                    )
-                time_code_bytes = _encode_standard_time_code(
-                    field_hours, field_minutes, field_seconds,
-                    field_frames, field_frame_rate,
-                    subframes=field.get("subframes", 0),
-                    color_frame=field.get("color_frame", False),
-                    blank=field.get("blank", False),
-                    negative=field.get("negative", False),
-                    use_status_byte=field.get("use_status_byte", False),
-                    estimated=field.get("estimated", False),
-                    invalid=field.get("invalid", False),
-                    video_field_1=field.get("video_field_1", False),
-                    no_time_code=field.get("no_time_code", False),
-                )
-                write_payload.append(field_byte)
-                write_payload.extend(time_code_bytes)
-            return mido.Message(
-                "sysex",
-                data=(
-                    0x7F, device_id, 0x06, 0x40, len(write_payload),
-                    *write_payload,
-                ),
-                time=time,
-            )
-
-        if command == "masked_write":
-            # MASKED WRITE (0x41) — RP-013 p.25-26, confirmed via a
-            # targeted pdftotext pull of the command's own detail
-            # section: "Allows specific bits to be altered in a bitmap
-            # style Information Field... the bitmap must begin
-            # immediately after the <count> byte." Wire format per
-            # field: <name> <byte#> <mask> <data> (a fixed 4 bytes each,
-            # "count=04+ext" meaning multiple such quads may be
-            # concatenated, mirroring WRITE's own multi-pair pattern).
-            # `byte#` is 0-indexed within the TARGET field's own bitmap
-            # (byte 0 = the first byte after that field's OWN <count>
-            # byte, per the spec's own wording — nothing to do with this
-            # command's outer count). `mask`/`data` are 7-bit MIDI data
-            # bytes (0-127) — spec's own Note *2 gives 0x7F, not 0xFF,
-            # as the "all one's" value, confirming 7 significant bits
-            # per byte (bit 7 is a reserved/always-zero MIDI data-byte
-            # constraint, same as every other sysex payload byte in this
-            # file).
-            #
-            # Only Track-Bitmap-format fields that are ALSO genuinely
-            # writeable qualify as a target (spec Note *1) —
-            # `_MASK_WRITEABLE_INFO_FIELDS` excludes the read-only
-            # TRACK_RECORD_STATUS despite it sharing the same bitmap
-            # format, which is why this resolves names with the new
-            # `require_mask_writeable=True` flag rather than
-            # `require_writeable` (that flag is scoped to
-            # Standard-Time-Code fields, see _resolve_info_field_name).
-            masked_fields = message.get("fields")
-            if not masked_fields:
-                raise KeyError(
-                    "'fields' (required, non-empty list, for "
-                    "'masked_write')"
-                )
-            masked_write_payload: list = []
-            for masked_field in masked_fields:
-                masked_name = masked_field.get("name")
-                if masked_name is None:
-                    raise KeyError(
-                        "'name' (required within each 'fields' entry)"
-                    )
-                masked_field_byte = _resolve_info_field_name(
-                    masked_name, require_mask_writeable=True
-                )
-                byte_number = masked_field.get("byte_number")
-                mask = masked_field.get("mask")
-                mask_data = masked_field.get("data")
-                if byte_number is None:
-                    raise KeyError(
-                        f"'byte_number' (required for field "
-                        f"{masked_name!r})"
-                    )
-                if mask is None:
-                    raise KeyError(
-                        f"'mask' (required for field {masked_name!r})"
-                    )
-                if mask_data is None:
-                    raise KeyError(
-                        f"'data' (required for field {masked_name!r})"
-                    )
-                if not (0 <= byte_number <= 127):
-                    raise ValueError(
-                        f"'byte_number' must be 0-127, got {byte_number!r}"
-                    )
-                if not (0 <= mask <= 127):
-                    raise ValueError(
-                        f"'mask' must be 0-127, got {mask!r}"
-                    )
-                if not (0 <= mask_data <= 127):
-                    raise ValueError(
-                        f"'data' must be 0-127, got {mask_data!r}"
-                    )
-                masked_write_payload.extend((
-                    masked_field_byte, byte_number, mask, mask_data,
-                ))
-            return mido.Message(
-                "sysex",
-                data=(
-                    0x7F, device_id, 0x06, 0x41, len(masked_write_payload),
-                    *masked_write_payload,
-                ),
-                time=time,
-            )
-
-        if command == "update":
-            # UPDATE (0x43) — RP-013 p.26-27, confirmed via a targeted
-            # pdftotext pull of this command's own detail section.
-            # Exactly 2 sub-commands exist — a CORRECTION to earlier,
-            # survey-level research which suspected a 3rd "[CANCEL]"
-            # form; the actual second format is called [END], confirmed
-            # directly here:
-            #   [BEGIN] (0x00): <name(s)> — immediately transmits the
-            #     named field(s) AND adds them to an internal
-            #     auto-retransmit "list" (re-sent no more often than
-            #     the UPDATE RATE field allows, only when changed). No
-            #     special "all" meaning for BEGIN.
-            #   [END] (0x01): <name(s)> — removes field(s) from that
-            #     list. The spec states 0x7F ANYWHERE in the list means
-            #     "discontinue ALL UPDATEs" — exposed here as the
-            #     literal string `"all"` (a sentinel recognized ONLY
-            #     for action='end', short-circuiting the normal name
-            #     lookup), same "friendly value, not raw hex" principle
-            #     used everywhere else in this file. Passing `"all"`
-            #     for action='begin' is NOT special-cased (the spec
-            #     defines no such meaning there) — it correctly falls
-            #     through to the normal lookup and raises an "unknown
-            #     Information Field name" error, since "all" isn't
-            #     itself a registered field name.
-            #
-            # `names` reuses the EXISTING `_INFO_FIELD_NAMES` registry,
-            # same as `read` — no writeable restriction (BEGIN just
-            # transmits current contents, same as READ).
-            _UPDATE_ACTIONS = {"begin": 0x00, "end": 0x01}
-            action = message.get("action")
-            if action is None:
-                raise KeyError("'action' (required for 'update')")
-            if action not in _UPDATE_ACTIONS:
-                raise ValueError(
-                    f"'action' must be one of {sorted(_UPDATE_ACTIONS)} "
-                    f"for 'update', got {action!r}"
-                )
-            names = message.get("names")
-            if not names:
-                raise KeyError(
-                    "'names' (required, non-empty list, for 'update')"
-                )
-            update_name_bytes = []
-            for update_name in names:
-                if action == "end" and update_name == "all":
-                    update_name_bytes.append(0x7F)
-                else:
-                    update_name_bytes.append(
-                        _resolve_info_field_name(update_name)
-                    )
-            update_payload = (
-                _UPDATE_ACTIONS[action], *update_name_bytes,
-            )
-            return mido.Message(
-                "sysex",
-                data=(
-                    0x7F, device_id, 0x06, 0x43, len(update_payload),
-                    *update_payload,
-                ),
-                time=time,
-            )
-
-        if command not in _MMC_COMMANDS:
-            _mmc_special_commands = [
-                "locate", "step", "assign_system_master",
-                "generator_command", "midi_time_code_command",
-                "variable_play", "search", "shuttle",
-                "deferred_variable_play", "record_strobe_variable",
-                "wait", "resume", "drop_frame_adjust",
-                "move", "add", "subtract", "group", "procedure", "event",
-                "read", "write", "masked_write", "update",
-            ]
-            raise ValueError(
-                f"'command' must be one of "
-                f"{sorted(_MMC_COMMANDS) + _mmc_special_commands}, "
-                f"got {command!r}"
-            )
-        return mido.Message(
-            "sysex",
-            data=(0x7F, device_id, 0x06, _MMC_COMMANDS[command]),
-            time=time,
+        # MIDI Machine Control (RP-013); see _mmc_command_bytes. Device
+        # replies are decoded by the decode_mmc_response action.
+        command = _choice(message, "command", _COMMANDS["mmc"], "mmc")
+        device_id = _device_id(message)
+        if command in _MMC_ALL_CALL:
+            device_id = 0x7F
+        return _sysex(
+            0x7F, device_id, 0x06, *_mmc_command_bytes(message), time=time,
         )
     if msg_type == "msc":
-        # MIDI Show Control — a Universal Real Time SysEx
-        # convenience wrapper, same "layers on top of the generic sysex
-        # path" rule as mtc_full/mmc. Wire format, confirmed against the
-        # ACTUAL MSC 1.0 spec text (MMA Recommended Practice RP-002,
-        # 1991-07-25 — the file's own header states it's "made available
-        # here by permission of the MIDI Manufacturers Association"),
-        # cross-checked against ETC's and a GitHub MIDIKit discussion's
-        # independent descriptions of the same format string:
-        #   F0 7F <device_id> 02 <command_format> <command> <data> F7
-        # Only the 11 "General Category" commands are implemented (apply
-        # to ALL command_formats, "highly recommended" per the spec, and what
-        # real commercial gear actually implements — ETC's own docs note
-        # their Express/Expression consoles "will only take Lighting GO,
-        # STOP, RESUME, and FIRE"). The extended 15-command "Sound
-        # Commands" set (clock/cue-list-path management) is deliberately
-        # NOT implemented — use raw 'sysex' directly if ever needed.
-        _MSC_FORMATS = {
-            "lighting": 0x01, "sound": 0x10, "machinery": 0x20,
-            "video": 0x30, "projection": 0x40, "process_control": 0x50,
-            "pyro": 0x60, "all_types": 0x7F,
-        }
-        _MSC_COMMANDS = {
-            "go": 0x01, "stop": 0x02, "resume": 0x03, "timed_go": 0x04,
-            "load": 0x05, "set": 0x06, "fire": 0x07, "all_off": 0x08,
-            "restore": 0x09, "reset": 0x0A, "go_off": 0x0B,
-        }
-
-        command_format = message.get("command_format")
-        command_format_raw = message.get("command_format_raw")
-        if command_format is not None and command_format_raw is not None:
-            raise ValueError(
-                "specify only ONE of 'command_format' or "
-                "'command_format_raw', not both"
-            )
-        if command_format is None and command_format_raw is None:
-            raise KeyError("'command_format' (or 'command_format_raw')")
-        if command_format_raw is not None:
-            if not (0 <= command_format_raw <= 127):
-                raise ValueError(
-                    f"'command_format_raw' must be 0-127, got "
-                    f"{command_format_raw!r}"
-                )
-            cf_byte = command_format_raw
-        else:
-            if command_format not in _MSC_FORMATS:
-                raise ValueError(
-                    f"'command_format' must be one of "
-                    f"{sorted(_MSC_FORMATS)} (or use 'command_format_raw' "
-                    f"for a narrower sub-category), got {command_format!r}"
-                )
-            cf_byte = _MSC_FORMATS[command_format]
-
-        command = message.get("command")
-        if command is None:
-            raise KeyError("'command'")
-        if command not in _MSC_COMMANDS:
-            raise ValueError(
-                f"'command' must be one of {sorted(_MSC_COMMANDS)} for "
-                f"'msc' (got {command!r} — note this is a DIFFERENT set "
-                f"from 'mmc's own 'command' values)"
-            )
-        cmd_byte = _MSC_COMMANDS[command]
-
-        device_id = message.get("device_id", 0x7F)
-        if not (0 <= device_id <= 127):
-            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
-
-        if command in ("go", "stop", "resume", "go_off"):
-            payload: tuple = _encode_msc_cue_data(
-                message.get("q_number"), message.get("q_list"),
-                message.get("q_path"),
-            )
-        elif command == "load":
-            q_number = message.get("q_number")
-            if q_number is None:
-                raise KeyError("'q_number' (required for 'load')")
-            payload = _encode_msc_cue_data(
-                q_number, message.get("q_list"), message.get("q_path"),
-            )
-        elif command == "timed_go":
-            hours = message.get("hours")
-            minutes = message.get("minutes")
-            seconds = message.get("seconds")
-            frames = message.get("frames")
-            fractional_frames = message.get("fractional_frames")
-            frame_rate = message.get("frame_rate")
-            if hours is None:
-                raise KeyError("'hours' (required for 'timed_go')")
-            if minutes is None:
-                raise KeyError("'minutes' (required for 'timed_go')")
-            if seconds is None:
-                raise KeyError("'seconds' (required for 'timed_go')")
-            if frames is None:
-                raise KeyError("'frames' (required for 'timed_go')")
-            if fractional_frames is None:
-                raise KeyError(
-                    "'fractional_frames' (required for 'timed_go')"
-                )
-            if frame_rate is None:
-                raise KeyError("'frame_rate' (required for 'timed_go')")
-            payload = _encode_msc_time(
-                hours, minutes, seconds, frames, fractional_frames,
-                frame_rate,
-            ) + _encode_msc_cue_data(
-                message.get("q_number"), message.get("q_list"),
-                message.get("q_path"),
-            )
-        elif command == "set":
-            control_number = message.get("control_number")
-            control_value = message.get("control_value")
-            if control_number is None:
-                raise KeyError("'control_number' (required for 'set')")
-            if control_value is None:
-                raise KeyError("'control_value' (required for 'set')")
-            if not (0 <= control_number <= 16383):
-                raise ValueError(
-                    f"'control_number' must be 0-16383, got "
-                    f"{control_number!r}"
-                )
-            if not (0 <= control_value <= 16383):
-                raise ValueError(
-                    f"'control_value' must be 0-16383, got "
-                    f"{control_value!r}"
-                )
-            payload = (
-                control_number & 0x7F, (control_number >> 7) & 0x7F,
-                control_value & 0x7F, (control_value >> 7) & 0x7F,
-            )
-            set_hours = message.get("hours")
-            set_minutes = message.get("minutes")
-            set_seconds = message.get("seconds")
-            set_frames = message.get("frames")
-            set_fractional_frames = message.get("fractional_frames")
-            set_frame_rate = message.get("frame_rate")
-            set_time_provided = [
-                v is not None for v in (
-                    set_hours, set_minutes, set_seconds, set_frames,
-                    set_fractional_frames, set_frame_rate,
-                )
-            ]
-            if any(set_time_provided) and not all(set_time_provided):
-                raise ValueError(
-                    "SET's time fields (hours/minutes/seconds/frames/"
-                    "fractional_frames/frame_rate) must be given ALL "
-                    "together or not at all"
-                )
-            if all(set_time_provided):
-                assert set_hours is not None
-                assert set_minutes is not None
-                assert set_seconds is not None
-                assert set_frames is not None
-                assert set_fractional_frames is not None
-                assert set_frame_rate is not None
-                payload += _encode_msc_time(
-                    set_hours, set_minutes, set_seconds, set_frames,
-                    set_fractional_frames, set_frame_rate,
-                )
-        elif command == "fire":
-            macro_number = message.get("macro_number")
-            if macro_number is None:
-                raise KeyError("'macro_number' (required for 'fire')")
-            if not (0 <= macro_number <= 127):
-                raise ValueError(
-                    f"'macro_number' must be 0-127, got {macro_number!r}"
-                )
-            payload = (macro_number,)
-        else:
-            # all_off, restore, reset — no data bytes at all.
-            payload = ()
-
-        return mido.Message(
-            "sysex",
-            data=(0x7F, device_id, 0x02, cf_byte, cmd_byte) + payload,
-            time=time,
+        # MIDI Show Control (RP-002/014); see _MSC_DATA_BUILDERS. Only the 11
+        # General Category commands, which apply to every command_format.
+        # The 15 Sound Commands aren't implemented; send them with 'sysex'.
+        command_format = _msc_command_format(message)
+        command = _choice(message, "command", _COMMANDS["msc"], "msc")
+        device_id = _device_id(message)
+        builder = _MSC_DATA_BUILDERS.get(command)
+        data = builder(message, command) if builder else ()
+        return _sysex(
+            0x7F, device_id, 0x02, command_format, _COMMANDS["msc"][command],
+            *data, time=time,
         )
     if msg_type == "gm_system":
-        # General MIDI System On/Off — a Universal SysEx convenience
-        # wrapper, same "layers on top of the generic sysex path, not a
-        # separate/duplicate mechanism" rule as mtc_full/mmc/msc above.
-        # UNLIKE those three, this one uses Universal ID 7E (Non-Real
-        # Time), not 7F (Real Time) — confirmed against the MMA's own
-        # MIDI 1.0 Detailed Specification (both the "General MIDI System
-        # Messages" section and Table VIIa's "Currently Defined Universal
-        # System Exclusive Messages" registry agree: Non-Real Time,
-        # sub-ID#1 = 09). Wire format — the simplest of any typed sysex
-        # helper in this file, no data bytes at all beyond the fixed
-        # sub-ID#2:
-        #   F0 7E <device_id> 09 01 F7   (General MIDI System On)
-        #   F0 7E <device_id> 09 02 F7   (General MIDI System Off)
-        # `device_id` defaults to 0x7F (all devices) — the spec's own
-        # suggested default for this specific message ("ID of target
-        # device (suggest using 7F 'All Call')"), same default already
-        # used for mtc_full/mmc/msc above.
-        _GM_SYSTEM_COMMANDS = {"on": 0x01, "off": 0x02}
-        command = message.get("command")
-        if command is None:
-            raise KeyError("'command'")
-        if command not in _GM_SYSTEM_COMMANDS:
-            raise ValueError(
-                f"'command' must be one of {sorted(_GM_SYSTEM_COMMANDS)} "
-                f"for 'gm_system', got {command!r}"
-            )
-        device_id = message.get("device_id", 0x7F)
-        if not (0 <= device_id <= 127):
-            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
-        return mido.Message(
-            "sysex",
-            data=(0x7E, device_id, 0x09, _GM_SYSTEM_COMMANDS[command]),
-            time=time,
+        # General MIDI System On/Off (Universal Non-Real Time, MIDI 1.0
+        # Detailed Spec Table VIIa):
+        #   F0 7E <device_id> 09 01 F7   on
+        #   F0 7E <device_id> 09 02 F7   off
+        # device_id defaults to 7F (all devices), as the spec suggests.
+        command = _choice(
+            message, "command", _COMMANDS["gm_system"], "gm_system",
+        )
+        device_id = _device_id(message)
+        return _sysex(
+            0x7E, device_id, 0x09, _COMMANDS["gm_system"][command], time=time,
         )
     if msg_type == "device_inquiry":
-        # Device Inquiry — a Universal Non-Real Time SysEx convenience
-        # wrapper (same generic-sysex-path rule as gm_system/mtc_full/mmc/
-        # msc above), "General Information" sub-ID#1 = 06. Two message
-        # shapes under one 'command' sub-field, same "one type, several
-        # named commands" pattern already used by mmc/msc:
-        #   Identity Request: F0 7E <device_id> 06 01 F7 — no data.
-        #   Identity Reply:   F0 7E <device_id> 06 02 mm [..] ff ff dd dd
-        #                      ss ss ss ss F7
-        # Confirmed against the primary MIDI 1.0 Detailed Specification's
-        # "Device Inquiry" section and Table VIIa.
-        #   mm = manufacturer ID. Either ONE byte (1-127, direct
-        #   assignment) OR the extended 3-byte form (00, then two more ID
-        #   bytes) when the direct byte would be 00H — the spec's own text
-        #   says so explicitly ("if the manufacturers id code (mm) begins
-        #   with 00H then the above message is extended by two bytes").
-        #   Accepted here as either a single int (1-127) or a 3-element
-        #   list/tuple starting with 0 for the extended form.
-        #   ff ff = device family code, 14 bits LSB-first (same split
-        #   pattern used elsewhere in this file, e.g. msc's 'set' command).
-        #   dd dd = device family member code, 14 bits LSB-first.
-        #   ss ss ss ss = software revision level, 4 bytes, "format device
-        #   specific" per the spec (no further structure defined) —
-        #   accepted here as a raw 4-int list/tuple, each 0-127.
-        # Sending an Identity REPLY is a rarer use case for a
-        # controller-side tool (normally a physical device sends the
-        # reply, not us) but is included for completeness/symmetry with
-        # the spec, same "cover the message family fully" precedent as
-        # mmc/msc rather than only the "obviously useful" half.
-        _DEVICE_INQUIRY_COMMANDS = {"request", "reply"}
-        command = message.get("command")
-        if command is None:
-            raise KeyError("'command'")
-        if command not in _DEVICE_INQUIRY_COMMANDS:
-            raise ValueError(
-                f"'command' must be one of "
-                f"{sorted(_DEVICE_INQUIRY_COMMANDS)} for 'device_inquiry', "
-                f"got {command!r}"
-            )
-        device_id = message.get("device_id", 0x7F)
-        if not (0 <= device_id <= 127):
-            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
-
+        # Device Inquiry (Universal Non-Real Time, MIDI 1.0 Detailed Spec):
+        #   request: F0 7E <device_id> 06 01 F7
+        #   reply:   F0 7E <device_id> 06 02 mm ff ff dd dd ss ss ss ss F7
+        # mm: manufacturer ID, one byte 1-127 or three bytes 00 xx yy.
+        # ff ff / dd dd: device family / member code, 14 bits, LSB first.
+        # ss x4: software revision, device-specific format.
+        command = _choice(
+            message, "command", _COMMANDS["device_inquiry"], "device_inquiry",
+        )
+        device_id = _device_id(message)
         if command == "request":
-            return mido.Message(
-                "sysex", data=(0x7E, device_id, 0x06, 0x01), time=time,
-            )
+            return _sysex(0x7E, device_id, 0x06, 0x01, time=time)
 
-        # command == "reply"
-        manufacturer_id = message.get("manufacturer_id")
-        device_family_code = message.get("device_family_code")
-        device_family_member_code = message.get("device_family_member_code")
-        software_revision = message.get("software_revision")
-        if manufacturer_id is None:
-            raise KeyError("'manufacturer_id' (required for 'reply')")
-        if device_family_code is None:
-            raise KeyError("'device_family_code' (required for 'reply')")
-        if device_family_member_code is None:
-            raise KeyError(
-                "'device_family_member_code' (required for 'reply')"
-            )
-        if software_revision is None:
-            raise KeyError("'software_revision' (required for 'reply')")
+        manufacturer_id = _required(message, "manufacturer_id", "reply")
+        family = _required(message, "device_family_code", "reply")
+        member = _required(message, "device_family_member_code", "reply")
+        software_revision = _required(message, "software_revision", "reply")
 
         if isinstance(manufacturer_id, int):
             if not (1 <= manufacturer_id <= 127):
@@ -3139,103 +2101,45 @@ def _build_message(message: dict) -> "mido.Message":
                     f"3 bytes, the first being 0, got {manufacturer_id!r}"
                 )
             for b in mfr_bytes:
-                if not (0 <= b <= 127):
-                    raise ValueError(
-                        "'manufacturer_id' bytes must each be 0-127, got "
-                        f"{manufacturer_id!r}"
-                    )
+                _check_range("manufacturer_id byte", b, 0, 127)
 
-        if not (0 <= device_family_code <= 16383):
+        revision_bytes = tuple(software_revision)
+        if len(revision_bytes) != 4:
             raise ValueError(
-                f"'device_family_code' must be 0-16383, got "
-                f"{device_family_code!r}"
-            )
-        if not (0 <= device_family_member_code <= 16383):
-            raise ValueError(
-                f"'device_family_member_code' must be 0-16383, got "
-                f"{device_family_member_code!r}"
-            )
-        software_revision_bytes = tuple(software_revision)
-        if len(software_revision_bytes) != 4:
-            raise ValueError(
-                "'software_revision' must be exactly 4 bytes, got "
+                f"'software_revision' must be exactly 4 bytes, got "
                 f"{software_revision!r}"
             )
-        for b in software_revision_bytes:
-            if not (0 <= b <= 127):
-                raise ValueError(
-                    "'software_revision' bytes must each be 0-127, got "
-                    f"{software_revision!r}"
-                )
+        for b in revision_bytes:
+            _check_range("software_revision byte", b, 0, 127)
 
-        return mido.Message(
-            "sysex",
-            data=(0x7E, device_id, 0x06, 0x02) + mfr_bytes + (
-                device_family_code & 0x7F,
-                (device_family_code >> 7) & 0x7F,
-                device_family_member_code & 0x7F,
-                (device_family_member_code >> 7) & 0x7F,
-            ) + software_revision_bytes,
+        return _sysex(
+            0x7E, device_id, 0x06, 0x02, *mfr_bytes,
+            *_split14("device_family_code", family),
+            *_split14("device_family_member_code", member),
+            *revision_bytes,
             time=time,
         )
     if msg_type == "device_control":
-        # Device Control — Master Volume/Balance — a Universal REAL TIME
-        # SysEx convenience wrapper (same generic-sysex-path rule as the
-        # others above), sub-ID#1 = 04. Unlike gm_system/device_inquiry
-        # (both Non-Real-Time, 0x7E), this one uses Real-Time (0x7F) —
-        # same ID as mtc_full/mmc/msc. Wire format, confirmed against the
-        # primary MIDI 1.0 Detailed Specification's "Device Control"
-        # section and Table VIIa:
-        #   Master Volume:  F0 7F <device_id> 04 01 vv vv F7
-        #   Master Balance: F0 7F <device_id> 04 02 bb bb F7
-        # Both are a single 14-bit value, LSB-first (same split pattern
-        # used elsewhere in this file, e.g. msc's 'set' command and
-        # device_inquiry's family/member codes above). Per the spec, for
-        # Master Volume 00 00 = volume off; for Master Balance 00 00 =
-        # hard left and 7F 7F = hard right — these are just data-value
-        # conventions at the receiving device, not encoding rules this
-        # function needs to special-case.
-        # These address the WHOLE DEVICE rather than a channel — the
-        # channel-scoped equivalents already exist as ordinary
-        # control_change messages (CC7 Channel Volume, CC8 Balance),
-        # unrelated code path, no overlap to reconcile here.
-        _DEVICE_CONTROL_COMMANDS = {"master_volume": 0x01, "master_balance": 0x02}
-        command = message.get("command")
-        if command is None:
-            raise KeyError("'command'")
-        if command not in _DEVICE_CONTROL_COMMANDS:
-            raise ValueError(
-                f"'command' must be one of "
-                f"{sorted(_DEVICE_CONTROL_COMMANDS)} for 'device_control', "
-                f"got {command!r}"
-            )
-        value = message.get("value")
-        if value is None:
-            raise KeyError("'value'")
-        if not (0 <= value <= 16383):
-            raise ValueError(f"'value' must be 0-16383, got {value!r}")
-        device_id = message.get("device_id", 0x7F)
-        if not (0 <= device_id <= 127):
-            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
-        return mido.Message(
-            "sysex",
-            data=(
-                0x7F, device_id, 0x04, _DEVICE_CONTROL_COMMANDS[command],
-                value & 0x7F, (value >> 7) & 0x7F,
-            ),
+        # Device Control (Universal Real Time, MIDI 1.0 Detailed Spec),
+        # whole-device rather than per channel:
+        #   master_volume:  F0 7F <device_id> 04 01 vv vv F7 (0 = off)
+        #   master_balance: F0 7F <device_id> 04 02 bb bb F7 (0 = left,
+        #                   16383 = right)
+        # value is 14 bits, LSB first. Master Fine/Coarse Tuning (04 03,
+        # 04 04; CA-025) aren't implemented.
+        command = _choice(
+            message, "command", _COMMANDS["device_control"], "device_control",
+        )
+        value = _required(message, "value")
+        device_id = _device_id(message)
+        return _sysex(
+            0x7F, device_id, 0x04, _COMMANDS["device_control"][command],
+            *_split14("value", value),
             time=time,
         )
     if msg_type == "channel_mode":
-        # Channel Mode Messages — reuse the ORDINARY Control Change status
-        # byte (BnH), with controller numbers 120-127 reserved for mode/
-        # reset semantics instead of tone-shaping (confirmed against the
-        # primary spec's "Channel Mode Messages" chapter and Table IV).
-        # Technically already sendable today via raw 'control_change'
-        # (nothing stops 'control_change' with controller=124) — this
-        # typed wrapper adds named commands + validation + the extra
-        # sub-fields a couple of these actually need, rather than making
-        # the caller remember magic controller numbers and value-byte
-        # conventions by hand.
+        # Channel Mode messages: Control Change 120-127 (MIDI 1.0
+        # Detailed Spec, Table IV), by name instead of controller number.
         #   120 All Sound Off            value=0 always
         #   121 Reset All Controllers    value=0 always
         #   122 Local Control            value: 0=Off, 127=On
@@ -3248,1030 +2152,343 @@ def _build_message(message: dict) -> "mido.Message":
         #                                equal the receiver's own channel
         #                                count")
         #   127 Poly Mode On (Mono Off)  value=0 always
-        # NOTE (from the spec's own Appendix, "Additional Explanations and
-        # Application Notes" — read during this tool's spec survey):
-        # commands 125-127 (Omni On/Mono On/Poly On) ALSO trigger an
-        # implicit All Notes Off on a compliant receiver — a caller
-        # switching modes should not be surprised that notes get cut.
-        _CHANNEL_MODE_COMMANDS = {
-            "all_sound_off": 120, "reset_all_controllers": 121,
-            "local_control": 122, "all_notes_off": 123, "omni_off": 124,
-            "omni_on": 125, "mono_on": 126, "poly_on": 127,
-        }
-        command = message.get("command")
-        if command is None:
-            raise KeyError("'command'")
-        if command not in _CHANNEL_MODE_COMMANDS:
-            raise ValueError(
-                f"'command' must be one of "
-                f"{sorted(_CHANNEL_MODE_COMMANDS)} for 'channel_mode', "
-                f"got {command!r}"
-            )
-        control = _CHANNEL_MODE_COMMANDS[command]
-
+        # 124-127 also act as All Notes Off on the receiver (Detailed
+        # Spec, "Mode Messages as All Notes Off Messages").
+        command = _choice(
+            message, "command", _COMMANDS["channel_mode"], "channel_mode",
+        )
         if command == "local_control":
-            on = message.get("on")
-            if on is None:
-                raise KeyError("'on' (required for 'local_control')")
-            mode_value = 127 if on else 0
+            mode_value = 127 if _required(message, "on", command) else 0
         elif command == "mono_on":
-            channel_count = message.get("channel_count")
-            if channel_count is None:
-                raise KeyError("'channel_count' (required for 'mono_on')")
-            if not (0 <= channel_count <= 16):
-                raise ValueError(
-                    f"'channel_count' must be 0-16, got {channel_count!r}"
-                )
-            mode_value = channel_count
+            mode_value = _check_range(
+                "channel_count", _required(message, "channel_count", command),
+                0, 16,
+            )
         else:
             mode_value = 0
-
         return mido.Message(
-            "control_change", channel=channel, control=control,
-            value=mode_value, time=time,
+            "control_change", channel=channel,
+            control=_COMMANDS["channel_mode"][command], value=mode_value,
+            time=time,
         )
     if msg_type == "midi_tuning":
-        # MIDI Tuning — a Universal SysEx family, sub-ID#1 = 08, covering
-        # 3 message shapes under one 'command' sub-field (same "one type,
-        # several named commands" pattern as mmc/msc/gm_system/
-        # device_inquiry/device_control above). Confirmed against the
-        # primary spec's "MIDI Tuning" section, WITH the exact byte
-        # layouts re-verified via a rendered page image (not just
-        # `pdftotext`) before writing this — see the note below about a
-        # genuine discrepancy that turned up doing that.
-        #   bulk_dump_request (Non-Real Time, 0x7E):
-        #     F0 7E <device_id> 08 00 tt F7
-        #   bulk_dump_reply   (Non-Real Time, 0x7E):
-        #     F0 7E <device_id> 08 01 tt <16 ASCII name bytes>
-        #       <3 bytes>x128 (one per MIDI key, note 0 first) chksum F7
-        #   note_change       (REAL Time, 0x7F — unlike the other two):
-        #     F0 7F <device_id> 08 02 tt ll [kk xx yy zz]x ll F7
-        # ⚠️ SPEC DISCREPANCY, worth recording plainly: the primary spec's
-        # own printed text for bulk_dump_reply's checksum says "XOR of 7E
-        # <device ID> 01 tt <388 bytes>" — TWO separate problems with
-        # this, both visually re-verified against a rendered page image to
-        # rule out a text-extraction error (it's genuinely printed this
-        # way in the original 1996 document):
-        #   1. It OMITS the 0x08 sub-ID#1 byte entirely from its own list
-        #      (jumps straight from "<device ID>" to "01"), even though
-        #      0x08 is unambiguously part of the actual wire message per
-        #      the format line right above it ("F0 7E <device ID> 08 01
-        #      tt ..."). A caught-live bug during this implementation:
-        #      an early draft of this exact function reproduced that
-        #      omission in the PAYLOAD itself (not just miscounting a
-        #      byte total) — the byte-exact verification pass below is
-        #      what caught it.
-        #   2. Its own byte-count, <388 bytes>, doesn't match the
-        #      message's documented structure either way: 16 (name) + 384
-        #      (128 notes x 3 bytes) = 400 data bytes, not 388, and adding
-        #      the missing 0x08 byte back in still doesn't reconcile it
-        #      (400 vs 388 is a 12-byte gap, not the 1 byte 0x08 alone
-        #      would explain).
-        # Both point the same direction: this is a transcription slip in
-        # the original document, not a deliberate design choice. This
-        # implementation computes the checksum as the XOR of EVERY byte
-        # actually transmitted between F0 and chksum (7E, device_id, 08,
-        # 01, tt, all 16 name bytes, all 384 frequency bytes — 405 bytes
-        # total), matching the same "checksum covers everything that came
-        # before it" convention Sample Dump's and File Dump's checksums
-        # both already use elsewhere in this same document — the
-        # internally-consistent interpretation, not a guess.
-        _MIDI_TUNING_COMMANDS = {"bulk_dump_request", "bulk_dump_reply", "note_change"}
-        command = message.get("command")
-        if command is None:
-            raise KeyError("'command'")
-        if command not in _MIDI_TUNING_COMMANDS:
-            raise ValueError(
-                f"'command' must be one of "
-                f"{sorted(_MIDI_TUNING_COMMANDS)} for 'midi_tuning', got "
-                f"{command!r}"
-            )
-        device_id = message.get("device_id", 0x7F)
-        if not (0 <= device_id <= 127):
-            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
-        tuning_program = message.get("tuning_program")
-        if tuning_program is None:
-            raise KeyError("'tuning_program'")
-        if not (0 <= tuning_program <= 127):
-            raise ValueError(
-                f"'tuning_program' must be 0-127, got {tuning_program!r}"
-            )
+        # MIDI Tuning (MIDI Tuning Updated Specification):
+        #   bulk_dump_request: F0 7E <device_id> 08 00 tt F7
+        #   bulk_dump_reply:   F0 7E <device_id> 08 01 tt <16-char name>
+        #                      [xx yy zz] x128 (note 0 first) chksum F7
+        #   note_change:       F0 7F <device_id> 08 02 tt ll
+        #                      [kk xx yy zz] x ll F7
+        # Checksum: XOR of every byte between F0 and the checksum. The
+        # updated spec says the original bulk dump's checksum text is
+        # ambiguous, that receivers may ignore it, and that every other
+        # dump uses this rule.
+        # The bank and scale/octave messages in the updated spec (08 03-09)
+        # aren't implemented.
+        command = _choice(
+            message, "command", _COMMANDS["midi_tuning"], "midi_tuning",
+        )
+        code = _COMMANDS["midi_tuning"][command]
+        device_id = _device_id(message)
+        program = _check_range(
+            "tuning_program", _required(message, "tuning_program"), 0, 127,
+        )
 
         if command == "bulk_dump_request":
-            return mido.Message(
-                "sysex",
-                data=(0x7E, device_id, 0x08, 0x00, tuning_program),
-                time=time,
-            )
+            return _sysex(0x7E, device_id, 0x08, code, program, time=time)
 
         if command == "bulk_dump_reply":
-            tuning_name = message.get("tuning_name", "")
-            if len(tuning_name) > 16:
+            name = message.get("tuning_name", "")
+            if len(name) > 16:
                 raise ValueError(
-                    "'tuning_name' must be at most 16 characters, got "
-                    f"{len(tuning_name)} ({tuning_name!r})"
+                    f"'tuning_name' must be at most 16 characters, got "
+                    f"{len(name)} ({name!r})"
                 )
-            name_bytes = tuple(ord(c) for c in tuning_name.ljust(16))
-            for c, b in zip(tuning_name.ljust(16), name_bytes):
-                if not (0 <= b <= 127):
-                    raise ValueError(
-                        f"'tuning_name' must be 7-bit ASCII, got "
-                        f"non-ASCII character {c!r}"
-                    )
-            notes = message.get("notes")
-            if notes is None:
-                raise KeyError("'notes' (required for 'bulk_dump_reply')")
+            notes = _required(message, "notes", command)
             if len(notes) != 128:
                 raise ValueError(
-                    "'notes' must have exactly 128 entries (one per MIDI "
-                    f"key number), got {len(notes)}"
+                    f"'notes' must have exactly 128 entries (one per MIDI key "
+                    f"number), got {len(notes)}"
                 )
-            freq_bytes: tuple = ()
-            for i, note_entry in enumerate(notes):
-                try:
-                    freq_bytes += _encode_tuning_frequency(note_entry)
-                except KeyError as e:
-                    raise KeyError(f"'notes'[{i}]: {e}") from e
-                except ValueError as e:
-                    raise ValueError(f"'notes'[{i}]: {e}") from e
-            payload_before_checksum = (
-                0x7E, device_id, 0x08, 0x01, tuning_program,
-            ) + name_bytes + freq_bytes
-            checksum = 0
-            for b in payload_before_checksum:
-                checksum ^= b
-            return mido.Message(
-                "sysex",
-                data=payload_before_checksum + (checksum,),
-                time=time,
+            data = (
+                0x7E, device_id, 0x08, code, program,
+                *_ascii("tuning_name", name.ljust(16)),
+                *_each("notes", notes, _encode_tuning_frequency),
             )
+            return _sysex(*data, _xor_checksum(data), time=time)
 
-        # command == "note_change"
-        changes = message.get("changes")
-        if not changes:
-            raise KeyError(
-                "'changes' (required, non-empty, for 'note_change')"
-            )
-        if not (1 <= len(changes) <= 127):
+        # note_change: [kk xx yy zz] per entry.
+        changes = _required_list(message, "changes", command)
+        if len(changes) > 127:
             raise ValueError(
                 f"'changes' must have 1-127 entries, got {len(changes)}"
             )
-        change_bytes: tuple = ()
-        for i, change_entry in enumerate(changes):
-            key = change_entry.get("key")
-            if key is None:
-                raise KeyError(f"'changes'[{i}]: 'key'")
-            if not (0 <= key <= 127):
-                raise ValueError(
-                    f"'changes'[{i}]: 'key' must be 0-127, got {key!r}"
-                )
-            try:
-                freq = _encode_tuning_frequency(change_entry)
-            except KeyError as e:
-                raise KeyError(f"'changes'[{i}]: {e}") from e
-            except ValueError as e:
-                raise ValueError(f"'changes'[{i}]: {e}") from e
-            change_bytes += (key,) + freq
-        return mido.Message(
-            "sysex",
-            data=(
-                0x7F, device_id, 0x08, 0x02, tuning_program, len(changes),
-            ) + change_bytes,
+        return _sysex(
+            0x7F, device_id, 0x08, code, program, len(changes),
+            *_each("changes", changes, lambda entry: (
+                _check_range("key", _required(entry, "key"), 0, 127),
+                *_encode_tuning_frequency(entry),
+            )),
             time=time,
         )
     if msg_type == "notation":
-        # Notation Information — a Universal Real Time SysEx family,
-        # sub-ID#1 = 03, covering 3 message shapes under one 'command'
-        # sub-field (same pattern as mmc/msc/gm_system/device_inquiry/
-        # device_control/channel_mode/midi_tuning above). Confirmed
-        # against the primary spec's "Notation Information" section, with
-        # the Time Signature wire format RE-VERIFIED via a rendered page
-        # image — see the discrepancy note below.
+        # Notation Information (Universal Real Time, MIDI 1.0 Detailed
+        # Spec):
         #   bar_marker: F0 7F <device_id> 03 01 aa aa F7
-        #     aa aa = a SIGNED 14-bit bar number, LSB then MSB, encoded as
-        #     ordinary two's-complement (Python's `n & 0x3FFF` produces
-        #     the correct raw bit pattern for negative n directly — hand-
-        #     verified against all 4 of the spec's own named sentinel
-        #     values before writing this: -8192="not running", 0="last
-        #     count-in bar", 1..8190="song bar numbers", 8191="running,
-        #     bar number unknown").
-        #   time_signature_immediate/_delayed:
-        #     F0 7F <device_id> 03 <02|42> ln nn dd cc bb [nn dd...] F7
-        # ⚠️ SPEC DISCREPANCY, worth recording plainly (a second one found
-        # in this same document, after MIDI Tuning's checksum issue): the
-        # primary spec's own compact wire-format line for BOTH Time
-        # Signature variants prints an extra, spurious 'bb' token
-        # ("...ln nn dd bb cc bb [nn dd...]") that does not match the
-        # properly-aligned field-by-field definition list directly below
-        # it (which lists exactly 5 distinct fields: ln, nn, dd, cc, bb —
-        # no duplicate). Visually re-verified against a rendered page
-        # image to rule out a text-extraction error — it's genuinely
-        # printed that way in the original 1996 document. Independently
-        # cross-checked against `mido`'s OWN existing `time_signature`
-        # MetaMessage encoding (already used elsewhere in this file for
-        # .mid files) by constructing one and inspecting its actual
-        # encoded bytes — mido encodes as nn, dd(as a power-of-2
-        # exponent), cc, bb, with NO duplicate byte, matching the properly
-        # -aligned field list here, not the glitched wire-format line.
-        # This implementation uses the doubly-confirmed 5-byte-plus-
-        # compound-pairs layout (ln nn dd cc bb [nn dd...]), not literally
-        # replicating the spec's own typo'd summary line.
-        # `denominator` is accepted as the ACTUAL value (2/4/8/16/...),
-        # not the exponent — mirrors mido's own field convention exactly,
-        # see `_encode_time_signature_pair`'s own docstring.
-        _NOTATION_COMMANDS = {
-            "bar_marker", "time_signature_immediate", "time_signature_delayed",
-        }
-        command = message.get("command")
-        if command is None:
-            raise KeyError("'command'")
-        if command not in _NOTATION_COMMANDS:
-            raise ValueError(
-                f"'command' must be one of {sorted(_NOTATION_COMMANDS)} "
-                f"for 'notation', got {command!r}"
-            )
-        device_id = message.get("device_id", 0x7F)
-        if not (0 <= device_id <= 127):
-            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
+        #     signed 14-bit bar number, LSB first, two's complement:
+        #     -8192 not running, 0 count-in, 1-8190 bar, 8191 unknown.
+        #   time_signature_immediate (02) / _delayed (42):
+        #     F0 7F <device_id> 03 <02|42> ln nn dd cc bb [nn dd ...] F7
+        #     ln = number of bytes that follow. The spec's one-line summary
+        #     shows an extra 'bb'; this follows its field list (ln nn dd cc
+        #     bb), which matches mido's time_signature meta event.
+        command = _choice(
+            message, "command", _COMMANDS["notation"], "notation",
+        )
+        code = _COMMANDS["notation"][command]
+        device_id = _device_id(message)
 
         if command == "bar_marker":
-            bar_number = message.get("bar_number")
-            if bar_number is None:
-                raise KeyError("'bar_number' (required for 'bar_marker')")
-            if not (-8192 <= bar_number <= 8191):
-                raise ValueError(
-                    f"'bar_number' must be -8192 to 8191, got {bar_number!r}"
-                )
-            raw14 = bar_number & 0x3FFF
-            return mido.Message(
-                "sysex",
-                data=(
-                    0x7F, device_id, 0x03, 0x01,
-                    raw14 & 0x7F, (raw14 >> 7) & 0x7F,
-                ),
+            bar = _check_range(
+                "bar_number", _required(message, "bar_number", command),
+                -8192, 8191,
+            )
+            return _sysex(
+                0x7F, device_id, 0x03, code,
+                *_split14("bar_number", bar & 0x3FFF),
                 time=time,
             )
 
         # time_signature_immediate / time_signature_delayed
-        numerator = message.get("numerator")
-        denominator = message.get("denominator")
-        clocks_per_click = message.get("clocks_per_click")
-        notated_32nd_notes_per_beat = message.get("notated_32nd_notes_per_beat")
-        if numerator is None:
-            raise KeyError("'numerator'")
-        if denominator is None:
-            raise KeyError("'denominator'")
-        if clocks_per_click is None:
-            raise KeyError("'clocks_per_click'")
-        if notated_32nd_notes_per_beat is None:
-            raise KeyError("'notated_32nd_notes_per_beat'")
-        if not (0 <= clocks_per_click <= 127):
-            raise ValueError(
-                f"'clocks_per_click' must be 0-127, got {clocks_per_click!r}"
+        numerator, denominator, clocks, n32nds = (
+            _required(message, field) for field in (
+                "numerator", "denominator", "clocks_per_click",
+                "notated_32nd_notes_per_beat",
             )
-        if not (0 <= notated_32nd_notes_per_beat <= 127):
-            raise ValueError(
-                "'notated_32nd_notes_per_beat' must be 0-127, got "
-                f"{notated_32nd_notes_per_beat!r}"
-            )
-        try:
-            nn, dd = _encode_time_signature_pair(numerator, denominator)
-        except ValueError as e:
-            raise ValueError(f"primary time signature: {e}") from e
-
-        compound = message.get("compound", [])
-        compound_bytes: tuple = ()
-        for i, pair in enumerate(compound):
-            c_numerator = pair.get("numerator")
-            c_denominator = pair.get("denominator")
-            if c_numerator is None:
-                raise KeyError(f"'compound'[{i}]: 'numerator'")
-            if c_denominator is None:
-                raise KeyError(f"'compound'[{i}]: 'denominator'")
-            try:
-                c_nn, c_dd = _encode_time_signature_pair(
-                    c_numerator, c_denominator
-                )
-            except ValueError as e:
-                raise ValueError(f"'compound'[{i}]: {e}") from e
-            compound_bytes += (c_nn, c_dd)
-
-        sub_id2 = 0x02 if command == "time_signature_immediate" else 0x42
-        data_len = 4 + len(compound_bytes)
-        return mido.Message(
-            "sysex",
-            data=(
-                0x7F, device_id, 0x03, sub_id2, data_len,
-                nn, dd, clocks_per_click, notated_32nd_notes_per_beat,
-            ) + compound_bytes,
-            time=time,
         )
+        data = (
+            *_encode_time_signature_pair(numerator, denominator),
+            _check_range("clocks_per_click", clocks, 0, 127),
+            _check_range("notated_32nd_notes_per_beat", n32nds, 0, 127),
+            *_each("compound", message.get("compound", []), lambda pair: (
+                _encode_time_signature_pair(
+                    _required(pair, "numerator"), _required(pair, "denominator"),
+                )
+            )),
+        )
+        return _sysex(0x7F, device_id, 0x03, code, len(data), *data, time=time)
     if msg_type == "mtc_cueing":
-        # MTC (Real Time) Cueing — a Universal Real Time SysEx family,
-        # sub-ID#1 = 05, from the SEPARATE MTC Detailed Specification
-        # (RP-004/RP-008) rather than the primary MIDI 1.0 spec — this is
-        # the smaller Real-Time subset of the fuller Non-Real-Time MTC
-        # Cueing Set-Up message family (which also has Delete-variant
-        # commands and extra Special sub-types not present here; NOT
-        # implemented — build it only if a real device needs it). Wire
-        # format:
+        # MTC Real Time Cueing (RP-004/008):
         #   F0 7F <device_id> 05 <sub-id#2> sl sm <additional info> F7
-        # `sl sm` = a 14-bit Event Number, LSB then MSB (spec's own words:
-        # "sl is the 7 LS bits, and sm is the 7 MS bits") — same LSB-first
-        # convention as RPN/NRPN's parameter numbers elsewhere in this
-        # file, unlike MIDI Tuning's MSB-first frequency fields (verified
-        # per-field rather than assumed, same discipline throughout this
-        # whole tool).
-        # `<additional info>` is a NIBBLIZED MIDI data stream (see
-        # `_nibblize` above) for every with-info command except
-        # `event_name`, where it's nibblized ASCII instead.
-        _MTC_CUEING_COMMANDS = {
-            "special_system_stop": 0x00, "punch_in": 0x01, "punch_out": 0x02,
-            "event_start": 0x05, "event_stop": 0x06,
-            "event_start_with_info": 0x07, "event_stop_with_info": 0x08,
-            "cue_point": 0x0B, "cue_point_with_info": 0x0C,
-            "event_name": 0x0E,
-        }
-        command = message.get("command")
-        if command is None:
-            raise KeyError("'command'")
-        if command not in _MTC_CUEING_COMMANDS:
-            raise ValueError(
-                f"'command' must be one of "
-                f"{sorted(_MTC_CUEING_COMMANDS)} for 'mtc_cueing', got "
-                f"{command!r}"
-            )
-        sub_id2 = _MTC_CUEING_COMMANDS[command]
-        device_id = message.get("device_id", 0x7F)
-        if not (0 <= device_id <= 127):
-            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
-
+        # sl sm: 14-bit event number, LSB first. Additional info is a
+        # nibblized MIDI message (_nibblize), or nibblized ASCII for
+        # event_name. The Non-Real-Time set-up messages are 'mtc_cueing_nrt'.
+        command = _choice(
+            message, "command", _COMMANDS["mtc_cueing"], "mtc_cueing",
+        )
+        device_id = _device_id(message)
+        sub_id2 = _COMMANDS["mtc_cueing"][command]
         if command == "special_system_stop":
-            # Fixed Event Number = 04 00 (sl=0x04, sm=0x00) per the spec —
-            # "All others reserved" for the Special sub-type, so there's
-            # nothing for the caller to actually supply here.
-            return mido.Message(
-                "sysex",
-                data=(0x7F, device_id, 0x05, sub_id2, 0x04, 0x00),
-                time=time,
-            )
-
-        event_number = message.get("event_number")
-        if event_number is None:
-            raise KeyError("'event_number'")
-        if not (0 <= event_number <= 16383):
-            raise ValueError(
-                f"'event_number' must be 0-16383, got {event_number!r}"
-            )
-        sl, sm = event_number & 0x7F, (event_number >> 7) & 0x7F
-
-        if command == "event_name":
-            event_name = message.get("event_name")
-            if event_name is None:
-                raise KeyError("'event_name' (required for 'event_name')")
-            for c in event_name:
-                if ord(c) > 127:
-                    raise ValueError(
-                        f"'event_name' must be 7-bit ASCII, got "
-                        f"non-ASCII character {c!r}"
-                    )
-            info_bytes = _nibblize(ord(c) for c in event_name)
-            return mido.Message(
-                "sysex",
-                data=(0x7F, device_id, 0x05, sub_id2, sl, sm) + info_bytes,
-                time=time,
-            )
-
-        if command in ("event_start_with_info", "event_stop_with_info", "cue_point_with_info"):
-            info_message = message.get("additional_info_message")
-            info_raw_bytes = message.get("additional_info_bytes")
-            if info_message is not None and info_raw_bytes is not None:
-                raise ValueError(
-                    "specify only ONE of 'additional_info_message' or "
-                    "'additional_info_bytes', not both"
-                )
-            if info_message is None and info_raw_bytes is None:
-                raise KeyError(
-                    "'additional_info_message' (or 'additional_info_bytes'"
-                    f") — required for {command!r}"
-                )
-            if info_message is not None:
-                embedded = _build_message(info_message)
-                raw_bytes = embedded.bytes()
-            else:
-                raw_bytes = info_raw_bytes
-            info_bytes = _nibblize(raw_bytes)
-            return mido.Message(
-                "sysex",
-                data=(0x7F, device_id, 0x05, sub_id2, sl, sm) + info_bytes,
-                time=time,
-            )
-
-        # punch_in, punch_out, event_start, event_stop, cue_point — plain
-        # event-number-only commands, no additional info at all.
-        return mido.Message(
-            "sysex",
-            data=(0x7F, device_id, 0x05, sub_id2, sl, sm),
+            # Special type 04 00 in place of the event number; the spec
+            # reserves the other special types here.
+            return _sysex(0x7F, device_id, 0x05, sub_id2, 0x04, 0x00, time=time)
+        return _sysex(
+            0x7F, device_id, 0x05, sub_id2, *_cueing_event(message, command),
             time=time,
         )
     if msg_type == "mtc_cueing_nrt":
-        # MTC (Non-Real-Time) Cueing — the FULLER Set-Up Message family
-        # from the SEPARATE MTC Detailed Specification (RP-004/RP-008),
-        # Non-Real Time (0x7E), sub-ID#1=04 — a superset of the Real-Time
-        # 'mtc_cueing' type above: adds a full 5-byte time field to every
-        # message (Real-Time drops it entirely — "the time would be as
-        # soon as you receive this"), 4 Delete-variant commands, and 5
-        # distinct "Special" sub-types (Real-Time's Special has only
-        # System Stop, "all others reserved").
-        # Wire format: F0 7E <device_id> 04 <sub-id#2> hr mn sc fr ff sl sm
-        #              <additional info> F7
-        # For the 6 'special_*' commands (sub-id#2=0x00), the Event Number
-        # field (sl sm) is REPURPOSED to hold a fixed "Special Type"
-        # selector (00 00 through 05 00) rather than a real event number —
-        # spec's own words: "the Special Type takes the place of the
-        # Event Number." 4 of the 6 (enable/disable/clear event list,
-        # system stop) have their time field explicitly IGNORED by a
-        # receiver per the spec ("types 01 00 through 04 00 ignore the
-        # event time field") — sent as zeroed time bytes here rather than
-        # exposing meaningless fields the caller would have to fill in for
-        # no purpose. The other 2 (time_code_offset, event_list_request)
-        # DO use the time field meaningfully, so those still take real
-        # hours/minutes/seconds/frames/fractional_frames/frame_rate input.
-        # NOTE: 'special_system_stop' is also a command name in the
-        # SEPARATE 'mtc_cueing' (Real-Time) type above — no actual
-        # conflict since these are two distinct top-level message types
-        # (same "shared field name, different meaning per type" pattern
-        # mmc/msc's own 'command' field already uses elsewhere).
-        _MTC_CUEING_NRT_SPECIAL_TYPES = {
-            "special_time_code_offset": 0x00,
-            "special_enable_event_list": 0x01,
-            "special_disable_event_list": 0x02,
-            "special_clear_event_list": 0x03,
-            "special_system_stop": 0x04,
-            "special_event_list_request": 0x05,
-        }
-        _MTC_CUEING_NRT_PLAIN_COMMANDS = {
-            "punch_in": 0x01, "punch_out": 0x02,
-            "delete_punch_in": 0x03, "delete_punch_out": 0x04,
-            "event_start": 0x05, "event_stop": 0x06,
-            "event_start_with_info": 0x07, "event_stop_with_info": 0x08,
-            "delete_event_start": 0x09, "delete_event_stop": 0x0A,
-            "cue_point": 0x0B, "cue_point_with_info": 0x0C,
-            "delete_cue_point": 0x0D, "event_name": 0x0E,
-        }
-        _all_nrt_commands = (
-            set(_MTC_CUEING_NRT_SPECIAL_TYPES)
-            | set(_MTC_CUEING_NRT_PLAIN_COMMANDS)
+        # MTC Non-Real Time Cueing set-up (RP-004/008):
+        #   F0 7E <device_id> 04 <sub-id#2> hr mn sc fr ff sl sm
+        #   <additional info> F7
+        # Like 'mtc_cueing', plus a time field, delete commands, and six
+        # special types. Specials (sub-id#2 00) put the special type
+        # (00 00-05 00) where the event number goes. Receivers ignore the
+        # time field for types 01-04, so it's sent as zeros; 00 (time
+        # code offset) and 05 (event list request) take a time.
+        command = _choice(
+            message, "command", _COMMANDS["mtc_cueing_nrt"], "mtc_cueing_nrt",
         )
-        command = message.get("command")
-        if command is None:
-            raise KeyError("'command'")
-        if command not in _all_nrt_commands:
-            raise ValueError(
-                f"'command' must be one of {sorted(_all_nrt_commands)} "
-                f"for 'mtc_cueing_nrt', got {command!r}"
-            )
-        device_id = message.get("device_id", 0x7F)
-        if not (0 <= device_id <= 127):
-            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
-
+        device_id = _device_id(message)
+        sub_id2 = _COMMANDS["mtc_cueing_nrt"][command]
         if command in _MTC_CUEING_NRT_SPECIAL_TYPES:
-            special_type = _MTC_CUEING_NRT_SPECIAL_TYPES[command]
-            if command in (
-                "special_time_code_offset", "special_event_list_request",
-            ):
-                hours = message.get("hours")
-                minutes = message.get("minutes")
-                seconds = message.get("seconds")
-                frames = message.get("frames")
-                fractional_frames = message.get("fractional_frames")
-                frame_rate = message.get("frame_rate")
-                if hours is None:
-                    raise KeyError(f"'hours' (required for {command!r})")
-                if minutes is None:
-                    raise KeyError(f"'minutes' (required for {command!r})")
-                if seconds is None:
-                    raise KeyError(f"'seconds' (required for {command!r})")
-                if frames is None:
-                    raise KeyError(f"'frames' (required for {command!r})")
-                if fractional_frames is None:
-                    raise KeyError(
-                        f"'fractional_frames' (required for {command!r})"
-                    )
-                if frame_rate is None:
-                    raise KeyError(
-                        f"'frame_rate' (required for {command!r})"
-                    )
-                time_bytes = _encode_mtc_cueing_time(
-                    hours, minutes, seconds, frames, fractional_frames,
-                    frame_rate,
-                )
+            if command in ("special_time_code_offset", "special_event_list_request"):
+                time_bytes = _time_code_bytes(message, "fractional_frames", command)
             else:
-                # enable/disable/clear event list, system stop -- time
-                # field explicitly ignored by receivers per the spec.
+                # Types 01-04: receivers ignore the time field.
                 time_bytes = (0, 0, 0, 0, 0)
-            return mido.Message(
-                "sysex",
-                data=(0x7E, device_id, 0x04, 0x00) + time_bytes
-                + (special_type, 0),
+            return _sysex(
+                0x7E, device_id, 0x04, sub_id2, *time_bytes,
+                _MTC_CUEING_NRT_SPECIAL_TYPES[command], 0x00,
                 time=time,
             )
-
-        # Plain (non-Special) commands -- always need the full time field
-        # plus a REAL caller-supplied event number.
-        sub_id2 = _MTC_CUEING_NRT_PLAIN_COMMANDS[command]
-        hours = message.get("hours")
-        minutes = message.get("minutes")
-        seconds = message.get("seconds")
-        frames = message.get("frames")
-        fractional_frames = message.get("fractional_frames")
-        frame_rate = message.get("frame_rate")
-        if hours is None:
-            raise KeyError("'hours'")
-        if minutes is None:
-            raise KeyError("'minutes'")
-        if seconds is None:
-            raise KeyError("'seconds'")
-        if frames is None:
-            raise KeyError("'frames'")
-        if fractional_frames is None:
-            raise KeyError("'fractional_frames'")
-        if frame_rate is None:
-            raise KeyError("'frame_rate'")
-        time_bytes = _encode_mtc_cueing_time(
-            hours, minutes, seconds, frames, fractional_frames, frame_rate,
-        )
-        event_number = message.get("event_number")
-        if event_number is None:
-            raise KeyError("'event_number'")
-        if not (0 <= event_number <= 16383):
-            raise ValueError(
-                f"'event_number' must be 0-16383, got {event_number!r}"
-            )
-        sl, sm = event_number & 0x7F, (event_number >> 7) & 0x7F
-
-        if command == "event_name":
-            event_name = message.get("event_name")
-            if event_name is None:
-                raise KeyError("'event_name' (required for 'event_name')")
-            for c in event_name:
-                if ord(c) > 127:
-                    raise ValueError(
-                        f"'event_name' must be 7-bit ASCII, got "
-                        f"non-ASCII character {c!r}"
-                    )
-            info_bytes = _nibblize(ord(c) for c in event_name)
-            return mido.Message(
-                "sysex",
-                data=(0x7E, device_id, 0x04, sub_id2) + time_bytes
-                + (sl, sm) + info_bytes,
-                time=time,
-            )
-
-        if command in (
-            "event_start_with_info", "event_stop_with_info",
-            "cue_point_with_info",
-        ):
-            info_message = message.get("additional_info_message")
-            info_raw_bytes = message.get("additional_info_bytes")
-            if info_message is not None and info_raw_bytes is not None:
-                raise ValueError(
-                    "specify only ONE of 'additional_info_message' or "
-                    "'additional_info_bytes', not both"
-                )
-            if info_message is None and info_raw_bytes is None:
-                raise KeyError(
-                    "'additional_info_message' (or "
-                    f"'additional_info_bytes') — required for {command!r}"
-                )
-            if info_message is not None:
-                embedded = _build_message(info_message)
-                raw_bytes = embedded.bytes()
-            else:
-                raw_bytes = info_raw_bytes
-            info_bytes = _nibblize(raw_bytes)
-            return mido.Message(
-                "sysex",
-                data=(0x7E, device_id, 0x04, sub_id2) + time_bytes
-                + (sl, sm) + info_bytes,
-                time=time,
-            )
-
-        # punch_in/out, delete_punch_in/out, event_start/stop,
-        # delete_event_start/stop, cue_point, delete_cue_point -- plain,
-        # no additional info at all.
-        return mido.Message(
-            "sysex",
-            data=(0x7E, device_id, 0x04, sub_id2) + time_bytes + (sl, sm),
+        return _sysex(
+            0x7E, device_id, 0x04, sub_id2,
+            *_time_code_bytes(message, "fractional_frames"),
+            *_cueing_event(message, command),
             time=time,
         )
     if msg_type == "file_dump":
-        # File Dump — a Universal Non-Real Time SysEx family, sub-ID#1 =
-        # 07, for transferring arbitrary files (not just audio samples —
-        # the OTHER motivation this exists for, per the spec's own words,
-        # is moving Standard MIDI Files between computers and small ROM-
-        # based "boxes"). Genuinely still useful for archiving/restoring
-        # patch or sample data on vintage hardware that predates USB mass
-        # storage (per the user's own explicit reasoning for building this
-        # despite Sample Dump Standard being deliberately skipped).
-        # Wire formats:
-        #   request:      F0 7E <device_id> 07 03 ss <type> <name> F7
-        #   header:       F0 7E <device_id> 07 01 ss <type> <len> <name> F7
-        #   data_packet:  F0 7E <device_id> 07 02 <pkt#> <count> <data>
-        #                 <chksm> F7
-        #   ack/nak/cancel/wait/eof (shared generic handshake numbering,
-        #   Non-Real-Time sub-ID#1 = 7B-7F, the same space Sample Dump
-        #   uses, "plus a new EOF message" per the spec's own words):
-        #     F0 7E <device_id> <7B..7F> pp F7
-        # UNLIKE every other typed helper in this file, `device_id` has NO
-        # DEFAULT here — File Dump is inherently a point-to-point handshake
-        # between two SPECIFIC addressed devices (the spec explicitly
-        # forbids the source device ID ever being the 7F "all-call" value,
-        # a strong signal this isn't a broadcast-style message family the
-        # way gm_system/mtc_full/etc. are) — silently defaulting to 0x7F
-        # here could paper over a real addressing mistake, so it's
-        # required explicitly instead.
-        # `<type>` is exactly 4 printable-ASCII bytes (e.g. "MIDI", "TEXT",
-        # "BIN " with a trailing space) — validated as exactly 4
-        # characters in the printable range 0x20-0x7E, same range the
-        # spec itself requires for `<name>`.
-        # `<length>` is 4 bytes, LSB-first, 0-127 bits' worth via 4x7-bit
-        # bytes (0 = "length unknown", spec's own stated meaning).
-        # Data Packet's checksum is unambiguous in the spec's own words —
-        # "XOR of all bytes which follow F0 up to the checksum byte" — NO
-        # discrepancy like MIDI Tuning's checksum had; still hand-verified
-        # against a self-constructed numeric example before writing this,
-        # same discipline regardless.
-        _FILE_DUMP_HANDSHAKE = {
-            "eof": 0x7B, "wait": 0x7C, "cancel": 0x7D, "nak": 0x7E,
-            "ack": 0x7F,
-        }
-        _FILE_DUMP_COMMANDS = {"request", "header", "data_packet"} | set(
-            _FILE_DUMP_HANDSHAKE
+        # File Dump (Universal Non-Real Time, MIDI 1.0 Detailed Spec):
+        #   request:     F0 7E <device_id> 07 03 ss <type> <name> F7
+        #   header:      F0 7E <device_id> 07 01 ss <type> <len> <name> F7
+        #   data_packet: F0 7E <device_id> 07 02 <pkt#> <count> <data>
+        #                <chksm> F7
+        #   eof/wait/cancel/nak/ack: F0 7E <device_id> <7B-7F> pp F7
+        # device_id has no default: File Dump is point to point, and the
+        # source ID (ss) can't be 7F. <type> is 4 printable ASCII
+        # characters ("MIDI", "BIN "); <name> is printable ASCII. <len> is
+        # 28 bits in four 7-bit bytes, LSB first, 0 = unknown. Checksum:
+        # XOR of every byte after F0 up to the checksum. Sample Dump
+        # Standard isn't implemented.
+        command = _choice(
+            message, "command", _COMMANDS["file_dump"], "file_dump",
         )
-        command = message.get("command")
-        if command is None:
-            raise KeyError("'command'")
-        if command not in _FILE_DUMP_COMMANDS:
-            raise ValueError(
-                f"'command' must be one of {sorted(_FILE_DUMP_COMMANDS)} "
-                f"for 'file_dump', got {command!r}"
-            )
-        device_id = message.get("device_id")
-        if device_id is None:
-            raise KeyError("'device_id' (no default for 'file_dump' — "
-                            "see the code comment for why)")
-        if not (0 <= device_id <= 127):
-            raise ValueError(f"'device_id' must be 0-127, got {device_id!r}")
-
-        def _validate_ascii_field(name: str, value: str) -> tuple:
-            for c in value:
-                if not (0x20 <= ord(c) <= 0x7E):
-                    raise ValueError(
-                        f"{name!r} must be printable ASCII (0x20-0x7E), "
-                        f"got non-printable character {c!r}"
-                    )
-            return tuple(ord(c) for c in value)
+        code = _COMMANDS["file_dump"][command]
+        device_id = _device_id(message, default=None)
 
         if command in _FILE_DUMP_HANDSHAKE:
-            sub_id1 = _FILE_DUMP_HANDSHAKE[command]
+            # ack/nak name a packet; receivers ignore it for eof/wait/cancel.
             if command in ("ack", "nak"):
-                packet_number = message.get("packet_number")
-                if packet_number is None:
-                    raise KeyError(
-                        f"'packet_number' (required for {command!r})"
-                    )
+                packet = _required(message, "packet_number", command)
             else:
-                # wait/cancel/eof -- packet number explicitly "ignored"
-                # by the receiver per the spec, no need to require
-                # meaningless input from the caller.
-                packet_number = message.get("packet_number", 0)
-            if not (0 <= packet_number <= 127):
-                raise ValueError(
-                    f"'packet_number' must be 0-127, got {packet_number!r}"
-                )
-            return mido.Message(
-                "sysex",
-                data=(0x7E, device_id, sub_id1, packet_number),
+                packet = message.get("packet_number", 0)
+            return _sysex(
+                0x7E, device_id, code,
+                _check_range("packet_number", packet, 0, 127),
                 time=time,
             )
 
-        if command in ("request", "header"):
-            source_device_id = message.get("source_device_id")
-            if source_device_id is None:
-                raise KeyError("'source_device_id'")
-            if not (0 <= source_device_id <= 126):
-                raise ValueError(
-                    "'source_device_id' must be 0-126 (the spec "
-                    "explicitly disallows 127/'all-call' as a source), "
-                    f"got {source_device_id!r}"
-                )
-            file_type = message.get("file_type")
-            if file_type is None:
-                raise KeyError("'file_type'")
-            if len(file_type) != 4:
-                raise ValueError(
-                    "'file_type' must be exactly 4 characters (e.g. "
-                    f"'MIDI', 'TEXT', 'BIN '), got {len(file_type)} "
-                    f"({file_type!r})"
-                )
-            type_bytes = _validate_ascii_field("file_type", file_type)
-            filename = message.get("filename", "")
-            name_bytes = _validate_ascii_field("filename", filename)
-
-            if command == "request":
-                return mido.Message(
-                    "sysex",
-                    data=(0x7E, device_id, 0x07, 0x03, source_device_id)
-                    + type_bytes + name_bytes,
-                    time=time,
-                )
-
-            # header
-            length = message.get("length")
-            if length is None:
-                raise KeyError("'length' (0 for 'unknown', per the spec)")
-            if not (0 <= length <= 0xFFFFFFF):
-                raise ValueError(
-                    f"'length' must be 0-{0xFFFFFFF} (4x7-bit bytes), "
-                    f"got {length!r}"
-                )
-            length_bytes = (
-                length & 0x7F, (length >> 7) & 0x7F,
-                (length >> 14) & 0x7F, (length >> 21) & 0x7F,
+        if command == "data_packet":
+            packet = _check_range(
+                "packet_number", _required(message, "packet_number"), 0, 127,
             )
-            return mido.Message(
-                "sysex",
-                data=(0x7E, device_id, 0x07, 0x01, source_device_id)
-                + type_bytes + length_bytes + name_bytes,
-                time=time,
+            encoded = _encode_file_dump_data(
+                _required_list(message, "stored_bytes", command),
             )
+            # <count> is the number of encoded data bytes minus 1.
+            data = (0x7E, device_id, 0x07, code, packet, len(encoded) - 1, *encoded)
+            return _sysex(*data, _xor_checksum(data), time=time)
 
-        # data_packet
-        packet_number = message.get("packet_number")
-        if packet_number is None:
-            raise KeyError("'packet_number'")
-        if not (0 <= packet_number <= 127):
+        # request / header
+        source = _check_range(
+            "source_device_id", _required(message, "source_device_id"), 0, 126,
+        )
+        file_type = _required(message, "file_type")
+        if len(file_type) != 4:
             raise ValueError(
-                f"'packet_number' must be 0-127, got {packet_number!r}"
+                f"'file_type' must be exactly 4 characters (e.g. 'MIDI', "
+                f"'TEXT', 'BIN '), got {len(file_type)} ({file_type!r})"
             )
-        stored_bytes = message.get("stored_bytes")
-        if not stored_bytes:
-            raise KeyError(
-                "'stored_bytes' (required, non-empty, for 'data_packet')"
+        type_bytes = _ascii("file_type", file_type, printable=True)
+        name_bytes = _ascii("filename", message.get("filename", ""), printable=True)
+        if command == "request":
+            return _sysex(
+                0x7E, device_id, 0x07, code, source, *type_bytes, *name_bytes,
+                time=time,
             )
-        encoded = _encode_file_dump_data(list(stored_bytes))
-        byte_count = len(encoded) - 1
-        payload_before_checksum = (
-            0x7E, device_id, 0x07, 0x02, packet_number, byte_count,
-        ) + encoded
-        checksum = 0
-        for b in payload_before_checksum:
-            checksum ^= b
-        return mido.Message(
-            "sysex",
-            data=payload_before_checksum + (checksum,),
+        length = _check_range(
+            "length", _required(message, "length", command), 0, 0xFFFFFFF,
+        )
+        return _sysex(
+            0x7E, device_id, 0x07, code, source, *type_bytes,
+            *((length >> shift) & 0x7F for shift in (0, 7, 14, 21)),
+            *name_bytes,
             time=time,
         )
     raise ValueError(
         f"unknown message type {msg_type!r} — expected one of "
-        "note_on, note_off, control_change, program_change, "
-        "pitchwheel, aftertouch, polytouch, quarter_frame, songpos, "
-        "song_select, tune_request, clock, start, stop, continue, "
-        "active_sensing, reset, sysex, mtc_full, mmc, msc, gm_system, "
-        "device_inquiry, device_control, channel_mode, midi_tuning, "
-        "notation, mtc_cueing, mtc_cueing_nrt, file_dump"
+        f"{', '.join(_MESSAGE_TYPES)}"
     )
 
 
-# Registered Parameter Numbers actually defined in the primary MIDI 1.0
-# Detailed Specification's Table IIIa — the only 5 that have an
-# MMA-assigned universal meaning. Values are LSB-first pairs as printed in
-# that table (all 5 happen to share MSB=0x00). Non-Registered Parameter
-# Numbers have no such universal names — 'nrpn' below always requires a
-# raw 'parameter_number' instead.
+# Named RPNs: 0-4 from the MIDI 1.0 Detailed Spec Table IIIa, 6 from MPE.
+# RPN 5 (Modulation Depth Range, CA-026) isn't named; send it with
+# 'parameter_number'. NRPNs have no standard names.
 _RPN_NAMED_PARAMETERS = {
     "pitch_bend_sensitivity": 0x0000,
     "fine_tuning": 0x0001,
     "coarse_tuning": 0x0002,
     "tuning_program_select": 0x0003,
     "tuning_bank_select": 0x0004,
-    # RPN #6 — the MPE Configuration Message (MCM), MMA/AMEI M1-100-UM MPE
-    # spec section 2.2.1: sent to a Zone's Manager Channel (channel 0 for
-    # the Lower Zone, channel 15 for the Upper Zone in this tool's
-    # 0-indexed scheme) with 'value' = number of Member Channels (0-15;
-    # 0 deactivates that Zone). The spec states the Data Entry LSB "has
-    # no function" for this RPN — pass 'msb_only': true, same as any
-    # other RPN where only 7 bits of resolution matter.
+    # MPE Configuration Message (M1-100-UM section 2.2.1): send on the
+    # zone's Manager Channel (0 = Lower Zone, 15 = Upper Zone) with value =
+    # number of Member Channels (0 turns the zone off) and msb_only true.
     "mpe_configuration": 0x0006,
 }
 
 
 def _build_rpn_or_nrpn_sequence(message: dict, *, registered: bool) -> list:
-    """Build the short Control Change SEQUENCE that selects and sets an
-    RPN ('registered=True') or NRPN ('registered=False') parameter.
-
-    Unlike every sysex-based type in `_build_message` above (where one
-    F0...F7 IS one physical message), RPN/NRPN genuinely require MULTIPLE
-    wire messages — there is no single Status byte that encodes
-    "select+set" in one shot. Sequence, confirmed against the primary
-    spec's "Control Change"/"Registered and Non-Registered Parameter
-    Numbers" section (Channel Voice Messages chapter) and the worked RPN
-    example in the separate MIDI Tuning spec ("Changing Tuning Programs":
-    `Bn 64 03 65 00 06 tt`, i.e. RPN LSB(100)=03, RPN MSB(101)=00, Data
-    Entry MSB(6)=tt — confirms LSB-select-first ordering, not just
-    byte-packing order):
-      1. Parameter Number LSB  — CC100 (RPN) or CC98 (NRPN)
-      2. Parameter Number MSB  — CC101 (RPN) or CC99 (NRPN)
-      3. Data Entry MSB        — CC6
-      4. Data Entry LSB        — CC38 (SKIPPED if 'msb_only' is True — the
-         spec explicitly allows sending only the MSB "if seven bits of
-         resolution is sufficient", Channel Voice Messages chapter,
-         Control Change section)
-    Only the 'set' operation (Data Entry) is implemented. Data
-    Increment/Decrement (CC96/97) are DELIBERATELY NOT implemented — the
-    primary spec names these controllers but never defines what their
-    value byte actually means (Table III just lists "Data increment"/
-    "Data decrement" with no further detail), the same kind of spec
-    gap that held back MMC Shuttle until the RP-013 pages defining its
-    speed encoding turned up (Shuttle is built now). Use raw
-    'control_change' directly (controller 96 or 97) if a specific
-    device's increment/decrement behavior is already known.
+    """Build the Control Change sequence that selects and sets an RPN
+    (registered=True) or NRPN (registered=False):
+      1. parameter LSB: CC100 (RPN) or CC98 (NRPN)
+      2. parameter MSB: CC101 (RPN) or CC99 (NRPN)
+      3. Data Entry MSB: CC6
+      4. Data Entry LSB: CC38, left out when msb_only is true
+    The order matches the MIDI Tuning spec's example
+    (Bn 64 03 65 00 06 tt). Data Increment/Decrement (CC96/97) aren't
+    implemented because the spec doesn't define their value byte; send
+    them with 'control_change'.
     """
     channel = message.get("channel", 0)
     time = message.get("time", 0)
-    type_name = "rpn" if registered else "nrpn"
 
     if registered:
-        parameter = message.get("parameter")
-        parameter_number = message.get("parameter_number")
-        if parameter is not None and parameter_number is not None:
+        name = message.get("parameter")
+        number = message.get("parameter_number")
+        if name is not None and number is not None:
             raise ValueError(
-                "specify only ONE of 'parameter' or 'parameter_number', "
-                "not both"
+                "specify only ONE of 'parameter' or 'parameter_number', not both"
             )
-        if parameter is None and parameter_number is None:
+        if name is not None:
+            number = _RPN_NAMED_PARAMETERS[
+                _choice(message, "parameter", _RPN_NAMED_PARAMETERS, "rpn")
+            ]
+        elif number is None:
             raise KeyError("'parameter' (or 'parameter_number')")
-        if parameter is not None:
-            if parameter not in _RPN_NAMED_PARAMETERS:
-                raise ValueError(
-                    f"'parameter' must be one of "
-                    f"{sorted(_RPN_NAMED_PARAMETERS)} (or use "
-                    f"'parameter_number' for a raw 14-bit value), got "
-                    f"{parameter!r}"
-                )
-            param_num = _RPN_NAMED_PARAMETERS[parameter]
-        else:
-            # Guaranteed not-None here (both-None already raised above,
-            # 'parameter is None' is exactly why we're in this branch) —
-            # mypy can't see across the separate if-statements though, same
-            # "group-level check, not per-field" gotcha as Standing Rule 5.
-            assert parameter_number is not None
-            param_num = parameter_number
         select_lsb_cc, select_msb_cc = 100, 101
     else:
-        parameter_number = message.get("parameter_number")
-        if parameter_number is None:
-            raise KeyError("'parameter_number'")
-        param_num = parameter_number
+        number = _required(message, "parameter_number")
         select_lsb_cc, select_msb_cc = 98, 99
+    number_lsb, number_msb = _split14("parameter_number", number)
 
-    if not (0 <= param_num <= 16383):
-        raise ValueError(
-            f"parameter number must be 0-16383, got {param_num!r}"
-        )
-
-    value = message.get("value")
-    if value is None:
-        raise KeyError("'value'")
-    msb_only = message.get("msb_only", False)
-
-    msgs = [
-        mido.Message(
-            "control_change", channel=channel, control=select_lsb_cc,
-            value=param_num & 0x7F, time=time,
-        ),
-        mido.Message(
-            "control_change", channel=channel, control=select_msb_cc,
-            value=(param_num >> 7) & 0x7F, time=0,
-        ),
-    ]
-
-    if msb_only:
-        if not (0 <= value <= 127):
-            raise ValueError(
-                f"'value' must be 0-127 when 'msb_only' is True for "
-                f"'{type_name}', got {value!r}"
-            )
-        msgs.append(mido.Message(
-            "control_change", channel=channel, control=6, value=value,
-            time=0,
-        ))
+    value = _required(message, "value")
+    if message.get("msb_only", False):
+        data_entry = [(6, _check_range("value", value, 0, 127))]
     else:
-        if not (0 <= value <= 16383):
-            raise ValueError(
-                f"'value' must be 0-16383 for '{type_name}', got {value!r}"
-            )
-        msgs.append(mido.Message(
-            "control_change", channel=channel, control=6,
-            value=(value >> 7) & 0x7F, time=0,
-        ))
-        msgs.append(mido.Message(
-            "control_change", channel=channel, control=38,
-            value=value & 0x7F, time=0,
-        ))
+        value_lsb, value_msb = _split14("value", value)
+        data_entry = [(6, value_msb), (38, value_lsb)]
 
-    return msgs
+    controls = [(select_lsb_cc, number_lsb), (select_msb_cc, number_msb), *data_entry]
+    return [
+        mido.Message(
+            "control_change", channel=channel, control=control, value=cc_value,
+            time=time if position == 0 else 0,
+        )
+        for position, (control, cc_value) in enumerate(controls)
+    ]
 
 
 def _build_quarter_frame_sequence(message: dict) -> list:
-    """Build the 8 mido 'quarter_frame' messages that together encode ONE
-    complete SMPTE time (RP-004/008, "MIDI Time Code", pp.1-4 — confirmed
-    via a targeted pdftotext pull, cross-checked byte-for-byte against the
-    spec's own worked example: 01:37:52:16 at 30fps non-drop -> F1 00,
-    F1 11, F1 24, F1 33, F1 45, F1 52, F1 61, F1 76, reproduced exactly by
-    this function).
+    """Build the 8 Quarter Frame messages for one SMPTE time (RP-004/008
+    pp.1-4); the same position as 'mtc_full', for receivers that only
+    read Quarter Frames. Spec example: 01:37:52:16 at 30fps non-drop ->
+    F1 00, F1 11, F1 24, F1 33, F1 45, F1 52, F1 61, F1 76.
 
-    SAME required fields as 'mtc_full' (hours/minutes/seconds/frames/
-    frame_rate, no defaults — guessing 'frame_rate' wrong changes what the
-    position means downstream, same reasoning as 'mtc_full'), because this
-    is architecturally the SAME operation as 'mtc_full' — "encode this one
-    point in time" — just using the Quarter Frame wire format instead of
-    the Full Message format. Some real devices/receivers only parse
-    Quarter Frame (not every Full Message), so this exists as an
-    alternative encoding of identical information, NOT a different
-    feature. 'direction' ("forward", default, or "reverse", not required)
-    controls message ORDER only (7->0 instead of 0->7) — the per-message
-    nibble VALUES are identical either way, only the sequence flips (the
-    spec explicitly notes tape running backwards sends the same 8
-    messages in reverse order).
-
-    Scope boundary, stated plainly: this produces one CORRECT, complete
-    8-message snapshot of a specific instant — it is NOT a substitute for
-    a real free-running MTC master clock (which needs continuous,
-    precisely-timed quarter-frame messages emitted by an external
-    scheduler roughly every 2 frames, forever, while "playing" — well
-    beyond what a single tool call can already do for any other message
-    type in this file either). Same "one-shot, not a live generator"
-    boundary 'mtc_full' already has, just using different wire bytes.
-
-    Byte-splitting mechanics: each of frames (0-29)/seconds (0-59)/
-    minutes (0-59) is sent as its own LS-nibble-then-MS-nibble pair
-    (message types 0/1, 2/3, 4/5 respectively) — trivial since none of
-    these exceed 6 bits. Hours is the one exception: its byte is NOT just
-    the raw hour value — reusing "_encode_smpte_hour_byte" (the exact
-    same helper 'mtc_full'/MMC's 'locate' already share) packs the 2-bit
-    frame-rate type into bits 5-6 alongside the 5-bit hour value first,
-    THEN that combined byte gets the same LS/MS nibble split as the
-    others (message types 6/7) — confirmed exactly against the spec's own
-    worked example, where hours=1/type=30fps-non-drop(0b11) produces
-    byte 0x61, split into LS=1 (message 6) and MS=6 (message 7) — matching
-    the spec's own literal explanation: "the value transmitted is '6'
-    because the SMPTE Type (11 binary) is encoded in bits 5 and 6".
+    Types 0-7 carry the low/high nibbles of frames, seconds, minutes and
+    the hour byte (_encode_smpte_hour_byte, so the frame rate rides in
+    type 7). direction "reverse" sends types 7 to 0, as tape running
+    backwards does. This is a single snapshot, not a running MTC clock.
     """
-    hours = message.get("hours")
-    minutes = message.get("minutes")
-    seconds = message.get("seconds")
-    frames = message.get("frames")
-    frame_rate = message.get("frame_rate")
-    if hours is None:
-        raise KeyError("'hours'")
-    if minutes is None:
-        raise KeyError("'minutes'")
-    if seconds is None:
-        raise KeyError("'seconds'")
-    if frames is None:
-        raise KeyError("'frames'")
-    if frame_rate is None:
-        raise KeyError("'frame_rate'")
-    if not (0 <= minutes <= 59):
-        raise ValueError(f"'minutes' must be 0-59, got {minutes!r}")
-    if not (0 <= seconds <= 59):
-        raise ValueError(f"'seconds' must be 0-59, got {seconds!r}")
-    if not (0 <= frames <= 29):
-        raise ValueError(f"'frames' must be 0-29, got {frames!r}")
-
     direction = message.get("direction", "forward")
+    hr, mn, sc, fr = _time_code_bytes(message)
     if direction not in ("forward", "reverse"):
         raise ValueError(
             f"'direction' must be 'forward' or 'reverse', got {direction!r}"
         )
-
     time = message.get("time", 0)
-    # _encode_smpte_hour_byte itself validates 'hours' (0-23) and
-    # 'frame_rate' — no need to duplicate those checks here.
-    hr_byte = _encode_smpte_hour_byte(hours, frame_rate)
-
-    # Message-type order 0-7 is FIXED by the spec regardless of
-    # 'direction' (direction only changes which order these 8 VALUES get
-    # transmitted in, not which value goes with which type number).
+    # Indexed by quarter frame type; direction only changes send order.
     values_by_type = [
-        frames & 0xF, (frames >> 4) & 0xF,
-        seconds & 0xF, (seconds >> 4) & 0xF,
-        minutes & 0xF, (minutes >> 4) & 0xF,
-        hr_byte & 0xF, (hr_byte >> 4) & 0xF,
+        fr & 0xF, fr >> 4, sc & 0xF, sc >> 4, mn & 0xF, mn >> 4, hr & 0xF, hr >> 4,
     ]
-
     type_order = range(8) if direction == "forward" else range(7, -1, -1)
     return [
         mido.Message(
@@ -4284,19 +2501,9 @@ def _build_quarter_frame_sequence(message: dict) -> list:
 
 
 def _build_message_sequence(message: dict) -> list:
-    """Build ONE OR MORE mido.Message objects from a tool-supplied dict —
-    a thin wrapper AROUND `_build_message`, not a replacement for it.
-
-    `_build_message` itself is completely UNCHANGED (still returns exactly
-    one message, still used directly wherever only sysex messages are
-    valid, e.g. the '.syx' file writer below) — every existing message
-    type keeps flowing through that same, already-proven single-message
-    function exactly as before. This wrapper exists ONLY because 'rpn' and
-    'nrpn' are architecturally different: they need a short SEQUENCE of
-    Control Change messages on the wire (see `_build_rpn_or_nrpn_sequence`
-    above), which no single `mido.Message` can represent. Every other
-    message type still produces exactly one message here, just wrapped in
-    a 1-element list for a uniform return type.
+    """Build the list of mido.Messages for a typed dict. rpn, nrpn and
+    mtc_quarter_frame_sequence produce several; every other type is
+    _build_message's single message in a one-item list.
     """
     msg_type = message.get("type")
     if msg_type == "rpn":
@@ -4308,11 +2515,8 @@ def _build_message_sequence(message: dict) -> list:
     return [_build_message(message)]
 
 
-# The 17 file-only "meta" message types, verified live against
-# mido.midifiles.meta._META_SPEC_BY_TYPE before writing any code (same
-# "check mido's real spec, don't guess kwargs" discipline used throughout
-# this file). None of these are valid on a live `send` — they only make
-# sense inside a .mid file's track data.
+# mido's meta message types (mido.midifiles.meta._META_SPEC_BY_TYPE).
+# Valid only in write_midi_file tracks, not on a live send.
 _META_TYPES = frozenset({
     "track_name", "text", "copyright", "lyrics", "marker", "cue_marker",
     "instrument_name", "device_name", "set_tempo", "time_signature",
@@ -4322,24 +2526,9 @@ _META_TYPES = frozenset({
 
 
 def _build_meta_message(message: dict) -> "mido.MetaMessage":
-    """Build a mido.MetaMessage from a tool-supplied dict, for
-    `write_midi_file` track content only.
-
-    Deliberately generic/thin: confirmed live that mido.MetaMessage(type,
-    **kwargs) already (a) fills in its OWN sensible defaults for any
-    omitted attribute (e.g. time_signature defaults to 4/4, key_signature
-    defaults to 'C', smpte_offset defaults to all-zero/24fps — checked live
-    for every type in _META_TYPES before writing this), and (b) raises a
-    clean ValueError itself for any unrecognized kwarg name (e.g. a typo'd
-    field). So this function does NOT hand-duplicate mido's own per-type
-    attribute lists/defaults — it just passes whatever fields the caller
-    gave straight through and lets mido validate them, same "let mido do
-    the validating" lesson learned from the type-0-multitrack research
-    done while designing this. Only ONE special case: `set_tempo` gets
-    a `bpm` convenience alt-field (user-requested) that converts to
-    mido's real `tempo` (microseconds/quarter)
-    via `mido.bpm2tempo()` — mido itself has no `bpm` kwarg, this is purely
-    a tool-level convenience layered on top.
+    """Build a mido.MetaMessage for write_midi_file. Fields pass straight
+    to mido, which supplies defaults and rejects unknown names. set_tempo
+    also accepts 'bpm', converted with mido.bpm2tempo().
     """
     msg_type = message.get("type")
     if msg_type not in _META_TYPES:
@@ -4354,6 +2543,611 @@ def _build_meta_message(message: dict) -> "mido.MetaMessage":
     if "data" in kwargs and isinstance(kwargs["data"], list):
         kwargs["data"] = tuple(kwargs["data"])
     return mido.MetaMessage(msg_type, time=time, **kwargs)
+
+
+# --- Decoding ----------------------------------------------------------------
+# _decode_message turns a received mido.Message into the dict _build_message
+# takes, with every field filled in. A SysEx decode is kept only when
+# rebuilding it gives back the same bytes; otherwise the message is returned
+# as plain {"type": "sysex", "data": [...]}. Either way, building the result
+# reproduces the original message.
+
+
+def _name_for(table: dict, code: int) -> str:
+    """The name whose value is `code` in a name -> code table."""
+    for name, value in table.items():
+        if value == code:
+            return name
+    raise KeyError(code)
+
+
+def _join14(lsb: int, msb: int) -> int:
+    return lsb | (msb << 7)
+
+
+def _decode_channel_mode(msg: "mido.Message") -> "dict | None":
+    """Control Change 120-127 with a value the spec allows, as channel_mode;
+    None for any other Control Change."""
+    try:
+        command = _name_for(_COMMANDS["channel_mode"], msg.control)
+    except KeyError:
+        return None
+    out = {"type": "channel_mode", "command": command, "channel": msg.channel}
+    if command == "local_control":
+        if msg.value not in (0, 127):
+            return None
+        out["on"] = msg.value == 127
+    elif command == "mono_on":
+        if msg.value > 16:
+            return None
+        out["channel_count"] = msg.value
+    elif msg.value != 0:
+        return None
+    return out
+
+
+def _decode_gm_system(data: tuple) -> dict:
+    _, device_id, _, code = data
+    return {
+        "type": "gm_system", "command": _name_for(_COMMANDS["gm_system"], code),
+        "device_id": device_id,
+    }
+
+
+def _decode_device_inquiry(data: tuple) -> dict:
+    device_id, code, rest = data[1], data[3], data[4:]
+    command = _name_for(_COMMANDS["device_inquiry"], code)
+    out: dict = {"type": "device_inquiry", "command": command, "device_id": device_id}
+    if command == "reply":
+        if rest[0] == 0:
+            manufacturer_id, rest = list(rest[:3]), rest[3:]
+        else:
+            manufacturer_id, rest = rest[0], rest[1:]
+        if len(rest) != 8:
+            raise ValueError("Identity Reply has the wrong length")
+        out.update(
+            manufacturer_id=manufacturer_id,
+            device_family_code=_join14(rest[0], rest[1]),
+            device_family_member_code=_join14(rest[2], rest[3]),
+            software_revision=list(rest[4:8]),
+        )
+    return out
+
+
+def _decode_device_control(data: tuple) -> dict:
+    _, device_id, _, code, lsb, msb = data
+    return {
+        "type": "device_control",
+        "command": _name_for(_COMMANDS["device_control"], code),
+        "device_id": device_id, "value": _join14(lsb, msb),
+    }
+
+
+def _decode_time_code(hr: int, mn: int, sc: int, fr: int, *fifth: int,
+                      subframe_field: "str | None" = None) -> dict:
+    """The time fields of a Standard Time Code with the flags off; inverse of
+    _time_code_bytes."""
+    out = {
+        "hours": hr & 0x1F, "minutes": mn, "seconds": sc, "frames": fr,
+        "frame_rate": _name_for(_FRAME_RATE_BITS, (hr >> 5) & 0x3),
+    }
+    if subframe_field:
+        out[subframe_field] = fifth[0]
+    return out
+
+
+def _denibblize(nibbles) -> list:
+    """Inverse of _nibblize: low nibble first, two nibbles per byte."""
+    if len(nibbles) % 2:
+        raise ValueError("odd number of nibbles")
+    return [nibbles[i] | (nibbles[i + 1] << 4) for i in range(0, len(nibbles), 2)]
+
+
+def _decode_file_dump_data(encoded) -> list:
+    """Inverse of _encode_file_dump_data: groups of a sign byte plus up to 7
+    low-7-bit bytes."""
+    stored: list = []
+    for start in range(0, len(encoded), 8):
+        sign, *low = encoded[start:start + 8]
+        stored += [b | (((sign >> (6 - i)) & 1) << 7) for i, b in enumerate(low)]
+    return stored
+
+
+def _checksum_ok(data: tuple) -> bool:
+    """Whether the last byte is the XOR of the bytes before it."""
+    return _xor_checksum(data[:-1]) == data[-1]
+
+
+def _decode_mtc(data: tuple) -> dict:
+    # Full Message only; User Bits (01 02) isn't implemented.
+    _, device_id, _, code, hr, mn, sc, fr = data
+    if code != 0x01:
+        raise ValueError("not an MTC Full Message")
+    return {"type": "mtc_full", "device_id": device_id,
+            **_decode_time_code(hr, mn, sc, fr)}
+
+
+def _decode_handshake(data: tuple) -> dict:
+    # EOF/WAIT/CANCEL/NAK/ACK, shared by File Dump (and Sample Dump). The MTC
+    # sync-dropped NAK has the same bytes and decodes as file_dump 'nak'.
+    _, device_id, sub_id1, packet_number = data
+    return {"type": "file_dump", "command": _name_for(_FILE_DUMP_HANDSHAKE, sub_id1),
+            "device_id": device_id, "packet_number": packet_number}
+
+
+def _decode_file_dump(data: tuple) -> dict:
+    device_id, code = data[1], data[3]
+    command = _name_for(_COMMANDS["file_dump"], code)
+    out: dict = {"type": "file_dump", "command": command, "device_id": device_id}
+    if command == "data_packet":
+        packet_number, count, *encoded = data[4:-1]
+        if count != len(encoded) - 1:
+            raise ValueError("Data Packet count doesn't match its data")
+        out.update(packet_number=packet_number,
+                   stored_bytes=_decode_file_dump_data(encoded),
+                   checksum_ok=_checksum_ok(data))
+        return out
+    source, file_type, rest = data[4], data[5:9], data[9:]
+    out.update(source_device_id=source, file_type=bytes(file_type).decode("ascii"))
+    if command == "header":
+        out["length"] = sum(b << (7 * i) for i, b in enumerate(rest[:4]))
+        rest = rest[4:]
+    out["filename"] = bytes(rest).decode("ascii")
+    return out
+
+
+def _decode_midi_tuning(data: tuple) -> dict:
+    device_id, code, program = data[1], data[3], data[4]
+    command = _name_for(_COMMANDS["midi_tuning"], code)
+    out: dict = {"type": "midi_tuning", "command": command,
+                 "device_id": device_id, "tuning_program": program}
+
+    def frequency(xx: int, yy: int, zz: int) -> dict:
+        if (xx, yy, zz) == (0x7F, 0x7F, 0x7F):
+            return {"no_change": True}
+        return {"semitone": xx, "cents": _join14(zz, yy) * 100 / 16384}
+
+    if command == "bulk_dump_reply":
+        name, freq = data[5:21], data[21:-1]
+        if len(freq) != 384:
+            raise ValueError("bulk dump needs 128 x 3 frequency bytes")
+        out.update(
+            tuning_name=bytes(name).decode("ascii").rstrip(" "),
+            notes=[frequency(*freq[i:i + 3]) for i in range(0, 384, 3)],
+            checksum_ok=_checksum_ok(data),
+        )
+    elif command == "note_change":
+        count, entries = data[5], data[6:]
+        if len(entries) != 4 * count:
+            raise ValueError("note change count doesn't match its entries")
+        out["changes"] = [
+            {"key": entries[i], **frequency(*entries[i + 1:i + 4])}
+            for i in range(0, len(entries), 4)
+        ]
+    return out
+
+
+def _decode_notation(data: tuple) -> dict:
+    device_id, code = data[1], data[3]
+    command = _name_for(_COMMANDS["notation"], code)
+    out: dict = {"type": "notation", "command": command, "device_id": device_id}
+    if command == "bar_marker":
+        _, _, _, _, lsb, msb = data
+        bar = _join14(lsb, msb)
+        out["bar_number"] = bar - 0x4000 if bar >= 0x2000 else bar
+        return out
+    length, nn, dd, cc, bb, *compound = data[4:]
+    if length != 4 + len(compound) or len(compound) % 2:
+        raise ValueError("time signature length doesn't match its data")
+    out.update(
+        numerator=nn, denominator=2 ** dd, clocks_per_click=cc,
+        notated_32nd_notes_per_beat=bb,
+        compound=[{"numerator": compound[i], "denominator": 2 ** compound[i + 1]}
+                  for i in range(0, len(compound), 2)],
+    )
+    return out
+
+
+def _decode_cueing_event(command: str, sl: int, sm: int, info) -> dict:
+    """Inverse of _cueing_event."""
+    out: dict = {"event_number": _join14(sl, sm)}
+    if command == "event_name":
+        out["event_name"] = bytes(_denibblize(info)).decode("ascii")
+    elif command.endswith("_with_info"):
+        out["additional_info_bytes"] = _denibblize(info)
+    elif info:
+        raise ValueError(f"{command} carries no additional info")
+    return out
+
+
+def _decode_mtc_cueing(data: tuple) -> dict:
+    device_id, code, sl, sm, info = data[1], data[3], data[4], data[5], data[6:]
+    command = _name_for(_COMMANDS["mtc_cueing"], code)
+    out: dict = {"type": "mtc_cueing", "command": command, "device_id": device_id}
+    if command != "special_system_stop":
+        out.update(_decode_cueing_event(command, sl, sm, info))
+    return out
+
+
+def _decode_mtc_cueing_nrt(data: tuple) -> dict:
+    device_id, code = data[1], data[3]
+    time_bytes, sl, sm, info = data[4:9], data[9], data[10], data[11:]
+    out: dict = {"type": "mtc_cueing_nrt", "device_id": device_id}
+    if code == 0x00:
+        command = _name_for(_MTC_CUEING_NRT_SPECIAL_TYPES, sl)
+        out["command"] = command
+        if command in ("special_time_code_offset", "special_event_list_request"):
+            out.update(_decode_time_code(*time_bytes, subframe_field="fractional_frames"))
+        return out
+    specials = set(_MTC_CUEING_NRT_SPECIAL_TYPES)
+    command = _name_for(
+        {k: v for k, v in _COMMANDS["mtc_cueing_nrt"].items() if k not in specials}, code,
+    )
+    out["command"] = command
+    out.update(_decode_time_code(*time_bytes, subframe_field="fractional_frames"))
+    out.update(_decode_cueing_event(command, sl, sm, info))
+    return out
+
+
+def _decode_msc_cue(data) -> dict:
+    """Inverse of _encode_msc_cue_data: up to three ASCII fields separated
+    by 00."""
+    if not data:
+        return {}
+    parts = bytes(data).split(b"\x00")
+    if len(parts) > 3 or not all(parts):
+        raise ValueError("bad MSC cue data")
+    return {
+        name: part.decode("ascii")
+        for name, part in zip(("q_number", "q_list", "q_path"), parts)
+    }
+
+
+def _decode_msc_timed_go(data) -> dict:
+    return {
+        **_decode_time_code(*data[:5], subframe_field="fractional_frames"),
+        **_decode_msc_cue(data[5:]),
+    }
+
+
+def _decode_msc_set(data) -> dict:
+    out = {
+        "control_number": _join14(data[0], data[1]),
+        "control_value": _join14(data[2], data[3]),
+    }
+    if len(data) > 4:
+        out.update(_decode_time_code(*data[4:9], subframe_field="fractional_frames"))
+    return out
+
+
+# Inverses of _MSC_DATA_BUILDERS: <data> -> fields.
+_MSC_DATA_DECODERS = {
+    "go": _decode_msc_cue,
+    "stop": _decode_msc_cue,
+    "resume": _decode_msc_cue,
+    "go_off": _decode_msc_cue,
+    "load": _decode_msc_cue,
+    "timed_go": _decode_msc_timed_go,
+    "set": _decode_msc_set,
+    "fire": lambda data: {"macro_number": data[0]},
+}
+
+
+def _decode_msc(data: tuple) -> dict:
+    device_id, command_format, code, payload = data[1], data[3], data[4], data[5:]
+    command = _name_for(_COMMANDS["msc"], code)
+    out: dict = {"type": "msc", "command": command, "device_id": device_id}
+    try:
+        out["command_format"] = _name_for(_MSC_FORMATS, command_format)
+    except KeyError:
+        out["command_format_raw"] = command_format
+    decoder = _MSC_DATA_DECODERS.get(command)
+    if decoder is not None:
+        out.update(decoder(payload))
+    elif payload:
+        raise ValueError(f"MSC {command} carries no data")
+    return out
+
+
+def _decode_speed(data) -> dict:
+    """Inverse of _encode_standard_speed."""
+    sh, sm, sl = data
+    shift = (sh >> 3) & 0x7
+    raw = ((sh & 0x7) << 14) | (sm << 7) | sl
+    return {"speed": raw / 2 ** (14 - shift), "reverse": bool(sh & 0x40)}
+
+
+def _decode_mmc_locate(data) -> dict:
+    # Only LOCATE [TARGET] (sub-command 01) is implemented.
+    if data[0] != 0x01:
+        raise ValueError("only LOCATE [TARGET] is decoded")
+    return _decode_time_code(*data[1:6], subframe_field="subframes")
+
+
+def _info_field_name(code: int) -> str:
+    return _name_for(_INFO_FIELD_NAMES, code)
+
+
+def _decode_mmc_procedure(data) -> dict:
+    action = _name_for(_MMC_PROCEDURE_ACTIONS, data[0])
+    out: dict = {"action": action, "procedure": data[1]}
+    if action == "assemble":
+        out["commands"] = _mmc_parse_commands(data[2:])
+    return out
+
+
+def _decode_mmc_event(data) -> dict:
+    action = _name_for(_MMC_EVENT_ACTIONS, data[0])
+    out: dict = {"action": action, "event": data[1]}
+    if action == "define":
+        flags, source, name = data[2], data[3], data[4]
+        nested = _mmc_parse_commands(data[5:])
+        if len(nested) != 1:
+            raise ValueError("EVENT [DEFINE] takes exactly one command")
+        out.update(
+            direction=_name_for(_MMC_EVENT_DIRECTIONS, flags & 0x03),
+            all_speeds=bool(flags & 0x10), non_delete=bool(flags & 0x40),
+            trigger_source=_info_field_name(source), name=_info_field_name(name),
+            trigger_command=nested[0],
+        )
+    return out
+
+
+# Inverses of _MMC_DATA_BUILDERS: <data> -> fields.
+_MMC_DATA_DECODERS = {
+    "locate": _decode_mmc_locate,
+    "step": lambda d: {"quantity": d[0] & 0x3F, "reverse": bool(d[0] & 0x40)},
+    "assign_system_master": lambda d: {"target_device_id": d[0]},
+    "generator_command": lambda d: {"action": _name_for(_MMC_GENERATOR_ACTIONS, d[0])},
+    "midi_time_code_command": lambda d: {
+        "action": _name_for(_MMC_MTC_COMMAND_ACTIONS, d[0]),
+    },
+    "variable_play": _decode_speed,
+    "search": _decode_speed,
+    "shuttle": _decode_speed,
+    "deferred_variable_play": _decode_speed,
+    "record_strobe_variable": _decode_speed,
+    "drop_frame_adjust": lambda d: {"name": _info_field_name(d[0])},
+    "move": lambda d: {
+        "destination": _info_field_name(d[0]), "source": _info_field_name(d[1]),
+    },
+    "add": lambda d: {
+        "destination": _info_field_name(d[0]),
+        "source_1": _info_field_name(d[1]), "source_2": _info_field_name(d[2]),
+    },
+    "subtract": lambda d: {
+        "destination": _info_field_name(d[0]),
+        "source_1": _info_field_name(d[1]), "source_2": _info_field_name(d[2]),
+    },
+    "group": lambda d: {
+        "action": _name_for(_MMC_GROUP_ACTIONS, d[0]), "group": d[1],
+        "device_ids": list(d[2:]),
+    },
+    "procedure": _decode_mmc_procedure,
+    "event": _decode_mmc_event,
+    "read": lambda d: {"names": [_info_field_name(b) for b in d]},
+    "write": lambda d: {"fields": [
+        {"name": _info_field_name(d[i]), **_decode_standard_time_code(*d[i + 1:i + 6])}
+        for i in range(0, len(d), 6)
+    ]},
+    "masked_write": lambda d: {"fields": [
+        {"name": _info_field_name(d[i]), "byte_number": d[i + 1],
+         "mask": d[i + 2], "data": d[i + 3]}
+        for i in range(0, len(d), 4)
+    ]},
+    "update": lambda d: {
+        "action": _name_for(_MMC_UPDATE_ACTIONS, d[0]),
+        "names": ["all" if b == 0x7F else _info_field_name(b) for b in d[1:]],
+    },
+}
+
+
+def _mmc_parse_commands(body) -> list:
+    """Inverse of _mmc_command_bytes over a run of commands: a list of mmc
+    command dicts."""
+    commands, at = [], 0
+    while at < len(body):
+        command = _name_for(_COMMANDS["mmc"], body[at])
+        out: dict = {"type": "mmc", "command": command}
+        decoder = _MMC_DATA_DECODERS.get(command)
+        if decoder is None:
+            at += 1
+        else:
+            count = body[at + 1]
+            data = body[at + 2:at + 2 + count]
+            if len(data) != count:
+                raise ValueError(f"MMC {command} is truncated")
+            out.update(decoder(data))
+            at += 2 + count
+        commands.append(out)
+    return commands
+
+
+def _decode_mmc(data: tuple) -> dict:
+    # One command per message; a SysEx carrying several MMC commands (which
+    # RP-013 allows) doesn't rebuild and stays raw.
+    commands = _mmc_parse_commands(data[3:])
+    if len(commands) != 1:
+        raise ValueError("not exactly one MMC command")
+    command = commands[0]
+    return {"type": "mmc", "command": command["command"], "device_id": data[1],
+            **{k: v for k, v in command.items() if k not in ("type", "command")}}
+
+
+def _decode_mmc_response_sysex(data: tuple) -> dict:
+    # Device-to-controller replies: decoded for reading, not for sending.
+    # 'mmc_response' isn't a message type _build_message accepts.
+    fields = _mmc_response_fields([0xF0, *data, 0xF7])
+    return {"type": "mmc_response", "device_id": fields.pop("device_id"),
+            "response": fields}
+
+
+# SysEx decoded for reading only, with no rebuild check.
+_SYSEX_READ_ONLY_DECODERS = {
+    (0x7F, 0x07): _decode_mmc_response_sysex,
+}
+
+
+# (universal ID, sub-ID#1) -> decoder for the SysEx data (F0/F7 excluded).
+_SYSEX_DECODERS = {
+    (0x7E, 0x09): _decode_gm_system,
+    (0x7E, 0x06): _decode_device_inquiry,
+    (0x7F, 0x04): _decode_device_control,
+    (0x7F, 0x01): _decode_mtc,
+    **{(0x7E, code): _decode_handshake for code in _FILE_DUMP_HANDSHAKE.values()},
+    (0x7E, 0x07): _decode_file_dump,
+    (0x7E, 0x08): _decode_midi_tuning,
+    (0x7F, 0x08): _decode_midi_tuning,
+    (0x7F, 0x03): _decode_notation,
+    (0x7F, 0x05): _decode_mtc_cueing,
+    (0x7E, 0x04): _decode_mtc_cueing_nrt,
+    (0x7F, 0x02): _decode_msc,
+    (0x7F, 0x06): _decode_mmc,
+}
+
+
+def _decode_sysex(data: tuple) -> dict:
+    """A SysEx payload (F0/F7 excluded) as its typed dict, or as plain
+    'sysex' when no decoder applies or the decode doesn't rebuild to the
+    same bytes. A decode carrying 'checksum_ok' is kept when everything but
+    the checksum byte rebuilds; 'checksum_ok' says whether the received
+    checksum was right."""
+    if len(data) >= 3:
+        read_only = _SYSEX_READ_ONLY_DECODERS.get((data[0], data[2]))
+        if read_only is not None:
+            try:
+                return read_only(data)
+            except (IndexError, KeyError, ValueError, TypeError):
+                return {"type": "sysex", "data": list(data)}
+        decoder = _SYSEX_DECODERS.get((data[0], data[2]))
+        if decoder is not None:
+            try:
+                decoded = decoder(data)
+                rebuilt = tuple(_build_message(dict(decoded)).data)
+                if rebuilt == data or (
+                    "checksum_ok" in decoded and rebuilt[:-1] == data[:-1]
+                ):
+                    return decoded
+            except (IndexError, KeyError, ValueError, TypeError, UnicodeDecodeError):
+                pass
+    return {"type": "sysex", "data": list(data)}
+
+
+def _decode_message(msg: "mido.Message") -> dict:
+    """A received mido.Message as the dict _build_message takes."""
+    if msg.type == "sysex":
+        return _decode_sysex(tuple(msg.data))
+    if msg.type == "control_change":
+        mode = _decode_channel_mode(msg)
+        if mode is not None:
+            return mode
+    out: dict = {"type": msg.type}
+    if msg.type in _CHANNEL_TYPES:
+        out["channel"] = msg.channel
+    for name in _MIDO_FIELDS.get(msg.type, {}):
+        out[name] = getattr(msg, name)
+    return out
+
+class _StreamDecoder:
+    """Per-input state for changes that span several wire messages: RPN/NRPN
+    parameter changes and MTC Quarter Frame sequences. feed() takes each
+    received message in order and returns the combined message it completes,
+    or None. A combined message is returned only when building it gives back
+    exactly the messages received.
+
+    RPN/NRPN (MIDI 1.0 Detailed Spec, per channel): CC 101/100 select an RPN
+    and CC 99/98 an NRPN, in either order; the selection stays until another
+    one. CC 6 (Data Entry MSB) completes a 7-bit change (msb_only), and a CC 38
+    (Data Entry LSB) right after it completes the 14-bit change, so a 14-bit
+    sender yields two results. RPN Null (127/127) makes data entry ignored.
+
+    Quarter Frames: eight consecutive pieces, types 0 to 7 (forward) or 7 to 0
+    (reverse), complete one time.
+    """
+
+    def __init__(self) -> None:
+        # channel -> {"kind": "rpn"|"nrpn", "msb", "lsb", "value_msb"}
+        self._params: dict = {}
+        self._quarter_frames: list = []
+
+    def feed(self, msg: "mido.Message") -> "dict | None":
+        if msg.type == "control_change":
+            return self._control_change(msg)
+        if msg.type == "quarter_frame":
+            return self._quarter_frame(msg)
+        return None
+
+    def _control_change(self, msg: "mido.Message") -> "dict | None":
+        selects = {101: ("rpn", "msb"), 100: ("rpn", "lsb"),
+                   99: ("nrpn", "msb"), 98: ("nrpn", "lsb")}
+        state = self._params.setdefault(msg.channel, {})
+        if msg.control in selects:
+            kind, part = selects[msg.control]
+            if state.get("kind") != kind:
+                state.clear()
+                state["kind"] = kind
+            state[part] = msg.value
+            state["value_msb"] = None
+            return None
+        if msg.control not in (6, 38) or state.get("msb") is None or state.get("lsb") is None:
+            return None
+        number = _join14(state["lsb"], state["msb"])
+        if state["kind"] == "rpn" and number == 0x3FFF:
+            return None  # RPN Null: data entry is ignored
+        if msg.control == 6:
+            state["value_msb"] = msg.value
+            value, msb_only = msg.value, True
+        elif state["value_msb"] is None:
+            return None  # LSB with no MSB before it
+        else:
+            value, msb_only = _join14(msg.value, state["value_msb"]), False
+        combined: dict = {"type": state["kind"], "channel": msg.channel}
+        if state["kind"] == "rpn" and number in _RPN_NAMED_PARAMETERS.values():
+            combined["parameter"] = _name_for(_RPN_NAMED_PARAMETERS, number)
+        else:
+            combined["parameter_number"] = number
+        combined.update(value=value, msb_only=msb_only)
+        # The rebuilt sequence must end with the data-entry message just read.
+        try:
+            rebuilt = _build_rpn_or_nrpn_sequence(
+                dict(combined), registered=state["kind"] == "rpn",
+            )
+        except (KeyError, ValueError):
+            return None
+        return combined if rebuilt[-1].bytes() == msg.bytes() else None
+
+    def _quarter_frame(self, msg: "mido.Message") -> "dict | None":
+        # A run starting at type 0 goes forward 0..7; one starting at 7 goes
+        # in reverse 7..0. Anything out of order starts over.
+        pieces = self._quarter_frames
+        if pieces:
+            step = 1 if pieces[0].frame_type == 0 else -1
+            if msg.frame_type != pieces[-1].frame_type + step:
+                pieces.clear()
+        if not pieces and msg.frame_type not in (0, 7):
+            return None
+        pieces.append(msg)
+        if len(pieces) < 8:
+            return None
+        values = {p.frame_type: p.frame_value for p in pieces}
+        received = [(p.frame_type, p.frame_value) for p in pieces]
+        reverse = pieces[0].frame_type == 7
+        pieces.clear()
+        combined = {
+            "type": "mtc_quarter_frame_sequence",
+            "direction": "reverse" if reverse else "forward",
+            **_decode_time_code(
+                values[6] | (values[7] << 4), values[4] | (values[5] << 4),
+                values[2] | (values[3] << 4), values[0] | (values[1] << 4),
+            ),
+        }
+        try:
+            rebuilt = _build_quarter_frame_sequence(dict(combined))
+        except (KeyError, ValueError):
+            return None
+        if [(m.frame_type, m.frame_value) for m in rebuilt] != received:
+            return None
+        return combined
 
 
 def _send(tool_input: dict) -> str:
@@ -4375,12 +3169,7 @@ def _send(tool_input: dict) -> str:
     except Exception as e:
         return _err(f"send failed: {type(e).__name__}: {e}")
 
-    # Every existing message type still produces exactly one physical
-    # message — keep the response shape EXACTLY as before for those
-    # ('sent': a single string) rather than changing the contract for
-    # everyone just because 'rpn'/'nrpn' need more than one. Only when a
-    # type genuinely sent multiple messages (currently just rpn/nrpn) does
-    # 'sent' become a list of strings instead.
+    # 'sent' is a string for one message, a list for several.
     if len(msgs) == 1:
         return json.dumps({"status": "ok", "sent": str(msgs[0])})
     return json.dumps({"status": "ok", "sent": [str(m) for m in msgs]})
@@ -4398,10 +3187,7 @@ def _poll(tool_input: dict) -> str:
     buf = _INPUT_BUFFERS.get(handle)
     event = _INPUT_EVENTS.get(handle)
     if buf is None or event is None:
-        # Should be unreachable in practice (every 'input' _OPEN_PORTS
-        # entry gets a matching buffer/event at 'open' time) -- guarded
-        # anyway rather than assuming, per this file's own "never trust
-        # invariants silently" habit.
+        # _open always creates both for an input handle.
         return _err(
             f"no message buffer for handle {handle!r} (internal "
             "inconsistency — the port may not have been opened correctly)"
@@ -4416,42 +3202,41 @@ def _poll(tool_input: dict) -> str:
             f"{timeout_seconds!r}"
         )
 
-    # Block ONLY if nothing is buffered yet AND the caller actually asked
-    # to wait (default 0 preserves the original always-instant behavior
-    # exactly). Safe against the lost-wakeup race: if a message arrives in
-    # the tiny window between the `if not buf` check and calling
-    # event.wait(), the Event is already set by then and wait() returns
-    # immediately rather than blocking the full timeout — Event.wait()
-    # doesn't require the setter to happen strictly "during" the wait
-    # call, only that .set() ran at some point since the last .clear().
-    if not buf and timeout_seconds > 0:
-        event.wait(timeout=timeout_seconds)
+    # Wait until something is buffered or the timeout passes. The event is
+    # cleared just before each wait and the buffer re-checked after, so a
+    # set left over from an earlier drain can't end the wait early, and a
+    # message that lands between the check and wait() still wakes it (the
+    # callback appends before it sets).
+    deadline = time.monotonic() + timeout_seconds
+    while not buf:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        event.clear()
+        if buf:
+            break
+        event.wait(timeout=remaining)
 
-    # Drain whatever's already buffered. Every message here already has a
-    # real wall-clock 'received_at' timestamp attached at the moment
-    # rtmidi's own callback fired (see _open/_on_message above) — NOT a
-    # "time of this poll() call" timestamp, so gaps between messages are
-    # now measurable even if 'poll' itself is called irregularly.
-    #
-    # Clearing the event HERE (always, whether or not a blocking wait
-    # happened above) rather than only after waiting avoids a stale-set
-    # flag persisting from an earlier drain and causing some LATER
-    # blocking poll() call to return instantly with nothing new to show
-    # (e.g. after a non-blocking poll drains everything and happens to
-    # leave the event set from that same batch).
-    event.clear()
+    # 'received_at' was stamped by the callback on arrival. 'decoded' is the
+    # dict 'send' takes; 'completes' is an RPN/NRPN change or Quarter Frame
+    # time that this message finishes.
+    stream = _STREAM_DECODERS.setdefault(handle, _StreamDecoder())
     messages = []
     while buf:
-        received_at, msg_str = buf.popleft()
-        messages.append({"received_at": received_at, "message": msg_str})
+        received_at, msg = buf.popleft()
+        entry = {
+            "received_at": received_at, "message": str(msg),
+            "hex": msg.hex(), "decoded": _decode_message(msg),
+        }
+        completed = stream.feed(msg)
+        if completed is not None:
+            entry["completes"] = completed
+        messages.append(entry)
 
     return json.dumps({"status": "ok", "messages": messages})
 
 
-# Real-Time Clock is defined as 24 pulses per quarter note by the MIDI 1.0
-# spec itself (not a mido/rtmidi convention) — this is the same constant
-# every sequencer/DAW's own clock implementation uses, so `bpm` converts to
-# a per-tick interval via 60/bpm/24 with no further tunable.
+# MIDI Clock rate, fixed by the MIDI 1.0 spec.
 _CLOCK_PULSES_PER_QUARTER_NOTE = 24
 
 
@@ -4498,13 +3283,8 @@ def _run_clock(tool_input: dict) -> str:
             port.send(mido.Message(transport))
             transport_sent = transport
 
-        # Schedule against an ABSOLUTE running clock (next_tick += interval
-        # each iteration), not a naive `time.sleep(interval)` per loop —
-        # the latter accumulates drift equal to however long each
-        # port.send() itself takes, which compounds over hundreds of
-        # ticks. This is the exact pattern proven live against a real
-        # TR-8S (see the module docstring's 'run_clock' entry): 720 ticks
-        # at 120 BPM measured 14.98s elapsed against a 15.00s target.
+        # Schedule against absolute tick times so the time spent in
+        # port.send() doesn't add up as drift.
         start_time = time.time()
         next_tick = start_time
         for _ in range(n_ticks):
@@ -4621,8 +3401,8 @@ def _read_midi_file(tool_input: dict) -> str:
 
 
 def _write_midi_file(tool_input: dict) -> str:
-    """Write a .mid/.midi or .syx file from tool-supplied track/message
-    data.
+    """Write a .mid/.midi file from 'tracks' or a .syx file from sysex
+    'messages'. Refuses to replace an existing file unless 'overwrite'.
     """
     path = tool_input.get("path")
     if not path:
@@ -4678,15 +3458,8 @@ def _write_midi_file(tool_input: dict) -> str:
                     if msg_type in _META_TYPES:
                         track.append(_build_meta_message(m))
                     else:
-                        # Almost every type produces exactly one message
-                        # here; 'rpn'/'nrpn' are the only ones that expand
-                        # to a short sequence (see
-                        # `_build_message_sequence`'s own docstring) — the
-                        # sequence's own internal timing (first message
-                        # carries the caller's requested delta, the rest
-                        # are time=0, i.e. sent back-to-back) already
-                        # matches how a real RPN/NRPN select+set is meant
-                        # to look in a recorded track.
+                        # Multi-message types put the caller's delta on
+                        # the first message and 0 on the rest.
                         track.extend(_build_message_sequence(m))
                 except KeyError as e:
                     return _err(
@@ -4703,8 +3476,5 @@ def _write_midi_file(tool_input: dict) -> str:
         except Exception as e:
             return _err(f"failed to write {path!r}: {type(e).__name__}: {e}")
 
-    # Sanity-check the write by immediately re-reading what actually landed
-    # on disk via the already-proven `_read_midi_file` — this both confirms
-    # the write succeeded correctly AND avoids duplicating summary-building
-    # logic here.
+    # Re-read the new file; the summary doubles as a check.
     return _read_midi_file({"path": path, "max_messages": 0})
