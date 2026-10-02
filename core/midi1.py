@@ -39,9 +39,9 @@ multi-message types in `_build_message_sequence`, file-only meta events in
 SysEx 'data' excludes F0/F7; mido adds them on send and strips them on
 receive. Every data byte must be 0-127.
 
-Limitation: incoming Active Sensing never reaches 'poll'. mido's rtmidi
-backend calls ignore_types(False, False, True) on every input port, so RtMidi
-drops it before mido sees it. Receiving it would need raw rtmidi.MidiIn.
+Input ports are rtmidi.MidiIn objects opened by _RtMidiInput, not mido
+ports: mido's rtmidi backend always filters out Active Sensing. 'open' with
+'active_sensing': true passes it through to 'poll'.
 
 Open ports and input buffers live in process memory; handles don't survive a
 ResearchMesh restart.
@@ -376,6 +376,14 @@ TOOLS = [
                     "enum": ["input", "output"],
                     "description": "Which side to open the port as. Required for 'open'.",
                 },
+                "active_sensing": {
+                    "type": "boolean",
+                    "description": (
+                        "'open' of an input only. true passes received Active "
+                        "Sensing (FE) to 'poll'; default false drops it. A device "
+                        "that sends it does so about every 300 ms."
+                    ),
+                },
                 "handle": {
                     "type": "string",
                     "description": (
@@ -533,14 +541,9 @@ TOOLS = [
                         "fields at all — just 'type'. sysex needs a 'data' "
                         "array of integers, each 0-127 (7-bit data bytes "
                         "only) — do NOT include the leading 0xF0 or trailing "
-                        "0xF7, both are added automatically. NOTE: 'active_sensing' "
-                        "can be SENT successfully but will NEVER be reported "
-                        "by 'poll' even if actually received — mido's rtmidi "
-                        "backend hardcodes RtMidi's ignore_types(sysex=False, "
-                        "timing=False, active_sense=True), filtering "
-                        "incoming Active Sensing at the library level before "
-                        "mido's own parser ever sees it. Confirmed live, not "
-                        "fixable without bypassing mido for raw rtmidi."
+                        "0xF7, both are added automatically. Received Active "
+                        "Sensing reaches 'poll' only on an input opened with "
+                        "'active_sensing': true."
                     ),
                     "properties": {
                         "type": {
@@ -751,7 +754,8 @@ TOOLS = [
 _TOOL_NAMES = {t["name"] for t in TOOLS}
 _MESSAGE_TYPES = TOOLS[0]["input_schema"]["properties"]["message"]["properties"]["type"]["enum"]
 
-# handle -> (direction, mido port object). Process memory only.
+# handle -> (direction, port): a mido output port or an _RtMidiInput.
+# Process memory only.
 _OPEN_PORTS: dict = {}
 _HANDLE_COUNTER = itertools.count(1)
 
@@ -870,6 +874,48 @@ def _list_devices() -> str:
     return json.dumps({"status": "ok", "inputs": inputs, "outputs": outputs})
 
 
+class _RtMidiInput:
+    """An input port opened with rtmidi.MidiIn directly. mido's rtmidi Input
+    calls ignore_types(False, False, True), which drops Active Sensing with
+    no way to change it; this does the same open and parse
+    (mido.Message.from_bytes on each complete message rtmidi delivers) with
+    the filter chosen here. SysEx and timing messages are always passed."""
+
+    def __init__(self, port_name: str, on_message, active_sensing: bool) -> None:
+        import rtmidi
+        from mido.backends.rtmidi_utils import expand_alsa_port_name
+
+        self._rt = rtmidi.MidiIn()
+        try:
+            names = self._rt.get_ports()
+            if self._rt.get_current_api() == rtmidi.API_LINUX_ALSA:
+                port_name = expand_alsa_port_name(names, port_name)
+            if port_name not in names:
+                raise OSError(f"unknown port {port_name!r}")
+            self._rt.ignore_types(sysex=False, timing=False,
+                                  active_sense=not active_sensing)
+            self._on_message = on_message
+            # Before open_port, so nothing waits in rtmidi's own queue.
+            self._rt.set_callback(self._callback)
+            self._rt.open_port(names.index(port_name))
+        except Exception:
+            self._rt.delete()
+            raise
+        self.name = port_name
+
+    def _callback(self, event, _data) -> None:
+        try:
+            msg = mido.Message.from_bytes(event[0])
+        except ValueError:
+            return  # not a complete MIDI message; mido drops these too
+        self._on_message(msg)
+
+    def close(self) -> None:
+        self._rt.cancel_callback()
+        self._rt.close_port()
+        self._rt.delete()
+
+
 def _open(tool_input: dict) -> str:
     port_name = tool_input.get("port_name")
     direction = tool_input.get("direction")
@@ -877,12 +923,17 @@ def _open(tool_input: dict) -> str:
         return _err("'port_name' is required for 'open'")
     if direction not in ("input", "output"):
         return _err("'direction' must be 'input' or 'output' for 'open'")
+    active_sensing = tool_input.get("active_sensing", False)
+    if not isinstance(active_sensing, bool):
+        return _err(f"'active_sensing' must be true or false, got {active_sensing!r}")
+    if active_sensing and direction != "input":
+        return _err("'active_sensing' applies only to an input port")
 
     handle = f"midi1-{next(_HANDLE_COUNTER)}"
 
     try:
         if direction == "input":
-            # Runs on rtmidi's thread with an already-parsed mido.Message.
+            # Runs on rtmidi's thread with a parsed mido.Message.
             # deque append/popleft and Event set/wait/clear need no lock
             # with one producer and one consumer.
             buf: deque = deque(maxlen=_INPUT_BUFFER_MAXLEN)
@@ -892,7 +943,7 @@ def _open(tool_input: dict) -> str:
                 _buf.append((time.time(), msg))
                 _event.set()
 
-            port = mido.open_input(port_name, callback=_on_message)
+            port = _RtMidiInput(port_name, _on_message, active_sensing)
             _INPUT_BUFFERS[handle] = buf
             _INPUT_EVENTS[handle] = event
             _STREAM_DECODERS[handle] = _StreamDecoder()

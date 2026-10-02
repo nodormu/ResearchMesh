@@ -1157,9 +1157,31 @@ def check_live_loopback(midi1) -> None:
         elapsed = time.monotonic() - t0
         check("live loopback: empty poll waits its timeout",
               empty["messages"] == [] and elapsed >= 0.95, f"{elapsed:.3f}s")
+
+        # Active Sensing: dropped by default, passed with 'active_sensing': true.
+        sensing = call(action="open", port_name=in_port, direction="input", active_sensing=True)
+        try:
+            call(action="send", handle=o["handle"], message={"type": "active_sensing"})
+            call(action="send", handle=o["handle"], message={"type": "note_off", "note": 60})
+            plain = call(action="poll", handle=i["handle"], timeout_seconds=1)
+            with_as = call(action="poll", handle=sensing["handle"], timeout_seconds=1)
+        finally:
+            call(action="close", handle=sensing["handle"])
+        check("live loopback: Active Sensing dropped on a default input",
+              [m["decoded"]["type"] for m in plain["messages"]] == ["note_off"],
+              f"{plain}")
+        check("live loopback: Active Sensing received with 'active_sensing': true",
+              [m["decoded"] for m in with_as["messages"]][:1] == [{"type": "active_sensing"}]
+              and len(with_as["messages"]) == 2, f"{with_as}")
     finally:
         call(action="close", handle=o["handle"])
         call(action="close", handle=i["handle"])
+
+    for kw, name in (({"direction": "output", "active_sensing": True}, "on an output"),
+                     ({"direction": "input", "active_sensing": "yes"}, "not a boolean"),
+                     ({"direction": "input", "port_name": "no such port"}, "unknown port")):
+        r = call(action="open", **{"port_name": in_port, **kw})
+        check(f"open: error for active_sensing / port ({name})", "error" in r, f"{r}")
 
 
 def main() -> int:
