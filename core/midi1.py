@@ -4202,7 +4202,8 @@ def _mmc_docs() -> dict:
                 f"{_MMC_TIME_FIELD_LIST} takes hours, minutes, seconds, frames, "
                 "frame_rate, subframes (0-99, default 0) and the flags "
                 f"{', '.join(_TIME_CODE_FLAGS)} (default false). Count-prefixed "
-                f"writeable fields: {', '.join(writeable_codecs)}")},
+                f"writeable fields: {', '.join(writeable_codecs)}; describe with "
+                "'field' gives each one's data")},
             {"fields": [{"name": "gp0", **_TC_EXAMPLE, "frame_rate": "25"},
                         {"name": "stop_mode", "value": "enable_monitoring"}]}),
         "masked_write": _mmc_doc(
@@ -4221,6 +4222,170 @@ def _mmc_docs() -> dict:
              "data": "list of 0-127, required: this piece of the command string"},
             {"first": True, "remaining": 1, "data": [0x44, 0x06, 0x01, 0x21]}),
     }
+    return out
+
+
+# MMC Information Fields (RP-013 section 6), for describe with 'field'. Each
+# entry: "summary", "data" (the keys a WRITE entry takes or a response
+# carries) and, for a field WRITE accepts, a "write_example" entry.
+_MMC_TC_DATA = (
+    "Standard Time Code: hours, minutes, seconds, frames, frame_rate; then "
+    "subframes 0-99 (default 0), or with use_status_byte true the status flags "
+    "estimated, invalid, video_field_1, no_time_code; plus the flags "
+    "color_frame, blank (never loaded), negative. All flags default false. A "
+    "response carries the same keys.")
+_MMC_SHORT_DATA = (
+    "Response only (UPDATE sends it): frames, negative, use_status_byte, then "
+    "subframes or the status flags.")
+_MMC_BITMAP_DATA = (
+    "Track bitmap. WRITE: 'bitmap_bytes' (list of 0-127) or 'active_tracks' "
+    "(1-317) with the flags video, time_code_track, aux_track_a, aux_track_b; "
+    "tracks left out are switched off. Response: byte_count, bitmap_bytes and "
+    "the same tracks and flags.")
+_MMC_FIELD_SUMMARIES = {
+    "selected_time_code": "The device's current position (its own, or 'slave', time code).",
+    "selected_master_code": "The master time code that CHASE synchronizes to.",
+    "requested_offset": "Wanted offset: SELECTED TIME CODE - SELECTED MASTER CODE, for CHASE.",
+    "actual_offset": "Measured SELECTED TIME CODE - SELECTED MASTER CODE.",
+    "lock_deviation": "How far the position is from master + REQUESTED OFFSET.",
+    "generator_time_code": "The time code generator's current value.",
+    "midi_time_code_input": "The most recent incoming MIDI Time Code.",
+    **{f"gp{n}": (f"General purpose time register {n} (LOCATE I/F, EVENT, MOVE, "
+                  "ADD, SUBTRACT).") for n in range(8)},
+    "signature": "The commands and fields the device supports, as bitmaps.",
+    "update_rate": "Minimum frames between UPDATE transmissions (default 1).",
+    "command_error": "The last command error: flags, level, error code, offending command.",
+    "command_error_level": "Errors with a code below this level are reported.",
+    "time_standard": "The device's frame rate.",
+    "selected_time_code_source": "Where SELECTED TIME CODE comes from.",
+    "selected_time_code_userbits": "Userbits most recently read from SELECTED TIME CODE.",
+    "motion_control_tally": "The current motion state and process, with success levels.",
+    "velocity_tally": "Actual transport speed, whatever the motion state.",
+    "stop_mode": "Whether recorded material is monitored while stopped.",
+    "fast_mode": "Whether recorded material is monitored in fast forward and rewind.",
+    "record_mode": "What RECORD STROBE does: insert, assemble, rehearse or crash.",
+    "record_status": "Actual record and rehearse activity.",
+    "track_record_status": "Tracks currently recording or rehearsing.",
+    "track_record_ready": "Tracks in record ready (the next RECORD STROBE records them).",
+    "global_monitor": "Playback or input monitoring for all tracks.",
+    "record_monitor": "When record tracks monitor their inputs.",
+    "track_sync_monitor": "Tracks with synchronous playback on their outputs.",
+    "track_input_monitor": "Tracks whose outputs monitor their inputs.",
+    "step_length": "The STEP unit, in 1/100 frame (default 50, half a frame).",
+    "play_speed_reference": "Play speed from the device itself or an external reference.",
+    "fixed_speed": "Nominal play speed on a multi-speed device.",
+    "lifter_defeat": "Defeat a reel-to-reel's tape lifters so tape touches the heads.",
+    "control_disable": "Ignore transport and sync commands from every source.",
+    "resolved_play_mode": "How PLAY establishes its speed.",
+    "chase_mode": "How CHASE synchronizes.",
+    "generator_command_tally": "The last GENERATOR COMMAND and how it went.",
+    "generator_set_up": "Generator run and copy/jam references, source and mode.",
+    "generator_userbits": "Userbits the generator sends.",
+    "midi_time_code_command_tally": "The last MIDI TIME CODE COMMAND and how it went.",
+    "midi_time_code_set_up": "What the MIDI Time Code output sends, and its source.",
+    "procedure_response": "A stored PROCEDURE's commands (answer to READ).",
+    "event_response": "A stored EVENT's definition (answer to READ).",
+    "track_mute": "Tracks with muted outputs.",
+    "vitc_insert_enable": "Whether VITC is inserted into recorded video, and on which lines.",
+    "failure": "A failure needing the operator, with text for display.",
+    "response_error": "Response only: fields the device doesn't support.",
+    "response_segment": "Response only: one piece of a long response; poll reassembles them.",
+}
+_MMC_FIELD_SUMMARIES.update({
+    f"short_{name}": (f"Short form of {name}: frames and subframes or status only, "
+                      "for frequent UPDATE responses.")
+    for name in ("selected_time_code", "selected_master_code", "requested_offset",
+                 "actual_offset", "lock_deviation", "generator_time_code",
+                 "midi_time_code_input", *(f"gp{n}" for n in range(8)))
+})
+_MMC_STRUCTURED_DATA = {
+    "time_standard": ("WRITE: 'frame_rate' (24, 25, 30drop, 30nondrop) and "
+                      "'encoding': 'field_definition' (default, 0 tt 00000) or "
+                      "'unshifted' (the code alone, as RP-013's appendix sends). "
+                      "Response: frame_rate, and encoding when unshifted."),
+    "record_status": ("Response: activity (" + ", ".join(_MMC_RECORD_ACTIVITY) + "), "
+                      "local_record_inhibit, local_rehearse_inhibit, no_tracks_active."),
+    "vitc_insert_enable": ("'control' (" + ", ".join(_MMC_VITC_CONTROL) + "), "
+                           "'first_line' and 'second_line' (0-127 or 'local'); a "
+                           "response carries the same."),
+    "signature": ("Response: version, version_extension, commands and fields (names "
+                  "or 0xNN), extended_commands, extended_fields, command_bitmaps, "
+                  "field_bitmaps."),
+    "command_error": ("Response: error_halt, procedure_assemble_error, "
+                      "event_define_error, unsolicited, previously_transmitted, level, "
+                      "error (a name from RP-013's list, or a number), and offset and "
+                      "command_bytes when the device names the command."),
+    "motion_control_tally": ("Response: motion_state, motion_state_success, "
+                             "motion_process ('none' if idle), motion_process_success."),
+    "velocity_tally": "Response: speed (multiple of play speed) and reverse.",
+    "selected_time_code_userbits": "Response: binary_groups (8 values 0-15) and flags (0-3).",
+    "generator_userbits": ("'binary_groups' (8 values 0-15) or 'characters' (4), "
+                           "and 'flags' 0-3 (default 0); a response carries "
+                           "binary_groups and flags."),
+    "generator_command_tally": ("Response: command (stop, run, copy_jam), success, "
+                                "source_data_lost, frame_sync_reference_lost."),
+    "generator_set_up": ("'run_reference' (" + ", ".join(_MMC_GENERATOR_RUN_REFERENCE)
+                         + "), 'copy_jam_reference' (" + ", ".join(_MMC_GENERATOR_JAM_REFERENCE)
+                         + "), 'copy_jam_source' (" + ", ".join(_MMC_GENERATOR_JAM_SOURCE)
+                         + "), 'copy_jam_mode' (" + ", ".join(_MMC_GENERATOR_JAM_MODE)
+                         + "); names or numbers (the two references 0-7, source and "
+                         "mode 0-127). A response carries the same."),
+    "midi_time_code_command_tally": "Response: command (off, follow) and success.",
+    "midi_time_code_set_up": ("The flags " + ", ".join(_MMC_MTC_FLAGS) + " (default "
+                              "false) and 'source' (" + ", ".join(_MMC_MTC_SOURCE)
+                              + "); a response carries the same."),
+    "procedure_response": ("Response: procedure and its commands (mmc command dicts), "
+                           "or procedure 'invalid'."),
+    "event_response": ("Response: event, direction, all_speeds, non_delete, "
+                       "trigger_source, event_time, trigger_command; or event 'invalid'."),
+    "failure": "Response: text.",
+    "response_error": "Response: unsupported_fields (names or 0xNN).",
+    "response_segment": "Response: first, remaining, data.",
+}
+_MMC_FIELD_WRITE_EXAMPLES = {
+    "time_standard": {"frame_rate": "25"},
+    "vitc_insert_enable": {"control": "enable", "first_line": 16, "second_line": 18},
+    "generator_userbits": {"characters": "REEL", "flags": 0},
+    "generator_set_up": {"run_reference": "internal_standard",
+                         "copy_jam_reference": "source_frame_edges",
+                         "copy_jam_source": "selected_time_code", "copy_jam_mode": "continue"},
+    "midi_time_code_set_up": {"transmit_while_stopped": True, "source": "generator_time_code"},
+}
+
+
+def _mmc_field_doc(name: str) -> dict:
+    """describe's entry for one Information Field (or response-only name)."""
+    code = _INFO_FIELD_NAMES.get(name, _MMC_RESPONSE_ONLY_NAMES.get(name))
+    codec = _MMC_FIELD_CODECS.get(name)
+    if name in _MASK_WRITEABLE_INFO_FIELDS:
+        access = "write and masked_write"
+    elif name in _WRITEABLE_INFO_FIELDS or (codec is not None and codec[0] is not None):
+        access = "write"
+    else:
+        access = "read only"
+    if code < 0x20:
+        data = _MMC_TC_DATA
+        example = {**_TC_EXAMPLE, "frame_rate": "25"}
+    elif code < 0x40:
+        data = _MMC_SHORT_DATA
+        example = None
+    elif name in _MMC_BYTE_FIELDS:
+        names = _MMC_BYTE_FIELDS[name]
+        data = ("'value': " + (f"one of {', '.join(names)}, or 0-127" if names else "0-127")
+                + "; a response carries 'value'.")
+        example = {"value": next(iter(names)) if names else {"step_length": 50}.get(name, 1)}
+    elif name in _TRACK_BITMAP_INFO_FIELDS:
+        data = _MMC_BITMAP_DATA if access != "read only" else (
+            "Response: byte_count, bitmap_bytes, active_tracks (1-317) and the "
+            "flags video, time_code_track, aux_track_a, aux_track_b.")
+        example = {"active_tracks": [1, 2]}
+    else:
+        data = _MMC_STRUCTURED_DATA[name]
+        example = _MMC_FIELD_WRITE_EXAMPLES.get(name)
+    out = {"code": f"0x{code:02X}", "access": access,
+           "summary": _MMC_FIELD_SUMMARIES[name], "data": data}
+    if access != "read only":
+        out["write_example"] = {"name": name, **example}
     return out
 
 
@@ -4732,6 +4897,8 @@ _DOCS: dict = {
             "segment": ("true sends a command string over 48 bytes as COMMAND "
                         "SEGMENT messages; default false (over 48 bytes is an error)"),
             "segment_size": "1-45 bytes per segment with 'segment', default 45",
+            "field": ("describe only: an Information Field name (as read lists) "
+                      "gives that field's access, data format and a WRITE example"),
         },
         "commands": _mmc_docs(),
     },
@@ -4817,6 +4984,13 @@ def _describe(tool_input: dict) -> str:
     doc = _DOCS.get(msg_type)
     if doc is None:
         return _err(f"no field documentation for {msg_type!r}")
+    field = message.get("field")
+    if msg_type == "mmc" and field is not None:
+        if field not in _MMC_FIELD_SUMMARIES:
+            return _err(f"unknown MMC Information Field {field!r}; valid: "
+                        f"{sorted(_MMC_FIELD_SUMMARIES)}")
+        return json.dumps({"status": "ok", "type": "mmc", "field": field,
+                           **_mmc_field_doc(field)})
     out = {"status": "ok", "type": msg_type, "summary": doc["summary"],
            "fields": dict(doc["fields"])}
     commands = doc.get("commands")

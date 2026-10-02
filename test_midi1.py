@@ -1108,6 +1108,38 @@ def check_describe(midi1) -> None:
           and one.get("example", {}).get("command") == "mono_on", f"{one}")
     check("describe: unknown type and unknown command are errors",
           "error" in describe(type="nope") and "error" in describe(type="channel_mode", command="nope"))
+    field_names = set(midi1._INFO_FIELD_NAMES) | set(midi1._MMC_RESPONSE_ONLY_NAMES)
+    check("describe: every MMC Information Field and response-only name is documented",
+          field_names == set(midi1._MMC_FIELD_SUMMARIES),
+          f"missing {sorted(field_names - set(midi1._MMC_FIELD_SUMMARIES))}, "
+          f"extra {sorted(set(midi1._MMC_FIELD_SUMMARIES) - field_names)}")
+    write_failures, access_wrong = [], []
+    for name in sorted(field_names):
+        entry = midi1._mmc_field_doc(name)
+        codec = midi1._MMC_FIELD_CODECS.get(name)
+        writeable = name in midi1._WRITEABLE_INFO_FIELDS or bool(codec and codec[0])
+        if (entry["access"] != "read only") != writeable or (
+                (entry["access"] == "write and masked_write")
+                != (name in midi1._MASK_WRITEABLE_INFO_FIELDS)):
+            access_wrong.append(name)
+        if "write_example" not in entry:
+            continue
+        message = {"type": "mmc", "command": "write", "fields": [entry["write_example"]]}
+        try:
+            wire = midi1._build_message(dict(message))
+            if midi1._build_message(dict(midi1._decode_message(wire))).bytes() != wire.bytes():
+                write_failures.append(f"{name}: rebuild differs")
+        except Exception as e:  # reported as a failure
+            write_failures.append(f"{name}: {type(e).__name__}: {e}")
+    check("describe: field access (write, masked_write, read only) matches the code",
+          not access_wrong, f"{access_wrong}")
+    check("describe: every field's WRITE example builds and decodes to the same bytes",
+          not write_failures, f"{write_failures[:5]}")
+    short = describe(type="mmc", field="short_gp0")
+    check("describe: a field lookup returns its access and data",
+          short.get("access") == "read only" and "data" in short
+          and "error" in describe(type="mmc", field="nope"), f"{short}")
+
     missing = [t for t in midi1._MESSAGE_TYPES if t not in docs]
     check(f"describe: all {len(midi1._MESSAGE_TYPES)} message types are documented",
           not missing, f"{missing}")
