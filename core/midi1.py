@@ -4342,7 +4342,7 @@ _MMC_STRUCTURED_DATA = {
     "response_error": "Response: unsupported_fields (names or 0xNN).",
     "response_segment": "Response: first, remaining, data.",
 }
-_MMC_FIELD_WRITE_EXAMPLES = {
+_MMC_FIELD_WRITE_EXAMPLES: dict = {
     "time_standard": {"frame_rate": "25"},
     "vitc_insert_enable": {"control": "enable", "first_line": 16, "second_line": 18},
     "generator_userbits": {"characters": "REEL", "flags": 0},
@@ -4355,8 +4355,9 @@ _MMC_FIELD_WRITE_EXAMPLES = {
 
 def _mmc_field_doc(name: str) -> dict:
     """describe's entry for one Information Field (or response-only name)."""
-    code = _INFO_FIELD_NAMES.get(name, _MMC_RESPONSE_ONLY_NAMES.get(name))
+    code = _INFO_FIELD_NAMES[name] if name in _INFO_FIELD_NAMES else _MMC_RESPONSE_ONLY_NAMES[name]
     codec = _MMC_FIELD_CODECS.get(name)
+    example: dict | None
     if name in _MASK_WRITEABLE_INFO_FIELDS:
         access = "write and masked_write"
     elif name in _WRITEABLE_INFO_FIELDS or (codec is not None and codec[0] is not None):
@@ -4382,10 +4383,12 @@ def _mmc_field_doc(name: str) -> dict:
     else:
         data = _MMC_STRUCTURED_DATA[name]
         example = _MMC_FIELD_WRITE_EXAMPLES.get(name)
-    out = {"code": f"0x{code:02X}", "access": access,
-           "summary": _MMC_FIELD_SUMMARIES[name], "data": data}
+    out: dict = {"code": f"0x{code:02X}", "access": access,
+                 "summary": _MMC_FIELD_SUMMARIES[name], "data": data}
     if access != "read only":
-        out["write_example"] = {"name": name, **example}
+        # A writeable field with no example gets an empty one, which fails
+        # check_describe's build.
+        out["write_example"] = {"name": name, **(example or {})}
     return out
 
 
