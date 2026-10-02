@@ -2774,15 +2774,14 @@ def _mmc_assign_system_master(message: dict, command: str) -> tuple:
 
 def _mmc_generator_command(message: dict, command: str) -> tuple:
     # GENERATOR COMMAND (4Ah, RP-013 p.31): stop, run, or copy/jam the time
-    # code generator. The GENERATOR SET UP Information Field isn't
-    # registered.
+    # code generator, as set by the GENERATOR SET UP Information Field.
     action = _choice(message, "action", _MMC_GENERATOR_ACTIONS, command)
     return (_MMC_GENERATOR_ACTIONS[action],)
 
 
 def _mmc_midi_time_code_command(message: dict, command: str) -> tuple:
     # MIDI TIME CODE COMMAND (4Bh, RP-013 p.31). The spec defines only 00 and
-    # 02. The MIDI TIME CODE SET UP Information Field isn't registered.
+    # 02; MIDI TIME CODE SET UP sets what is sent.
     action = _choice(message, "action", _MMC_MTC_COMMAND_ACTIONS, command)
     return (_MMC_MTC_COMMAND_ACTIONS[action],)
 
@@ -4077,6 +4076,154 @@ def _msc_docs() -> dict:
     return out
 
 
+# MMC (RP-013) field docs.
+_MMC_SPEED_DOCS = {
+    "speed": "0 to about 1023.99, required: a multiple of play speed (1 = play speed)",
+    "reverse": "true for reverse, default false",
+}
+_MMC_TIME_FIELD_LIST = "time code fields: " + ", ".join(sorted(_WRITEABLE_INFO_FIELDS))
+
+
+def _mmc_doc(command: str, summary: str, fields: dict, example: dict) -> dict:
+    return {"summary": f"{summary} ({_COMMANDS['mmc'][command]:02X}).", "fields": fields,
+            "example": {"type": "mmc", "command": command, **example}}
+
+
+def _mmc_docs() -> dict:
+    names = ", ".join(sorted(_INFO_FIELD_NAMES))
+    writeable_codecs = sorted(n for n, c in _MMC_FIELD_CODECS.items() if c[0] is not None)
+    nested = ("mmc command dicts, each with 'type': 'mmc' and its own fields; no "
+              "PROCEDURE assemble inside")
+    out = {
+        **{name: _mmc_doc(name, summary, {}, {}) for name, summary in (
+            ("stop", "Stop"), ("play", "Play"),
+            ("deferred_play", "Play once a LOCATE in progress finishes; at once if none is"),
+            ("fast_forward", "Fast forward"), ("rewind", "Rewind"),
+            ("record_strobe", ("Punch in on the record-ready tracks; from a full stop "
+                               "it starts playing, then records")),
+            ("record_exit", "Punch out of record or rehearse"),
+            ("record_pause", ("From PAUSE, enter record-pause: nothing recorded yet, "
+                              "ready to punch in smoothly")),
+            ("pause", "Pause"), ("eject", "Eject the media"),
+            ("chase", "Follow and lock to the SELECTED MASTER CODE"),
+            ("command_error_reset", ("Clear COMMAND ERROR's error-halt flag so "
+                                     "commands are processed again")),
+            ("mmc_reset", ("Reset MMC to power-up: empties the update list, deletes "
+                           "procedures, events and groups, clears errors")))},
+        **{name: _mmc_doc(name, summary, {}, {}) for name, summary in (
+            ("wait", ("Handshake: the receiver's buffer is full, stop sending; "
+                      "always to 7F and alone in its message")),
+            ("resume", "Handshake: ready again after WAIT; always to 7F and alone"))},
+        "locate": _mmc_doc(
+            "locate", "Move to a time: TARGET with the time fields, or I/F with a GP register",
+            {**_TIME_CODE_DOCS, "subframes": "0-99, required with the time fields",
+             "name": "one of gp0-gp7, in place of the time fields"},
+            {**_TC_EXAMPLE, "subframes": 0, "frame_rate": "25"}),
+        **{name: _mmc_doc(name, summary, _MMC_SPEED_DOCS, {"speed": 1.5})
+           for name, summary in (
+               ("variable_play", "Play at a variable speed"),
+               ("search", "Move at a speed with monitoring"),
+               ("shuttle", "Move at a speed, monitoring not required"),
+               ("deferred_variable_play", "VARIABLE PLAY once a LOCATE in progress finishes"),
+               ("record_strobe_variable", "RECORD STROBE at a variable speed"))},
+        "step": _mmc_doc("step", "Move a number of STEP LENGTH units (default half a frame)",
+                         {"quantity": "0-63, required", "reverse": "true steps back, default false"},
+                         {"quantity": 2}),
+        "assign_system_master": _mmc_doc(
+            "assign_system_master", "Make a device the system master; sent to 7F",
+            {"target_device_id": "0-127, required; 127 dis-assigns"}, {"target_device_id": 2}),
+        "generator_command": _mmc_doc(
+            "generator_command", "Time code generator: stop, run or copy/jam",
+            {"action": f"one of {', '.join(_MMC_GENERATOR_ACTIONS)}, required"},
+            {"action": "run"}),
+        "midi_time_code_command": _mmc_doc(
+            "midi_time_code_command", "MIDI Time Code output: off or follow its source",
+            {"action": f"one of {', '.join(_MMC_MTC_COMMAND_ACTIONS)}, required"},
+            {"action": "follow"}),
+        "drop_frame_adjust": _mmc_doc(
+            "drop_frame_adjust", "Convert a 30 fps time code field to drop-frame in place",
+            {"name": f"a writeable {_MMC_TIME_FIELD_LIST}; required"}, {"name": "gp0"}),
+        "move": _mmc_doc(
+            "move", "Copy one Information Field into another",
+            {"destination": f"a writeable {_MMC_TIME_FIELD_LIST}; required",
+             "source": "any Information Field name, required"},
+            {"destination": "gp0", "source": "selected_time_code"}),
+        **{name: _mmc_doc(
+            name, f"destination = source_1 {sign} source_2 (time code fields)",
+            {"destination": f"a writeable {_MMC_TIME_FIELD_LIST}; required",
+             "source_1": "any Information Field name, required",
+             "source_2": "any Information Field name, required"},
+            {"destination": "gp1", "source_1": "gp1", "source_2": "gp2"})
+           for name, sign in (("add", "+"), ("subtract", "-"))},
+        "group": _mmc_doc(
+            "group", "Assign devices to a group, or remove them",
+            {"action": f"one of {', '.join(_MMC_GROUP_ACTIONS)}, required",
+             "group": "0-127, required; 127 (dis_assign only) means every group",
+             "device_ids": "list of 0-127, required; 127 means every device"},
+            {"action": "assign", "group": 3, "device_ids": [1, 2]}),
+        "procedure": _mmc_doc(
+            "procedure", "Stored command lists: assemble, delete, set (select) or execute",
+            {"action": f"one of {', '.join(_MMC_PROCEDURE_ACTIONS)}, required",
+             "procedure": "0-126, required; 127 means all for delete and set",
+             "commands": f"assemble only, required: a list of {nested}, and no "
+                         "EXECUTE of the procedure being assembled"},
+            {"action": "assemble", "procedure": 1,
+             "commands": [{"type": "mmc", "command": "stop"},
+                          {"type": "mmc", "command": "locate", "name": "gp0"}]}),
+        "event": _mmc_doc(
+            "event", "Commands run when a time code reaches a time: define, delete, set or test",
+            {"action": f"one of {', '.join(_MMC_EVENT_ACTIONS)}, required",
+             "event": "0-126, required; 127 means all for delete and set",
+             "trigger_source": (f"define: one of {', '.join(_MMC_EVENT_TRIGGER_SOURCES)}, "
+                                "required"),
+             "name": "define: the GP register (gp0-gp7) holding the trigger time, required",
+             "trigger_command": ("define: one mmc command dict ('type': 'mmc'), required; "
+                                 "no EVENT define or PROCEDURE assemble"),
+             "direction": f"define: one of {', '.join(_MMC_EVENT_DIRECTIONS)}, required",
+             "all_speeds": "define: fire at any speed, not only play speed; default false",
+             "non_delete": "define: stay armed after firing; default false"},
+            {"action": "define", "event": 1, "trigger_source": "selected_time_code",
+             "name": "gp1", "direction": "forward",
+             "trigger_command": {"type": "mmc", "command": "play"}}),
+        "read": _mmc_doc(
+            "read", "Ask for Information Field values; the device answers with an MMC "
+            "response (poll decodes it as mmc_response)",
+            {"names": f"list of Information Field names, required: {names}"},
+            {"names": ["selected_time_code", "motion_control_tally"]}),
+        "update": _mmc_doc(
+            "update", "Send fields now and again whenever they change (begin), or stop (end)",
+            {"action": f"one of {', '.join(_MMC_UPDATE_ACTIONS)}, required",
+             "names": "list of Information Field names (as read), required; 'all' with end"},
+            {"action": "begin", "names": ["selected_time_code"]}),
+        "write": _mmc_doc(
+            "write", "Set Information Field values",
+            {"fields": (
+                "list of {'name', ...data}, required. A writeable "
+                f"{_MMC_TIME_FIELD_LIST} takes hours, minutes, seconds, frames, "
+                "frame_rate, subframes (0-99, default 0) and the flags "
+                f"{', '.join(_TIME_CODE_FLAGS)} (default false). Count-prefixed "
+                f"writeable fields: {', '.join(writeable_codecs)}")},
+            {"fields": [{"name": "gp0", **_TC_EXAMPLE, "frame_rate": "25"},
+                        {"name": "stop_mode", "value": "enable_monitoring"}]}),
+        "masked_write": _mmc_doc(
+            "masked_write", "Change some bits of a track bitmap field",
+            {"fields": (
+                "list of {'name', 'byte_number', 'mask', 'data'}, required. name: "
+                f"one of {', '.join(sorted(_MASK_WRITEABLE_INFO_FIELDS))}; byte_number "
+                "0-127 (0 = the first bitmap byte); mask and data 0-127, only the "
+                "mask's 1 bits change")},
+            {"fields": [{"name": "track_mute", "byte_number": 0, "mask": 0x20, "data": 0x20}]}),
+        "command_segment": _mmc_doc(
+            "command_segment", "One piece of a command string too long for one message; "
+            "'segment': true on any mmc message builds these",
+            {"first": "true on the first segment, default false",
+             "remaining": "0-63, required: segments still to come (0 on the last)",
+             "data": "list of 0-127, required: this piece of the command string"},
+            {"first": True, "remaining": 1, "data": [0x44, 0x06, 0x01, 0x21]}),
+    }
+    return out
+
+
 def _cueing_docs(msg_type: str, time_fields: dict, example_time: dict) -> dict:
     """The command entries shared by mtc_cueing and mtc_cueing_nrt (the
     latter adds a time and delete commands)."""
@@ -4573,6 +4720,20 @@ _DOCS: dict = {
                             "sample_number": 1, "loop_number": "all"},
             },
         },
+    },
+    "mmc": {
+        "summary": ("MIDI Machine Control (F0 7F id 06 ...): transport, locate, "
+                    "Information Fields, procedures and events. Give one 'command', "
+                    "or several in 'batch'."),
+        "fields": {
+            "device_id": _DEVICE_ID_DOC,
+            "batch": ("in place of 'command': a list of mmc command dicts sent in "
+                      "one message. WAIT, RESUME and COMMAND SEGMENT must be alone"),
+            "segment": ("true sends a command string over 48 bytes as COMMAND "
+                        "SEGMENT messages; default false (over 48 bytes is an error)"),
+            "segment_size": "1-45 bytes per segment with 'segment', default 45",
+        },
+        "commands": _mmc_docs(),
     },
     "msc": {
         "summary": ("MIDI Show Control (F0 7F id 02 format command): the General "

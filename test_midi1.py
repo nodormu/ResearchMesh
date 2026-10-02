@@ -1108,7 +1108,9 @@ def check_describe(midi1) -> None:
           and one.get("example", {}).get("command") == "mono_on", f"{one}")
     check("describe: unknown type and unknown command are errors",
           "error" in describe(type="nope") and "error" in describe(type="channel_mode", command="nope"))
-    print(f"  info  describe documents {len(docs)} of {len(midi1._MESSAGE_TYPES)} types")
+    missing = [t for t in midi1._MESSAGE_TYPES if t not in docs]
+    check(f"describe: all {len(midi1._MESSAGE_TYPES)} message types are documented",
+          not missing, f"{missing}")
 
 
 def _fake_input(midi1, name: str):
