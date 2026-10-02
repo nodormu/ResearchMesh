@@ -234,14 +234,32 @@
   "err: mmc write read-only field": {
    "error": "ValueError"
   },
+  "err: msc abort status low bits": {
+   "error": "ValueError"
+  },
   "err: msc both formats": {
    "error": "ValueError"
+  },
+  "err: msc cancelled abort-only status": {
+   "error": "ValueError"
+  },
+  "err: msc cue_data 3 values": {
+   "error": "ValueError"
+  },
+  "err: msc open_cue_list without q_list": {
+   "error": "KeyError"
   },
   "err: msc q_list without q_number": {
    "error": "ValueError"
   },
   "err: msc set partial time": {
    "error": "ValueError"
+  },
+  "err: msc standby without checksum": {
+   "error": "KeyError"
+  },
+  "err: msc standby without q_number": {
+   "error": "KeyError"
   },
   "err: mtc_cueing both info sources": {
    "error": "ValueError"
@@ -849,15 +867,69 @@
     0
    ]
   ],
+  "msc abort manual override in progress": [
+   [
+    "F0 7F 7F 02 01 26 01 00 0C 40 07 00 F7",
+    0
+   ]
+  ],
+  "msc abort named": [
+   [
+    "F0 7F 7F 02 50 26 01 00 10 40 07 00 F7",
+    0
+   ]
+  ],
+  "msc abort numeric dependent status": [
+   [
+    "F0 7F 7F 02 10 26 02 00 02 08 08 00 F7",
+    0
+   ]
+  ],
   "msc all_off": [
    [
     "F0 7F 7F 02 01 08 F7",
     0
    ]
   ],
+  "msc cancel": [
+   [
+    "F0 7F 7F 02 10 24 08 00 0B 00 31 30 39 00 31 00 32 F7",
+    0
+   ]
+  ],
+  "msc cancelled manual override": [
+   [
+    "F0 7F 7F 02 10 25 09 00 0A 40 0B 00 F7",
+    0
+   ]
+  ],
+  "msc cancelled named": [
+   [
+    "F0 7F 7F 02 10 25 09 00 01 40 0B 00 F7",
+    0
+   ]
+  ],
+  "msc close_cue_list": [
+   [
+    "F0 7F 7F 02 10 1C 34 F7",
+    0
+   ]
+  ],
+  "msc close_cue_path": [
+   [
+    "F0 7F 7F 02 10 1E 35 39 F7",
+    0
+   ]
+  ],
   "msc command_format_raw": [
    [
     "F0 7F 03 02 11 02 F7",
+    0
+   ]
+  ],
+  "msc complete": [
+   [
+    "F0 7F 7F 02 10 23 07 00 0A 00 F7",
     0
    ]
   ],
@@ -897,6 +969,12 @@
     0
    ]
   ],
+  "msc go_2pc": [
+   [
+    "F0 7F 7F 02 10 22 2C 02 0A 00 00 00 00 7F 31 30 39 F7",
+    0
+   ]
+  ],
   "msc go_off": [
    [
     "F0 7F 7F 02 01 0B F7",
@@ -906,6 +984,30 @@
   "msc load": [
    [
     "F0 7F 7F 02 30 05 31 32 00 33 F7",
+    0
+   ]
+  ],
+  "msc mtc_chase_off": [
+   [
+    "F0 7F 7F 02 10 1A F7",
+    0
+   ]
+  ],
+  "msc mtc_chase_on": [
+   [
+    "F0 7F 7F 02 10 19 F7",
+    0
+   ]
+  ],
+  "msc open_cue_list": [
+   [
+    "F0 7F 7F 02 10 1B 34 F7",
+    0
+   ]
+  ],
+  "msc open_cue_path": [
+   [
+    "F0 7F 7F 02 10 1D 35 39 F7",
     0
    ]
   ],
@@ -927,6 +1029,18 @@
     0
    ]
   ],
+  "msc sequence_minus": [
+   [
+    "F0 7F 7F 02 10 14 F7",
+    0
+   ]
+  ],
+  "msc sequence_plus": [
+   [
+    "F0 7F 7F 02 10 13 F7",
+    0
+   ]
+  ],
   "msc set": [
    [
     "F0 7F 7F 02 01 06 2C 02 00 7D F7",
@@ -939,15 +1053,87 @@
     0
    ]
   ],
+  "msc set_clock": [
+   [
+    "F0 7F 7F 02 10 18 61 25 34 10 00 F7",
+    0
+   ]
+  ],
+  "msc set_clock q_list": [
+   [
+    "F0 7F 7F 02 10 18 21 25 34 10 07 31 32 2E 35 F7",
+    0
+   ]
+  ],
+  "msc standby": [
+   [
+    "F0 7F 7F 02 20 20 34 24 01 00 01 02 03 04 33 34 00 32 F7",
+    0
+   ]
+  ],
+  "msc standby default cue_data": [
+   [
+    "F0 7F 7F 02 01 20 00 00 7F 7F 00 00 00 00 31 31 38 2E 31 F7",
+    0
+   ]
+  ],
+  "msc standby_minus": [
+   [
+    "F0 7F 7F 02 10 12 F7",
+    0
+   ]
+  ],
+  "msc standby_plus": [
+   [
+    "F0 7F 7F 02 10 11 F7",
+    0
+   ]
+  ],
+  "msc standby_plus q_list": [
+   [
+    "F0 7F 7F 02 10 11 33 F7",
+    0
+   ]
+  ],
+  "msc standing_by": [
+   [
+    "F0 7F 7F 02 20 21 05 00 01 00 60 00 14 00 00 F7",
+    0
+   ]
+  ],
+  "msc standing_by with cue": [
+   [
+    "F0 7F 7F 02 20 21 05 00 01 00 21 25 34 10 01 33 34 F7",
+    0
+   ]
+  ],
+  "msc start_clock": [
+   [
+    "F0 7F 7F 02 10 15 F7",
+    0
+   ]
+  ],
   "msc stop": [
    [
     "F0 7F 7F 02 01 02 F7",
     0
    ]
   ],
+  "msc stop_clock": [
+   [
+    "F0 7F 7F 02 10 16 F7",
+    0
+   ]
+  ],
   "msc timed_go": [
    [
     "F0 7F 7F 02 20 04 61 25 34 10 28 37 F7",
+    0
+   ]
+  ],
+  "msc zero_clock": [
+   [
+    "F0 7F 7F 02 10 17 F7",
     0
    ]
   ],

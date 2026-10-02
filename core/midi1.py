@@ -103,11 +103,19 @@ _COMMANDS: dict = {
         "group": 0x52, "deferred_variable_play": 0x54,
         "record_strobe_variable": 0x55, "wait": 0x7C, "resume": 0x7F,
     },
-    # MSC General Category commands (RP-002/014).
+    # MSC (RP-002/014): General Category 01-0B, Sound Commands 11-1E,
+    # Two-Phase Commit 20-26.
     "msc": {
         "go": 0x01, "stop": 0x02, "resume": 0x03, "timed_go": 0x04,
         "load": 0x05, "set": 0x06, "fire": 0x07, "all_off": 0x08,
         "restore": 0x09, "reset": 0x0A, "go_off": 0x0B,
+        "standby_plus": 0x11, "standby_minus": 0x12, "sequence_plus": 0x13,
+        "sequence_minus": 0x14, "start_clock": 0x15, "stop_clock": 0x16,
+        "zero_clock": 0x17, "set_clock": 0x18, "mtc_chase_on": 0x19,
+        "mtc_chase_off": 0x1A, "open_cue_list": 0x1B, "close_cue_list": 0x1C,
+        "open_cue_path": 0x1D, "close_cue_path": 0x1E,
+        "standby": 0x20, "standing_by": 0x21, "go_2pc": 0x22,
+        "complete": 0x23, "cancel": 0x24, "cancelled": 0x25, "abort": 0x26,
     },
     # Universal Non-Real Time 09 <code>. on = GM1 System On; gm2_on = GM2
     # System On (GM2 4.9.1).
@@ -2304,6 +2312,102 @@ def _msc_fire(message: dict, command: str) -> tuple:
     return (_check_range("macro_number", macro, 0, 127),)
 
 
+def _msc_single_cue_field(field: str, required: bool):
+    """Builder for Sound Commands whose data is one cue field alone (Q_list
+    or Q_path, not preceded by Q_number)."""
+    def build(message: dict, command: str) -> tuple:
+        value = _required(message, field, command) if required else message.get(field)
+        return () if value is None else _encode_msc_ascii_field(field, value)
+    return build
+
+
+def _msc_set_clock(message: dict, command: str) -> tuple:
+    # SET_CLOCK: MSC time, then Q_list if given.
+    return (
+        *_time_code_bytes(message, "fractional_frames", command),
+        *_msc_single_cue_field("q_list", required=False)(message, command),
+    )
+
+
+# Two-Phase Commit (MSC 1.1.1 section 5 and 6). Status codes are 16-bit
+# values with the low 2 bits 0, sent as s1 = (code/4) & 7F, s2 = (code/512)
+# & 7F (section 6.7). The two tables differ: 80 28 is "manual override in
+# progress" for CANCELLED but "manual override initiated" for ABORT.
+_MSC_CANCELLED_STATUS = {
+    "completing": 0x8004, "paused": 0x8008, "terminated": 0x800C,
+    "reversed": 0x8010, "not_standing_by": 0x8024,
+    "manual_override_in_progress": 0x8028,
+}
+_MSC_ABORT_STATUS = {
+    "unknown_error": 0x0000, "checksum_error": 0x8000, "timeout": 0x8020,
+    "not_standing_by": 0x8024, "manual_override_initiated": 0x8028,
+    "manual_override_in_progress": 0x8030,
+    "deadman_interlock_not_established": 0x8040,
+    "safety_interlock_not_established": 0x8044,
+    "unknown_q_number": 0x8050, "unknown_q_list": 0x8054,
+    "unknown_q_path": 0x8058, "too_many_cues_active": 0x805C,
+    "cue_out_of_sequence": 0x8060, "invalid_d1": 0x8064, "invalid_d2": 0x8068,
+    "invalid_d3": 0x806C, "invalid_d4": 0x8070,
+    "manual_cueing_required": 0x8090, "power_failure": 0x80A0,
+    "reading_new_show_cues": 0x80B0,
+}
+
+
+def _msc_2pc_prefix(message: dict, command: str) -> tuple:
+    """cc cc nn nn: the checksum and sequence number, LSB first. The
+    checksum is supplied by the caller: section 6.5 sums 2-byte values
+    without saying their byte order."""
+    return (
+        *_split14("checksum", _required(message, "checksum", command)),
+        *_split14("sequence_number", _required(message, "sequence_number", command)),
+    )
+
+
+def _msc_cue_data(message: dict) -> tuple:
+    """d1 d2 d3 d4 (section 6.8); zeros when unknown, as the spec asks."""
+    values = message.get("cue_data", [0, 0, 0, 0])
+    if len(values) != 4:
+        raise ValueError(f"'cue_data' must have 4 values, got {values!r}")
+    return tuple(_check_range("cue_data entry", v, 0, 127) for v in values)
+
+
+def _msc_2pc_cue(message: dict, command: str, q_number_required: bool) -> tuple:
+    """<Q_number> [00 <Q_list> [00 <Q_path>]], with Q_number required or not."""
+    if q_number_required:
+        q_number = _required(message, "q_number", command)
+    else:
+        q_number = message.get("q_number")
+    return _encode_msc_cue_data(q_number, message.get("q_list"), message.get("q_path"))
+
+
+def _msc_2pc(message: dict, command: str) -> tuple:
+    # standby / go_2pc: cc cc nn nn d1-d4 <Q_number> [00 <Q_list> [00 <Q_path>]]
+    # standing_by: cc cc nn nn hr mn sc fr ff [cue], the most time the cue
+    #   can take; complete: cc cc nn nn [cue]; cancel: cc cc nn nn <Q_number>...
+    prefix = _msc_2pc_prefix(message, command)
+    if command in ("standby", "go_2pc"):
+        return (*prefix, *_msc_cue_data(message), *_msc_2pc_cue(message, command, True))
+    if command == "cancel":
+        return (*prefix, *_msc_2pc_cue(message, command, True))
+    if command == "standing_by":
+        return (*prefix, *_time_code_bytes(message, "fractional_frames", command),
+                *_msc_2pc_cue(message, command, False))
+    return (*prefix, *_msc_2pc_cue(message, command, False))  # complete
+
+
+def _msc_2pc_status(message: dict, command: str) -> tuple:
+    # cancelled / abort: cc cc s1 s2 nn nn.
+    names = _MSC_CANCELLED_STATUS if command == "cancelled" else _MSC_ABORT_STATUS
+    status = _required(message, "status", command)
+    code = names[_choice(message, "status", names, command)] if isinstance(status, str) \
+        else _check_range("status", status, 0, 0xFFFC)
+    if code % 4:
+        raise ValueError(f"'status' must have its low 2 bits 0, got {code:#06x}")
+    checksum = _split14("checksum", _required(message, "checksum", command))
+    sequence = _split14("sequence_number", _required(message, "sequence_number", command))
+    return (*checksum, (code // 4) & 0x7F, (code // 512) & 0x7F, *sequence)
+
+
 _MSC_DATA_BUILDERS = {
     "go": _msc_cue,
     "stop": _msc_cue,
@@ -2313,6 +2417,22 @@ _MSC_DATA_BUILDERS = {
     "timed_go": _msc_timed_go,
     "set": _msc_set,
     "fire": _msc_fire,
+    # Sound Commands: one optional Q_list...
+    **{name: _msc_single_cue_field("q_list", required=False) for name in (
+        "standby_plus", "standby_minus", "sequence_plus", "sequence_minus",
+        "start_clock", "stop_clock", "zero_clock", "mtc_chase_on",
+        "mtc_chase_off",
+    )},
+    "set_clock": _msc_set_clock,
+    # ...or a required Q_list / Q_path.
+    "open_cue_list": _msc_single_cue_field("q_list", required=True),
+    "close_cue_list": _msc_single_cue_field("q_list", required=True),
+    "open_cue_path": _msc_single_cue_field("q_path", required=True),
+    "close_cue_path": _msc_single_cue_field("q_path", required=True),
+    # Two-Phase Commit.
+    **{name: _msc_2pc for name in ("standby", "standing_by", "go_2pc", "complete", "cancel")},
+    "cancelled": _msc_2pc_status,
+    "abort": _msc_2pc_status,
 }
 
 
@@ -2415,9 +2535,9 @@ def _build_message(message: dict) -> "mido.Message":
             0x7F, device_id, 0x06, *_mmc_command_bytes(message), time=time,
         )
     if msg_type == "msc":
-        # MIDI Show Control (RP-002/014); see _MSC_DATA_BUILDERS. Only the 11
-        # General Category commands, which apply to every command_format.
-        # The 15 Sound Commands aren't implemented; send them with 'sysex'.
+        # MIDI Show Control (RP-002/014); see _MSC_DATA_BUILDERS: the 11
+        # General Category commands, the 15 Sound Commands and the 7
+        # Two-Phase Commit commands (whose 'checksum' the caller supplies).
         command_format = _msc_command_format(message)
         command = _choice(message, "command", _COMMANDS["msc"], "msc")
         device_id = _device_id(message)
@@ -3404,6 +3524,46 @@ def _decode_msc_set(data) -> dict:
     return out
 
 
+def _decode_msc_single(field: str):
+    def decode(data) -> dict:
+        return {field: bytes(data).decode("ascii")} if data else {}
+    return decode
+
+
+def _decode_msc_2pc_prefix(data) -> dict:
+    return {"checksum": _join14(data[0], data[1]),
+            "sequence_number": _join14(data[2], data[3])}
+
+
+def _decode_msc_2pc(command: str):
+    def decode(data) -> dict:
+        out = _decode_msc_2pc_prefix(data)
+        rest = data[4:]
+        if command in ("standby", "go_2pc"):
+            out["cue_data"] = list(rest[:4])
+            out.update(_decode_msc_cue(rest[4:]))
+            if "q_number" not in out:
+                raise ValueError(f"{command} requires a Q_number")
+        elif command == "standing_by":
+            out.update(_decode_time_code(*rest[:5], subframe_field="fractional_frames"))
+            out.update(_decode_msc_cue(rest[5:]))
+        else:
+            out.update(_decode_msc_cue(rest))
+        return out
+    return decode
+
+
+def _decode_msc_2pc_status(command: str):
+    def decode(data) -> dict:
+        checksum_lsb, checksum_msb, s1, s2, seq_lsb, seq_msb = data
+        code = s1 * 4 + s2 * 512
+        names = _MSC_CANCELLED_STATUS if command == "cancelled" else _MSC_ABORT_STATUS
+        status = _name_for(names, code) if code in names.values() else code
+        return {"checksum": _join14(checksum_lsb, checksum_msb), "status": status,
+                "sequence_number": _join14(seq_lsb, seq_msb)}
+    return decode
+
+
 # Inverses of _MSC_DATA_BUILDERS: <data> -> fields.
 _MSC_DATA_DECODERS = {
     "go": _decode_msc_cue,
@@ -3414,6 +3574,21 @@ _MSC_DATA_DECODERS = {
     "timed_go": _decode_msc_timed_go,
     "set": _decode_msc_set,
     "fire": lambda data: {"macro_number": data[0]},
+    **{name: _decode_msc_single("q_list") for name in (
+        "standby_plus", "standby_minus", "sequence_plus", "sequence_minus",
+        "start_clock", "stop_clock", "zero_clock", "mtc_chase_on",
+        "mtc_chase_off", "open_cue_list", "close_cue_list",
+    )},
+    "set_clock": lambda data: {
+        **_decode_time_code(*data[:5], subframe_field="fractional_frames"),
+        **_decode_msc_single("q_list")(data[5:]),
+    },
+    "open_cue_path": _decode_msc_single("q_path"),
+    "close_cue_path": _decode_msc_single("q_path"),
+    **{name: _decode_msc_2pc(name) for name in
+       ("standby", "standing_by", "go_2pc", "complete", "cancel")},
+    "cancelled": _decode_msc_2pc_status("cancelled"),
+    "abort": _decode_msc_2pc_status("abort"),
 }
 
 
