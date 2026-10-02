@@ -249,6 +249,18 @@
   "err: mmc write read-only field": {
    "error": "ValueError"
   },
+  "err: mmc write read-only record_status": {
+   "error": "ValueError"
+  },
+  "err: mmc write stop_mode bad name": {
+   "error": "ValueError"
+  },
+  "err: mmc write time_standard bad encoding": {
+   "error": "ValueError"
+  },
+  "err: mmc write track 318": {
+   "error": "ValueError"
+  },
   "err: msc abort status low bits": {
    "error": "ValueError"
   },
@@ -909,6 +921,30 @@
   "mmc write": [
    [
     "F0 7F 7F 06 40 0C 08 61 25 34 10 0C 06 00 40 41 62 48 F7",
+    0
+   ]
+  ],
+  "mmc write byte fields": [
+   [
+    "F0 7F 7F 06 40 0F 4A 01 01 5A 01 01 54 01 32 56 01 7F 45 01 20 F7",
+    0
+   ]
+  ],
+  "mmc write time code and byte field": [
+   [
+    "F0 7F 7F 06 40 09 09 01 25 34 10 00 4C 01 04 F7",
+    0
+   ]
+  ],
+  "mmc write track bitmaps": [
+   [
+    "F0 7F 7F 06 40 0B 62 03 61 40 01 4F 02 20 01 53 00 F7",
+    0
+   ]
+  ],
+  "mmc write vitc and update rate": [
+   [
+    "F0 7F 7F 06 40 08 63 03 01 10 7F 41 01 02 F7",
     0
    ]
   ],
@@ -1926,6 +1962,13 @@
   "err wrong length": {
    "error": "field 0x01 (selected_time_code) needs 5 data byte(s), got 2"
   },
+  "fixed_speed undefined code": {
+   "device_id": 1,
+   "name": "fixed_speed",
+   "status": "ok",
+   "type": "field_value",
+   "value": 62
+  },
   "gp0 status byte": {
    "blank": true,
    "color_frame": true,
@@ -1950,6 +1993,16 @@
    "name": "wait",
    "status": "ok",
    "type": "handshake"
+  },
+  "record_status bits": {
+   "activity": "record_insert",
+   "device_id": 1,
+   "local_record_inhibit": true,
+   "local_rehearse_inhibit": false,
+   "name": "record_status",
+   "no_tracks_active": true,
+   "status": "ok",
+   "type": "field_value"
   },
   "response_error": {
    "device_id": 1,
@@ -2041,6 +2094,38 @@
    "type": "field_value",
    "use_status_byte": false
   },
+  "stop_mode enable": {
+   "device_id": 1,
+   "name": "stop_mode",
+   "status": "ok",
+   "type": "field_value",
+   "value": "enable_monitoring"
+  },
+  "stop_mode wrong length": {
+   "data": [
+    1,
+    1
+   ],
+   "device_id": 1,
+   "name": "stop_mode",
+   "status": "ok",
+   "type": "field_value"
+  },
+  "time_standard field-definition form": {
+   "device_id": 1,
+   "frame_rate": "30nondrop",
+   "name": "time_standard",
+   "status": "ok",
+   "type": "field_value"
+  },
+  "time_standard unshifted form": {
+   "device_id": 1,
+   "encoding": "unshifted",
+   "frame_rate": "30nondrop",
+   "name": "time_standard",
+   "status": "ok",
+   "type": "field_value"
+  },
   "time_standard with count 0": {
    "data": [],
    "device_id": 1,
@@ -2079,6 +2164,15 @@
    "raw_name_byte": 16,
    "status": "ok",
    "type": "unknown"
+  },
+  "vitc_insert_enable": {
+   "control": "enable",
+   "device_id": 1,
+   "first_line": 16,
+   "name": "vitc_insert_enable",
+   "second_line": 18,
+   "status": "ok",
+   "type": "field_value"
   }
  }
 }

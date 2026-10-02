@@ -420,6 +420,30 @@ CASES: list[tuple[str, dict]] = [
                              "names": ["motion_control_tally", "short_generator_time_code", "signature"]}),
     ("mmc update short field", {"type": "mmc", "command": "update", "action": "begin",
                                 "names": ["short_selected_time_code", "motion_control_tally"]}),
+    # MMC count-prefixed fields in WRITE (step 6f-2b-1)
+    ("mmc write byte fields", {"type": "mmc", "command": "write", "fields": [
+        {"name": "stop_mode", "value": "enable_monitoring"},
+        {"name": "chase_mode", "value": "absolute_resolve"},
+        {"name": "step_length", "value": 0x32},
+        {"name": "fixed_speed", "value": "local"},
+        {"name": "time_standard", "frame_rate": "25"}]}),
+    ("mmc write vitc and update rate", {"type": "mmc", "command": "write", "fields": [
+        {"name": "vitc_insert_enable", "control": "enable", "first_line": 0x10, "second_line": "local"},
+        {"name": "update_rate", "value": 2}]}),
+    ("mmc write track bitmaps", {"type": "mmc", "command": "write", "fields": [
+        {"name": "track_mute", "video": True, "active_tracks": [1, 2, 9, 10]},
+        {"name": "track_record_ready", "bitmap_bytes": [0x20, 0x01]},
+        {"name": "track_input_monitor", "active_tracks": []}]}),
+    ("mmc write time code and byte field", {"type": "mmc", "command": "write", "fields": [
+        {"name": "gp1", **TC, "frame_rate": "24"}, {"name": "record_mode", "value": "rehearse"}]}),
+    ("err: mmc write read-only record_status", {"type": "mmc", "command": "write",
+                                                "fields": [{"name": "record_status", "value": 1}]}),
+    ("err: mmc write stop_mode bad name", {"type": "mmc", "command": "write",
+                                           "fields": [{"name": "stop_mode", "value": "sometimes"}]}),
+    ("err: mmc write time_standard bad encoding", {"type": "mmc", "command": "write", "fields": [
+        {"name": "time_standard", "frame_rate": "25", "encoding": "sideways"}]}),
+    ("err: mmc write track 318", {"type": "mmc", "command": "write",
+                                  "fields": [{"name": "track_mute", "active_tracks": [318]}]}),
     # Errors
     ("err: unknown type", {"type": "bogus"}),
     ("err: missing type", {}),
@@ -491,6 +515,14 @@ MMC_RESPONSES: list[tuple[str, list[int]]] = [
     ("handshake wait", [0xF0, 0x7F, 0x01, 0x07, 0x7C, 0xF7]),
     ("unregistered 5-byte name", [0xF0, 0x7F, 0x01, 0x07, 0x10, 1, 2, 3, 4, 5, 0xF7]),
     ("err extension set", [0xF0, 0x7F, 0x01, 0x07, 0x00, 0x01, 0xF7]),
+    # Step 6f-2b-1: count-prefixed field formats.
+    ("stop_mode enable", [0xF0, 0x7F, 0x01, 0x07, 0x4A, 0x01, 0x01, 0xF7]),
+    ("record_status bits", [0xF0, 0x7F, 0x01, 0x07, 0x4D, 0x01, 0x51, 0xF7]),
+    ("vitc_insert_enable", [0xF0, 0x7F, 0x01, 0x07, 0x63, 0x03, 0x01, 0x10, 0x12, 0xF7]),
+    ("time_standard field-definition form", [0xF0, 0x7F, 0x01, 0x07, 0x45, 0x01, 0x60, 0xF7]),
+    ("time_standard unshifted form", [0xF0, 0x7F, 0x01, 0x07, 0x45, 0x01, 0x03, 0xF7]),
+    ("fixed_speed undefined code", [0xF0, 0x7F, 0x01, 0x07, 0x56, 0x01, 0x3E, 0xF7]),
+    ("stop_mode wrong length", [0xF0, 0x7F, 0x01, 0x07, 0x4A, 0x02, 0x01, 0x01, 0xF7]),
 ]
 
 META_CASES: list[tuple[str, dict]] = [
@@ -594,6 +626,11 @@ SPEC_EXAMPLES: list[tuple[str, dict, list[str]]] = [
      {"type": "msc", "command_format": "sound", "command": "cancelled", "checksum": 0,
       "status": "completing", "sequence_number": 0},
      ["F0 7F 7F 02 10 25 00 00 01 40 00 00 F7"]),
+    ("RP-013 appendix p.82: WRITE <TIME STANDARD> 03, <COMMAND ERROR LEVEL> 7F to group 7C",
+     {"type": "mmc", "command": "write", "device_id": 0x7C, "fields": [
+         {"name": "time_standard", "frame_rate": "30nondrop", "encoding": "unshifted"},
+         {"name": "command_error_level", "value": "all_enabled"}]},
+     ["F0 7F 7C 06 40 06 45 01 03 44 01 7F F7"]),
     # Captured from real hardware, not printed in a spec.
     ("Roland TR-8S Identity Reply (captured 2026-10-02)",
      {"type": "device_inquiry", "command": "reply", "device_id": 0x10,

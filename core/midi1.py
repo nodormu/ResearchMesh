@@ -1358,6 +1358,157 @@ def _decode_track_bitmap(bitmap) -> dict:
     }
 
 
+# --- MMC count-prefixed Information Field data (RP-013 section 6) --------------
+# Single-byte fields: name -> {value name: code}, or None for a plain number.
+# "local" (7F) is "as selected/defined locally", which RP-013 allows only in a
+# WRITE.
+_MMC_BYTE_FIELDS = {
+    "update_rate": None,  # minimum frames between UPDATE cycles (default 1)
+    "command_error_level": {"all_disabled": 0x00, "all_enabled": 0x7F},
+    "selected_time_code_source": {
+        "ltc": 0x00, "vitc": 0x01, "tape_counter": 0x02, "auto_vitc_ltc": 0x04,
+        "local": 0x7F,
+    },
+    "stop_mode": {"disable_monitoring": 0x00, "enable_monitoring": 0x01, "local": 0x7F},
+    "fast_mode": {"no_monitoring": 0x00, "with_monitoring": 0x01, "local": 0x7F},
+    "record_mode": {
+        "disabled": 0x00, "record_insert": 0x01, "record_assemble": 0x02,
+        "rehearse": 0x04, "record_crash": 0x05, "local": 0x7F,
+    },
+    "global_monitor": {
+        "playback_sync": 0x00, "input": 0x01, "playback_repro": 0x02, "local": 0x7F,
+    },
+    "record_monitor": {
+        "record_only": 0x00, "record_or_non_play": 0x01,
+        "record_or_record_ready": 0x02, "local": 0x7F,
+    },
+    "step_length": None,  # in 1/100 frame (default 32h, half a frame)
+    "play_speed_reference": {"internal": 0x00, "external": 0x01, "local": 0x7F},
+    "fixed_speed": {"lower": 0x3F, "standard": 0x40, "higher": 0x41, "local": 0x7F},
+    "lifter_defeat": {"no_defeat": 0x00, "defeat": 0x01, "local": 0x7F},
+    "control_disable": {"enable": 0x00, "disable": 0x01, "local": 0x7F},
+    "resolved_play_mode": {"normal": 0x00, "free_resolve": 0x01, "local": 0x7F},
+    "chase_mode": {"absolute_standard": 0x00, "absolute_resolve": 0x01, "local": 0x7F},
+}
+
+# RECORD STATUS activity nibble (0 d c b aaaa).
+_MMC_RECORD_ACTIVITY = {
+    "none": 0x0, "record_insert": 0x1, "record_assemble": 0x2, "rehearsing": 0x4,
+    "record_crash": 0x5, "record_pause": 0x6,
+}
+_MMC_VITC_CONTROL = {"disable": 0x00, "enable": 0x01, "local": 0x7F}
+
+
+def _named_value(entry: dict, field: str, names: "dict | None") -> int:
+    """A byte given as a name from `names` or a 0-127 number."""
+    value = _required(entry, field, entry.get("name"))
+    if isinstance(value, str) and names:
+        return names[_choice(entry, field, names, entry.get("name", field))]
+    return _check_range(field, value, 0, 127)
+
+
+def _value_name(names: "dict | None", code: int):
+    return _name_for(names, code) if names and code in names.values() else code
+
+
+def _byte_field_codec(names: "dict | None"):
+    def encode(entry: dict) -> tuple:
+        return (_named_value(entry, "value", names),)
+
+    def decode(data) -> dict:
+        (code,) = data
+        return {"value": _value_name(names, code)}
+    return encode, decode
+
+
+def _encode_track_bitmap(entry: dict) -> tuple:
+    """Standard Track Bitmap for a WRITE: 'bitmap_bytes' as is, or built from
+    'active_tracks' and the video/time_code_track/aux_track_a/aux_track_b
+    flags (layout in _decode_track_bitmap). Trailing zero bytes are left
+    out; tracks not sent are reset (RP-013 section 3)."""
+    if entry.get("bitmap_bytes") is not None:
+        return tuple(_check_range("bitmap_bytes entry", b, 0, 127)
+                     for b in entry["bitmap_bytes"])
+    out = [0]
+    for flag, bit in (("video", 0), ("time_code_track", 2), ("aux_track_a", 3),
+                      ("aux_track_b", 4)):
+        if entry.get(flag):
+            out[0] |= 1 << bit
+    for track in entry.get("active_tracks", []):
+        _check_range("active_tracks entry", track, 1, 317)
+        if track <= 2:
+            out[0] |= 1 << (track + 4)
+            continue
+        index, bit = 1 + (track - 3) // 7, (track - 3) % 7
+        out += [0] * (index + 1 - len(out))
+        out[index] |= 1 << bit
+    while out and out[-1] == 0:
+        out.pop()
+    return tuple(out)
+
+
+def _decode_record_status(data) -> dict:
+    (status,) = data
+    return {
+        "activity": _value_name(_MMC_RECORD_ACTIVITY, status & 0x0F),
+        "local_record_inhibit": bool(status & 0x10),
+        "local_rehearse_inhibit": bool(status & 0x20),
+        "no_tracks_active": bool(status & 0x40),
+    }
+
+
+def _encode_time_standard(entry: dict) -> tuple:
+    """TIME STANDARD. RP-013 p.55 defines the byte as 0 tt 00000 (tt = the
+    frame-rate code of _FRAME_RATE_BITS). Its appendix example (p.82) sends
+    03 for "30 frame", the code unshifted; 'encoding': "unshifted" sends
+    that form."""
+    code = _FRAME_RATE_BITS[_choice(entry, "frame_rate", _FRAME_RATE_BITS, "time_standard")]
+    encoding = entry.get("encoding", "field_definition")
+    if encoding not in ("field_definition", "unshifted"):
+        raise ValueError(f"'encoding' must be 'field_definition' or 'unshifted', got {encoding!r}")
+    return (code,) if encoding == "unshifted" else (code << 5,)
+
+
+def _decode_time_standard(data) -> dict:
+    (value,) = data
+    if not value & 0x1F:
+        return {"frame_rate": _name_for(_FRAME_RATE_BITS, (value >> 5) & 0x3)}
+    if value <= 0x03:
+        return {"frame_rate": _name_for(_FRAME_RATE_BITS, value), "encoding": "unshifted"}
+    raise ValueError(f"TIME STANDARD byte {value:#04x} is neither 0 tt 00000 nor 00-03")
+
+
+def _encode_vitc_insert(entry: dict) -> tuple:
+    def line(field: str) -> int:
+        value = _required(entry, field, "vitc_insert_enable")
+        return 0x7F if value == "local" else _check_range(field, value, 0, 127)
+    return (_named_value(entry, "control", _MMC_VITC_CONTROL),
+            line("first_line"), line("second_line"))
+
+
+def _decode_vitc_insert(data) -> dict:
+    control, first, second = data
+    return {
+        "control": _value_name(_MMC_VITC_CONTROL, control),
+        "first_line": "local" if first == 0x7F else first,
+        "second_line": "local" if second == 0x7F else second,
+    }
+
+
+# field name -> (encode(entry) -> data bytes or None if read only,
+#                decode(data) -> fields). Data excludes the name and count.
+_MMC_FIELD_CODECS = {
+    **{name: _byte_field_codec(names) for name, names in _MMC_BYTE_FIELDS.items()},
+    "time_standard": (_encode_time_standard, _decode_time_standard),
+    "record_status": (None, _decode_record_status),
+    "vitc_insert_enable": (_encode_vitc_insert, _decode_vitc_insert),
+    **{name: (_encode_track_bitmap if name in _MASK_WRITEABLE_INFO_FIELDS else None,
+              lambda data: {"byte_count": len(data), "bitmap_bytes": list(data),
+                            **_decode_track_bitmap(data)})
+       for name in _TRACK_BITMAP_INFO_FIELDS},
+}
+
+
 def _mmc_response_field(name_byte: int, payload: list) -> dict:
     """One field of an MMC response, given its name byte and data (the
     count byte already removed)."""
@@ -1379,15 +1530,12 @@ def _mmc_response_field(name_byte: int, payload: list) -> dict:
     if name_byte < 0x40:
         return {"type": "field_value", "name": name,
                 **_decode_short_time_code(*payload)}
-    if name in _TRACK_BITMAP_INFO_FIELDS:
-        # <count> <bitmap bytes...>. A device may leave out trailing zero
-        # bytes; missing tracks are inactive. Returns the raw bytes (for
-        # masked_write) and what they mean (_decode_track_bitmap).
-        return {
-            "type": "field_value", "name": name,
-            "byte_count": len(payload), "bitmap_bytes": list(payload),
-            **_decode_track_bitmap(payload),
-        }
+    codec = _MMC_FIELD_CODECS.get(name)
+    if codec is not None:
+        try:
+            return {"type": "field_value", "name": name, **codec[1](payload)}
+        except (ValueError, KeyError, IndexError):
+            pass  # wrong length or an undefined code: report the raw data
     return {"type": "field_value", "name": name, "data": list(payload)}
 
 
@@ -2241,12 +2389,25 @@ def _mmc_read(message: dict, command: str) -> tuple:
 
 def _mmc_write(message: dict, command: str) -> tuple:
     # WRITE (40h, RP-013 p.25): <name> <data> for each entry in 'fields'.
-    # Only writeable Standard Time Code fields are accepted, so <data> is
-    # always 5 bytes with no length prefix. Count-prefixed fields (such as
-    # the Track Bitmaps) aren't supported.
+    # Writeable Standard Time Code fields send 5 bytes; count-prefixed
+    # fields send <count> <data> (_MMC_FIELD_CODECS with an encoder), as in
+    # RP-013's appendix example <TIME STANDARD> <count=01> 03.
     data: list = []
     for field in _required_list(message, "fields", command):
         name = _required(field, "name", "each 'fields' entry")
+        codec = _MMC_FIELD_CODECS.get(name)
+        if codec is not None and codec[0] is not None:
+            payload = codec[0](field)
+            data += [_INFO_FIELD_NAMES[name], len(payload), *payload]
+            continue
+        if name in _INFO_FIELD_NAMES and name not in _WRITEABLE_INFO_FIELDS:
+            writeable = sorted(_WRITEABLE_INFO_FIELDS | {
+                n for n, c in _MMC_FIELD_CODECS.items() if c[0] is not None
+            })
+            raise ValueError(
+                f"Information Field {name!r} can't be written; writeable fields "
+                f"are {writeable}"
+            )
         data.append(_resolve_info_field_name(name, require_writeable=True))
         data += _encode_standard_time_code(
             *_time_code_fields(field, context=name),
@@ -3737,6 +3898,27 @@ def _info_field_name(code: int) -> str:
     return _name_for(_INFO_FIELD_NAMES, code)
 
 
+def _decode_mmc_write_fields(data) -> list:
+    """Inverse of _mmc_write: fields split by the name-byte ranges."""
+    fields, at = [], 0
+    while at < len(data):
+        name = _info_field_name(data[at])
+        if data[at] < 0x20:
+            fields.append({"name": name, **_decode_standard_time_code(*data[at + 1:at + 6])})
+            at += 6
+            continue
+        codec = _MMC_FIELD_CODECS.get(name)
+        if data[at] < 0x40 or codec is None or codec[0] is None:
+            raise ValueError(f"{name} can't be written")
+        count = data[at + 1]
+        payload = data[at + 2:at + 2 + count]
+        if len(payload) != count:
+            raise ValueError(f"WRITE field {name} is truncated")
+        fields.append({"name": name, **codec[1](payload)})
+        at += 2 + count
+    return fields
+
+
 def _decode_mmc_procedure(data) -> dict:
     action = _name_for(_MMC_PROCEDURE_ACTIONS, data[0])
     out: dict = {"action": action, "procedure": data[1]}
@@ -3795,10 +3977,7 @@ _MMC_DATA_DECODERS = {
     "procedure": _decode_mmc_procedure,
     "event": _decode_mmc_event,
     "read": lambda d: {"names": [_info_field_name(b) for b in d]},
-    "write": lambda d: {"fields": [
-        {"name": _info_field_name(d[i]), **_decode_standard_time_code(*d[i + 1:i + 6])}
-        for i in range(0, len(d), 6)
-    ]},
+    "write": lambda d: {"fields": _decode_mmc_write_fields(d)},
     "masked_write": lambda d: {"fields": [
         {"name": _info_field_name(d[i]), "byte_number": d[i + 1],
          "mask": d[i + 2], "data": d[i + 3]}
