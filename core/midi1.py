@@ -3679,8 +3679,8 @@ def _build_message(message: dict) -> "mido.Message":
         # source ID (ss) can't be 7F. <type> is 4 printable ASCII
         # characters ("MIDI", "BIN "); <name> is printable ASCII. <len> is
         # 28 bits in four 7-bit bytes, LSB first, 0 = unknown. Checksum:
-        # XOR of every byte after F0 up to the checksum. Sample Dump
-        # Standard isn't implemented.
+        # XOR of every byte after F0 up to the checksum. Sample Dump uses
+        # these same handshakes.
         command = _choice(
             message, "command", _COMMANDS["file_dump"], "file_dump",
         )
@@ -3935,6 +3935,65 @@ _TC_EXAMPLE = {"hours": 1, "minutes": 37, "seconds": 52, "frames": 16}
 
 def _no_fields(summary: str, example: dict) -> dict:
     return {"summary": summary, "fields": {}, "example": example}
+
+
+# Shared field docs for MIDI Tuning, MTC Cueing and the dumps.
+_TUNING_FREQUENCY_DOC = (
+    "{'semitone': 0-127, 'cents': 0 <= cents < 100} (the equal-tempered "
+    "semitone at or below the pitch, plus cents above it), or "
+    "{'no_change': true}")
+_TUNING_DOCS = {
+    "bank": "0-127, required",
+    "tuning_program": "0-127, required",
+    "tuning_name": "up to 16 ASCII characters, default '' (space padded)",
+    "notes": f"128 entries, key 0 first, required; each {_TUNING_FREQUENCY_DOC}",
+    "changes": f"1-127 entries, required; each {{'key': 0-127}} plus {_TUNING_FREQUENCY_DOC}",
+    "channels": "list of channels 0-15, required",
+    "real_time": "true sends Real Time (F0 7F, applies now), false Non-Real Time; default true",
+    "offsets_1byte": "12 values C to B, required; 0-127, 64 = 0 cents, 1 cent per step",
+    "offsets_2byte": ("12 values C to B, required; 0-16383, 8192 = 0 cents, "
+                      "200/16384 cent per step"),
+}
+
+
+def _tuning_doc(summary: str, fields: tuple, example: dict) -> dict:
+    """A midi_tuning command entry; 'offsets' picks its 1- or 2-byte text
+    from the command name."""
+    two_byte = example["command"].endswith("2byte")
+    docs = {name: _TUNING_DOCS[("offsets_2byte" if two_byte else "offsets_1byte")
+                               if name == "offsets" else name] for name in fields}
+    return {"summary": summary, "fields": docs, "example": {"type": "midi_tuning", **example}}
+
+
+_CUEING_EVENT_DOC = "0-16383, required"
+_CUEING_INFO_DOCS = {
+    "additional_info_message": ("a message dict as 'send' takes (e.g. a note_on), "
+                                "sent nibblized; or give 'additional_info_bytes'"),
+    "additional_info_bytes": "list of 0-255, in place of 'additional_info_message'",
+}
+
+
+def _cueing_docs(msg_type: str, time_fields: dict, example_time: dict) -> dict:
+    """The command entries shared by mtc_cueing and mtc_cueing_nrt (the
+    latter adds a time and delete commands)."""
+    out = {}
+    for name in _COMMANDS[msg_type]:
+        if name.startswith("special_"):
+            continue
+        fields = {**time_fields, "event_number": _CUEING_EVENT_DOC}
+        example = {"type": msg_type, "command": name, **example_time, "event_number": 12}
+        what = name.replace("_with_info", "").replace("_", " ")
+        summary = f"{what.capitalize()} ({_COMMANDS[msg_type][name]:02X})."
+        if name.endswith("_with_info"):
+            fields.update(_CUEING_INFO_DOCS)
+            example["additional_info_message"] = {"type": "note_on", "note": 60, "velocity": 100}
+            summary = f"{what.capitalize()}, with a MIDI message to act on ({_COMMANDS[msg_type][name]:02X})."
+        if name == "event_name":
+            fields["event_name"] = "ASCII text, required"
+            example["event_name"] = "Door slam"
+            summary = f"Name for an event number ({_COMMANDS[msg_type][name]:02X})."
+        out[name] = {"summary": summary, "fields": fields, "example": example}
+    return out
 
 
 _DOCS: dict = {
@@ -4261,6 +4320,202 @@ _DOCS: dict = {
             } for name, when, code in (
                 ("time_signature_immediate", "taking effect now", "02"),
                 ("time_signature_delayed", "taking effect at the next bar", "42"))},
+        },
+    },
+    "midi_tuning": {
+        "summary": ("MIDI Tuning (F0 7E|7F id 08 nn, Updated Specification). Dumps "
+                    "get their checksum added."),
+        "fields": {"device_id": _DEVICE_ID_DOC},
+        "commands": {
+            "bulk_dump_request": _tuning_doc(
+                "Ask for a tuning program's Bulk Dump (00).", ("tuning_program",),
+                {"command": "bulk_dump_request", "tuning_program": 0}),
+            "bulk_dump_reply": _tuning_doc(
+                "Bulk Tuning Dump (01): a frequency for each of the 128 keys.",
+                ("tuning_program", "tuning_name", "notes"),
+                {"command": "bulk_dump_reply", "tuning_program": 0, "tuning_name": "Equal",
+                 "notes": [{"semitone": k, "cents": 0} for k in range(128)]}),
+            "note_change": _tuning_doc(
+                "Single Note Tuning Change (02, Real Time): retune some keys now.",
+                ("tuning_program", "changes"),
+                {"command": "note_change", "tuning_program": 0,
+                 "changes": [{"key": 69, "semitone": 69, "cents": 50}]}),
+            "bulk_dump_request_bank": _tuning_doc(
+                "Ask for a Bulk Dump from a bank (03).", ("bank", "tuning_program"),
+                {"command": "bulk_dump_request_bank", "bank": 0, "tuning_program": 0}),
+            "key_based_dump": _tuning_doc(
+                "Key-Based Tuning Dump (04): bulk dump with a bank.",
+                ("bank", "tuning_program", "tuning_name", "notes"),
+                {"command": "key_based_dump", "bank": 0, "tuning_program": 0,
+                 "notes": [{"no_change": True}] * 128}),
+            "scale_octave_dump_1byte": _tuning_doc(
+                "Scale/Octave Tuning Dump, 1-byte form (05).",
+                ("bank", "tuning_program", "tuning_name", "offsets"),
+                {"command": "scale_octave_dump_1byte", "bank": 0, "tuning_program": 0,
+                 "offsets": [64] * 12}),
+            "scale_octave_dump_2byte": _tuning_doc(
+                "Scale/Octave Tuning Dump, 2-byte form (06).",
+                ("bank", "tuning_program", "tuning_name", "offsets"),
+                {"command": "scale_octave_dump_2byte", "bank": 0, "tuning_program": 0,
+                 "offsets": [8192] * 12}),
+            "note_change_bank": _tuning_doc(
+                "Single Note Tuning Change with a bank (07).",
+                ("bank", "tuning_program", "changes", "real_time"),
+                {"command": "note_change_bank", "bank": 0, "tuning_program": 0,
+                 "changes": [{"key": 60, "semitone": 60, "cents": 25}]}),
+            "scale_octave_1byte": _tuning_doc(
+                "Scale/Octave Tuning, 1-byte form (08): the same offset for each "
+                "pitch class on the given channels.",
+                ("channels", "offsets", "real_time"),
+                {"command": "scale_octave_1byte", "channels": [0],
+                 "offsets": [64, 50, 64, 78, 64, 64, 50, 64, 50, 64, 78, 50]}),
+            "scale_octave_2byte": _tuning_doc(
+                "Scale/Octave Tuning, 2-byte form (09).",
+                ("channels", "offsets", "real_time"),
+                {"command": "scale_octave_2byte", "channels": [0, 1], "offsets": [8192] * 12}),
+        },
+    },
+    "mtc_cueing": {
+        "summary": ("MTC Real Time Cueing (F0 7F id 05 nn): cue events now. For "
+                    "set-up with times, use mtc_cueing_nrt."),
+        "fields": {"device_id": _DEVICE_ID_DOC},
+        "commands": {
+            "special_system_stop": _no_fields(
+                "System Stop (00, special type 04 00).",
+                {"type": "mtc_cueing", "command": "special_system_stop"}),
+            **_cueing_docs("mtc_cueing", {}, {}),
+        },
+    },
+    "mtc_cueing_nrt": {
+        "summary": ("MTC Non-Real Time Cueing set-up (F0 7E id 04 nn): an event "
+                    "list with times, and delete commands."),
+        "fields": {"device_id": _DEVICE_ID_DOC},
+        "commands": {
+            **{name: _no_fields(f"Special: {name[8:].replace('_', ' ')} (00, type "
+                                f"{code:02X} 00).",
+                                {"type": "mtc_cueing_nrt", "command": name})
+               for name, code in _MTC_CUEING_NRT_SPECIAL_TYPES.items()
+               if name not in ("special_time_code_offset", "special_event_list_request")},
+            **{name: {
+                "summary": f"Special: {what} (00, type {_MTC_CUEING_NRT_SPECIAL_TYPES[name]:02X} 00).",
+                "fields": {**_TIME_CODE_DOCS, "fractional_frames": "0-99, required"},
+                "example": {"type": "mtc_cueing_nrt", "command": name, **_TC_EXAMPLE,
+                            "frame_rate": "25", "fractional_frames": 0},
+            } for name, what in (("special_time_code_offset", "time code offset"),
+                                 ("special_event_list_request", "event list request"))},
+            **_cueing_docs("mtc_cueing_nrt",
+                           {**_TIME_CODE_DOCS, "fractional_frames": "0-99, required"},
+                           {**_TC_EXAMPLE, "frame_rate": "25", "fractional_frames": 0}),
+        },
+    },
+    "sample_dump": {
+        "summary": ("Sample Dump Standard (F0 7E id nn). Handshakes (ack, nak, "
+                    "wait, cancel, eof) are file_dump commands."),
+        "fields": {"device_id": _DEVICE_ID_DOC},
+        "commands": {
+            "header": {
+                "summary": "Dump Header (01).",
+                "fields": {
+                    "sample_number": "0-16383, required",
+                    "sample_format": "8-28 bits per word, required",
+                    "sample_period": "0-2097151 nanoseconds per sample, required",
+                    "sample_length": "0-2097151 words, required",
+                    "sustain_loop_start": "0-2097151 (word number), required",
+                    "sustain_loop_end": "0-2097151 (word number), required",
+                    "loop_type": f"one of {', '.join(_SAMPLE_LOOP_TYPES)}, required",
+                },
+                "example": {"type": "sample_dump", "command": "header", "sample_number": 1,
+                            "sample_format": 16, "sample_period": 22676,
+                            "sample_length": 44100, "sustain_loop_start": 0,
+                            "sustain_loop_end": 44099, "loop_type": "forward"},
+            },
+            "data_packet": {
+                "summary": ("Data Packet (02): 120 data bytes, zero-padded, with "
+                            "its checksum added."),
+                "fields": {
+                    "packet_number": "0-127, required (counts up, wrapping)",
+                    "words": ("sample words, each 0 to 2^sample_format - 1 (0 = "
+                              "full negative); needs 'sample_format'. Or give 'data'"),
+                    "sample_format": "8-28, with 'words'",
+                    "data": "up to 120 raw bytes 0-127, in place of 'words'",
+                },
+                "example": {"type": "sample_dump", "command": "data_packet",
+                            "packet_number": 0, "sample_format": 16,
+                            "words": [0x8000, 0xFFFF, 0x0000]},
+            },
+            "request": {
+                "summary": "Dump Request (03).",
+                "fields": {"sample_number": "0-16383, required"},
+                "example": {"type": "sample_dump", "command": "request", "sample_number": 1},
+            },
+            "loop_points": {
+                "summary": "Loop Point Transmission (05 01).",
+                "fields": {
+                    "sample_number": "0-16383, required",
+                    "loop_number": "0-16383, or 'all' (deletes all loops), required",
+                    "loop_type": f"one of {', '.join(_SAMPLE_LOOP_TYPES)}, required",
+                    "loop_start": "0-2097151 (word number), required",
+                    "loop_end": "0-2097151 (word number), required",
+                },
+                "example": {"type": "sample_dump", "command": "loop_points",
+                            "sample_number": 1, "loop_number": 0, "loop_type": "forward",
+                            "loop_start": 100, "loop_end": 44000},
+            },
+            "loop_points_request": {
+                "summary": "Loop Point Request (05 02).",
+                "fields": {"sample_number": "0-16383, required",
+                           "loop_number": "0-16383, or 'all', required"},
+                "example": {"type": "sample_dump", "command": "loop_points_request",
+                            "sample_number": 1, "loop_number": "all"},
+            },
+        },
+    },
+    "file_dump": {
+        "summary": ("File Dump (F0 7E id 07 nn) and the generic handshakes "
+                    "(F0 7E id 7B-7F pp), which Sample Dump uses too."),
+        "fields": {"device_id": "0-127, required (File Dump is point to point)"},
+        "commands": {
+            "header": {
+                "summary": "Header (01): announces a file.",
+                "fields": {
+                    "source_device_id": "0-126, required (the sender)",
+                    "file_type": "4 printable ASCII characters, required, e.g. 'MIDI', 'BIN '",
+                    "length": "0-268435455 bytes, required; 0 = unknown",
+                    "filename": "printable ASCII, default ''",
+                },
+                "example": {"type": "file_dump", "command": "header", "device_id": 1,
+                            "source_device_id": 2, "file_type": "MIDI",
+                            "length": 1024, "filename": "song.mid"},
+            },
+            "data_packet": {
+                "summary": "Data Packet (02): up to 112 file bytes, encoded, with its checksum added.",
+                "fields": {"packet_number": "0-127, required",
+                           "stored_bytes": "1-112 file bytes, each 0-255, required"},
+                "example": {"type": "file_dump", "command": "data_packet", "device_id": 1,
+                            "packet_number": 0, "stored_bytes": [0x4D, 0x54, 0x68, 0x64, 0xFF]},
+            },
+            "request": {
+                "summary": "Request (03): ask a device to send a file.",
+                "fields": {
+                    "source_device_id": "0-126, required (who asks)",
+                    "file_type": "4 printable ASCII characters, required",
+                    "filename": "printable ASCII, default ''",
+                },
+                "example": {"type": "file_dump", "command": "request", "device_id": 1,
+                            "source_device_id": 2, "file_type": "MIDI",
+                            "filename": "song.mid"},
+            },
+            **{name: {
+                "summary": f"{label} handshake ({code:02X}).",
+                "fields": {"packet_number": (
+                    "0-127, required" if name in ("ack", "nak")
+                    else "0-127, default 0 (receivers ignore it)")},
+                "example": {"type": "file_dump", "command": name, "device_id": 1,
+                            "packet_number": 0},
+            } for name, label, code in (
+                ("eof", "End of File", 0x7B), ("wait", "Wait", 0x7C),
+                ("cancel", "Cancel", 0x7D), ("nak", "NAK (resend this packet)", 0x7E),
+                ("ack", "ACK (packet received)", 0x7F))},
         },
     },
 }
