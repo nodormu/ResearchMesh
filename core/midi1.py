@@ -1983,9 +1983,19 @@ def _each(field: str, entries, encode) -> tuple:
 
 
 def _mmc_locate(message: dict, command: str) -> tuple:
-    # LOCATE [TARGET] (44h, RP-013 p.28): 01 then Standard Time Code with
-    # subframes. LOCATE [I/F] (sub-command 00, locate to a GP register)
-    # isn't implemented.
+    # LOCATE (44h, RP-013 p.28):
+    #   [I/F]    00 <name>: locate to the time held in register GP0-GP7
+    #            ('name').
+    #   [TARGET] 01 then Standard Time Code with subframes (the time fields).
+    time_fields = ("hours", "minutes", "seconds", "frames", "subframes", "frame_rate")
+    if message.get("name") is not None:
+        if any(message.get(field) is not None for field in time_fields):
+            raise ValueError(
+                "give 'name' (LOCATE [I/F]) or the time fields (LOCATE [TARGET]), "
+                "not both"
+            )
+        name = _choice(message, "name", _MMC_GP_REGISTERS, command)
+        return (0x00, _INFO_FIELD_NAMES[name])
     return (0x01, *_time_code_bytes(message, "subframes"))
 
 
@@ -2525,15 +2535,36 @@ def _build_message(message: dict) -> "mido.Message":
         flags = _check_range("flags", message.get("flags", 0), 0, 3)
         return _sysex(0x7F, device_id, 0x01, 0x02, *groups, flags, time=time)
     if msg_type == "mmc":
-        # MIDI Machine Control (RP-013); see _mmc_command_bytes. Device
+        # MIDI Machine Control (RP-013); see _mmc_command_bytes. 'command'
+        # sends one command; 'batch' (a list of command dicts) sends
+        # several in one SysEx (RP-013 p.7). ('commands' is PROCEDURE's own
+        # nested list.) The command string can't exceed
+        # 48 bytes, and WAIT/RESUME must be alone in their message. Device
         # replies are decoded by the decode_mmc_response action.
-        command = _choice(message, "command", _COMMANDS["mmc"], "mmc")
+        if message.get("batch") is not None:
+            if message.get("command") is not None:
+                raise ValueError("specify only ONE of 'command' or 'batch', not both")
+            entries = _required_list(message, "batch", "mmc")
+            for entry in entries:
+                if entry.get("type", "mmc") != "mmc":
+                    raise ValueError(f"'batch' entries must be mmc commands, got {entry!r}")
+            names = [_choice(entry, "command", _COMMANDS["mmc"], "mmc") for entry in entries]
+            alone = sorted({"wait", "resume"} & set(names))
+            if alone and len(entries) > 1:
+                raise ValueError(f"{alone} must be the only command in its message (RP-013 p.42)")
+            command_string = [b for entry in entries for b in _mmc_command_bytes(entry)]
+        else:
+            names = [_choice(message, "command", _COMMANDS["mmc"], "mmc")]
+            command_string = list(_mmc_command_bytes(message))
         device_id = _device_id(message)
-        if command in _MMC_ALL_CALL:
+        if set(names) & _MMC_ALL_CALL:
             device_id = 0x7F
-        return _sysex(
-            0x7F, device_id, 0x06, *_mmc_command_bytes(message), time=time,
-        )
+        if len(command_string) > 48:
+            raise ValueError(
+                f"the MMC command string is {len(command_string)} bytes; RP-013 "
+                f"allows at most 48 per message"
+            )
+        return _sysex(0x7F, device_id, 0x06, *command_string, time=time)
     if msg_type == "msc":
         # MIDI Show Control (RP-002/014); see _MSC_DATA_BUILDERS: the 11
         # General Category commands, the 15 Sound Commands and the 7
@@ -3617,9 +3648,13 @@ def _decode_speed(data) -> dict:
 
 
 def _decode_mmc_locate(data) -> dict:
-    # Only LOCATE [TARGET] (sub-command 01) is implemented.
+    # [I/F] 00 <name>, or [TARGET] 01 + Standard Time Code.
+    if data[0] == 0x00:
+        if len(data) != 2:
+            raise ValueError("LOCATE [I/F] is 00 <name>")
+        return {"name": _info_field_name(data[1])}
     if data[0] != 0x01:
-        raise ValueError("only LOCATE [TARGET] is decoded")
+        raise ValueError("LOCATE sub-command must be 00 or 01")
     return _decode_time_code(*data[1:6], subframe_field="subframes")
 
 
@@ -3723,11 +3758,12 @@ def _mmc_parse_commands(body) -> list:
 
 
 def _decode_mmc(data: tuple) -> dict:
-    # One command per message; a SysEx carrying several MMC commands (which
-    # RP-013 allows) doesn't rebuild and stays raw.
+    # One command decodes to the 'command' form; several to 'batch'.
     commands = _mmc_parse_commands(data[3:])
-    if len(commands) != 1:
-        raise ValueError("not exactly one MMC command")
+    if not commands:
+        raise ValueError("no MMC command")
+    if len(commands) > 1:
+        return {"type": "mmc", "device_id": data[1], "batch": commands}
     command = commands[0]
     return {"type": "mmc", "command": command["command"], "device_id": data[1],
             **{k: v for k, v in command.items() if k not in ("type", "command")}}

@@ -207,10 +207,22 @@
   "err: mmc bad command": {
    "error": "ValueError"
   },
+  "err: mmc command and batch": {
+   "error": "ValueError"
+  },
+  "err: mmc command string over 48 bytes": {
+   "error": "ValueError"
+  },
   "err: mmc device_id 128": {
    "error": "ValueError"
   },
   "err: mmc group assign 7F": {
+   "error": "ValueError"
+  },
+  "err: mmc locate i/f non-GP field": {
+   "error": "ValueError"
+  },
+  "err: mmc locate name and time": {
    "error": "ValueError"
   },
   "err: mmc masked_write time code field": {
@@ -229,6 +241,9 @@
    "error": "ValueError"
   },
   "err: mmc update begin all": {
+   "error": "ValueError"
+  },
+  "err: mmc wait with other commands": {
    "error": "ValueError"
   },
   "err: mmc write read-only field": {
@@ -621,6 +636,12 @@
     0
    ]
   ],
+  "mmc locate i/f": [
+   [
+    "F0 7F 7F 06 44 02 00 0B F7",
+    0
+   ]
+  ],
   "mmc masked_write": [
    [
     "F0 7F 7F 06 41 08 62 00 7F 15 4F 02 01 01 F7",
@@ -762,6 +783,18 @@
   "mmc search speed 100.25": [
    [
     "F0 7F 7F 06 46 03 26 22 00 F7",
+    0
+   ]
+  ],
+  "mmc several commands": [
+   [
+    "F0 7F 05 06 01 44 06 01 21 25 34 10 00 02 F7",
+    0
+   ]
+  ],
+  "mmc several commands with all-call": [
+   [
+    "F0 7F 7F 06 49 01 02 0B F7",
     0
    ]
   ],

@@ -401,6 +401,21 @@ CASES: list[tuple[str, dict]] = [
                                               "checksum": 0, "status": "checksum_error", "sequence_number": 1}),
     ("err: msc cue_data 3 values", {"type": "msc", "command_format": "sound", "command": "go_2pc", "checksum": 0,
                                     "sequence_number": 1, "cue_data": [0, 0, 0], "q_number": "1"}),
+    # MMC LOCATE [I/F] and several commands per message (step 6f-1)
+    ("mmc locate i/f", {"type": "mmc", "command": "locate", "name": "gp3"}),
+    ("mmc several commands", {"type": "mmc", "device_id": 5, "batch": [
+        {"command": "stop"},
+        {"command": "locate", **TC, "subframes": 0, "frame_rate": "25"},
+        {"command": "play"}]}),
+    ("mmc several commands with all-call", {"type": "mmc", "device_id": 5, "batch": [
+        {"command": "assign_system_master", "target_device_id": 2}, {"command": "chase"}]}),
+    ("err: mmc locate name and time", {"type": "mmc", "command": "locate", "name": "gp1", **TC,
+                                       "subframes": 0, "frame_rate": "25"}),
+    ("err: mmc locate i/f non-GP field", {"type": "mmc", "command": "locate", "name": "selected_time_code"}),
+    ("err: mmc wait with other commands", {"type": "mmc", "batch": [{"command": "wait"}, {"command": "stop"}]}),
+    ("err: mmc command and batch", {"type": "mmc", "command": "stop", "batch": [{"command": "play"}]}),
+    ("err: mmc command string over 48 bytes", {"type": "mmc", "batch": [
+        {"command": "locate", **TC, "subframes": 0, "frame_rate": "25"}] * 7}),
     # Errors
     ("err: unknown type", {"type": "bogus"}),
     ("err: missing type", {}),
