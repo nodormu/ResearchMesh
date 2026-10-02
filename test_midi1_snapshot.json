@@ -930,6 +930,12 @@
     0
    ]
   ],
+  "mmc write generator_userbits": [
+   [
+    "F0 7F 7F 06 40 0B 5D 09 0C 04 05 04 05 04 02 05 01 F7",
+    0
+   ]
+  ],
   "mmc write time code and byte field": [
    [
     "F0 7F 7F 06 40 09 09 01 25 34 10 00 4C 01 04 F7",
@@ -1944,6 +1950,36 @@
   ]
  },
  "mmc_responses": {
+  "command_error power-up state": {
+   "device_id": 1,
+   "error": "no_errors",
+   "error_halt": false,
+   "event_define_error": false,
+   "level": 0,
+   "name": "command_error",
+   "previously_transmitted": false,
+   "procedure_assemble_error": false,
+   "status": "ok",
+   "type": "field_value",
+   "unsolicited": false
+  },
+  "command_error with command": {
+   "command_bytes": [
+    70
+   ],
+   "device_id": 1,
+   "error": "unsupported_command",
+   "error_halt": true,
+   "event_define_error": false,
+   "level": 127,
+   "name": "command_error",
+   "offset": 0,
+   "previously_transmitted": false,
+   "procedure_assemble_error": false,
+   "status": "ok",
+   "type": "field_value",
+   "unsolicited": true
+  },
   "err bitmap count mismatch": {
    "error": "field 0x62 (track_mute) needs 3 data byte(s), got 1"
   },
@@ -2013,6 +2049,130 @@
     "record_mode"
    ]
   },
+  "rp013 appendix signature": {
+   "command_bitmaps": [
+    127,
+    113,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    61,
+    96,
+    127,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    9
+   ],
+   "commands": [
+    "extension",
+    "stop",
+    "play",
+    "deferred_play",
+    "fast_forward",
+    "rewind",
+    "record_strobe",
+    "record_exit",
+    "chase",
+    "command_error_reset",
+    "mmc_reset",
+    "write",
+    "read",
+    "update",
+    "locate",
+    "variable_play",
+    "move",
+    "add",
+    "subtract",
+    "drop_frame_adjust",
+    "procedure",
+    "event",
+    "group",
+    "0x53",
+    "deferred_variable_play",
+    "wait",
+    "resume"
+   ],
+   "device_id": 1,
+   "extended_commands": [],
+   "extended_fields": [],
+   "field_bitmaps": [
+    62,
+    30,
+    0,
+    0,
+    0,
+    62,
+    30,
+    0,
+    0,
+    0,
+    63,
+    98,
+    0,
+    56,
+    0,
+    51,
+    0,
+    0,
+    0,
+    9
+   ],
+   "fields": [
+    "selected_time_code",
+    "selected_master_code",
+    "requested_offset",
+    "actual_offset",
+    "lock_deviation",
+    "gp0",
+    "gp1",
+    "gp2",
+    "gp3",
+    "short_selected_time_code",
+    "short_selected_master_code",
+    "short_requested_offset",
+    "short_actual_offset",
+    "short_lock_deviation",
+    "short_gp0",
+    "short_gp1",
+    "short_gp2",
+    "short_gp3",
+    "signature",
+    "update_rate",
+    "response_error",
+    "command_error",
+    "command_error_level",
+    "time_standard",
+    "motion_control_tally",
+    "record_mode",
+    "record_status",
+    "control_disable",
+    "resolved_play_mode",
+    "chase_mode",
+    "procedure_response",
+    "event_response",
+    "response_segment",
+    "failure",
+    "wait",
+    "resume"
+   ],
+   "name": "signature",
+   "status": "ok",
+   "type": "field_value",
+   "version": "1.00",
+   "version_extension": [
+    0,
+    0
+   ]
+  },
   "rp013 master: short selected time code": {
    "device_id": 1,
    "estimated": false,
@@ -2047,11 +2207,10 @@
      "video_field_1": false
     },
     {
-     "data": [
-      2,
-      127,
-      1
-     ],
+     "motion_process": "none",
+     "motion_process_success": 0,
+     "motion_state": "play",
+     "motion_state_success": "requested_motion_achieved",
      "name": "motion_control_tally",
      "type": "field_value"
     }
@@ -2093,6 +2252,23 @@
    "subframes": 0,
    "type": "field_value",
    "use_status_byte": false
+  },
+  "selected_time_code_userbits": {
+   "binary_groups": [
+    12,
+    4,
+    5,
+    4,
+    5,
+    4,
+    2,
+    5
+   ],
+   "device_id": 1,
+   "flags": 1,
+   "name": "selected_time_code_userbits",
+   "status": "ok",
+   "type": "field_value"
   },
   "stop_mode enable": {
    "device_id": 1,
@@ -2164,6 +2340,14 @@
    "raw_name_byte": 16,
    "status": "ok",
    "type": "unknown"
+  },
+  "velocity_tally reverse half speed": {
+   "device_id": 1,
+   "name": "velocity_tally",
+   "reverse": true,
+   "speed": 0.5,
+   "status": "ok",
+   "type": "field_value"
   },
   "vitc_insert_enable": {
    "control": "enable",

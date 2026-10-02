@@ -444,6 +444,8 @@ CASES: list[tuple[str, dict]] = [
         {"name": "time_standard", "frame_rate": "25", "encoding": "sideways"}]}),
     ("err: mmc write track 318", {"type": "mmc", "command": "write",
                                   "fields": [{"name": "track_mute", "active_tracks": [318]}]}),
+    ("mmc write generator_userbits", {"type": "mmc", "command": "write", "fields": [
+        {"name": "generator_userbits", "characters": "REEL", "flags": 1}]}),
     # Errors
     ("err: unknown type", {"type": "bogus"}),
     ("err: missing type", {}),
@@ -523,6 +525,17 @@ MMC_RESPONSES: list[tuple[str, list[int]]] = [
     ("time_standard unshifted form", [0xF0, 0x7F, 0x01, 0x07, 0x45, 0x01, 0x03, 0xF7]),
     ("fixed_speed undefined code", [0xF0, 0x7F, 0x01, 0x07, 0x56, 0x01, 0x3E, 0xF7]),
     ("stop_mode wrong length", [0xF0, 0x7F, 0x01, 0x07, 0x4A, 0x02, 0x01, 0x01, 0xF7]),
+    # Step 6f-2b-2a: structured fields.
+    ("rp013 appendix signature", [0xF0, 0x7F, 0x01, 0x07, 0x40, 0x2E, 0x01, 0x00, 0x00, 0x00,
+                                  0x14, 0x7F, 0x71, 0, 0, 0, 0, 0, 0, 0, 0,
+                                  0x3D, 0x60, 0x7F, 0, 0, 0, 0, 0, 0, 0x09,
+                                  0x14, 0x3E, 0x1E, 0, 0, 0, 0x3E, 0x1E, 0, 0, 0,
+                                  0x3F, 0x62, 0x00, 0x38, 0x00, 0x33, 0, 0, 0, 0x09, 0xF7]),
+    ("command_error power-up state", [0xF0, 0x7F, 0x01, 0x07, 0x43, 0x04, 0x00, 0x00, 0x7F, 0x00, 0xF7]),
+    ("command_error with command", [0xF0, 0x7F, 0x01, 0x07, 0x43, 0x06, 0x11, 0x7F, 0x40, 0x02, 0x00, 0x46, 0xF7]),
+    ("velocity_tally reverse half speed", [0xF0, 0x7F, 0x01, 0x07, 0x49, 0x03, 0x40, 0x40, 0x00, 0xF7]),
+    ("selected_time_code_userbits", [0xF0, 0x7F, 0x01, 0x07, 0x47, 0x09, 0x0C, 0x04, 0x05, 0x04, 0x05,
+                                     0x04, 0x02, 0x05, 0x01, 0xF7]),
 ]
 
 META_CASES: list[tuple[str, dict]] = [
@@ -852,14 +865,44 @@ def check_mmc_response_examples(midi1) -> None:
               (tc["name"], tc["hours"], tc["minutes"], tc["seconds"], tc["frames"],
                tc["frame_rate"], tc["use_status_byte"])
               == ("selected_time_code", 0, 22, 5, 12, "30nondrop", True), f"{tc}")
-        check("RP-013 appendix: MOTION CONTROL TALLY data 02 7F 01",
-              (tally["name"], tally.get("data")) == ("motion_control_tally", [2, 0x7F, 1]),
-              f"{tally}")
     short = json.loads(midi1._decode_mmc_response({"data": dict(MMC_RESPONSES)[
         "rp013 master: short selected time code"]}))
     check("RP-013 appendix: Short SELECTED TIME CODE frame 13",
           (short.get("name"), short.get("frames"), short.get("use_status_byte"))
           == ("short_selected_time_code", 13, True), f"{short}")
+    check("RP-013 appendix: MOTION CONTROL TALLY 02 7F 01 is PLAY achieved, no process",
+          len(fields) == 2 and {k: fields[1].get(k) for k in (
+              "motion_state", "motion_state_success", "motion_process")}
+          == {"motion_state": "play", "motion_state_success": "requested_motion_achieved",
+              "motion_process": "none"}, f"{fields[1:] if fields else master}")
+    sig = json.loads(midi1._decode_mmc_response({"data": dict(MMC_RESPONSES)["rp013 appendix signature"]}))
+    listed_commands = {
+        "extension", "stop", "play", "deferred_play", "fast_forward", "rewind", "record_strobe",
+        "record_exit", "chase", "command_error_reset", "mmc_reset", "write", "read", "update",
+        "locate", "variable_play", "move", "add", "subtract", "drop_frame_adjust", "procedure",
+        "event", "group", "0x53", "deferred_variable_play", "wait", "resume"}
+    listed_fields = {
+        "selected_time_code", "selected_master_code", "requested_offset", "actual_offset",
+        "lock_deviation", "gp0", "gp1", "gp2", "gp3", "short_selected_time_code",
+        "short_selected_master_code", "short_requested_offset", "short_actual_offset",
+        "short_lock_deviation", "short_gp0", "short_gp1", "short_gp2", "short_gp3",
+        "signature", "update_rate", "response_error", "command_error", "command_error_level",
+        "time_standard", "motion_control_tally", "record_mode", "record_status",
+        "control_disable", "resolved_play_mode", "chase_mode", "procedure_response",
+        "event_response", "response_segment", "failure", "wait", "resume"}
+    check("RP-013 appendix SIGNATURE: version 1.00, commands as listed",
+          sig.get("version") == "1.00" and set(sig.get("commands", [])) == listed_commands,
+          f"extra {set(sig.get('commands', [])) - listed_commands}, "
+          f"missing {listed_commands - set(sig.get('commands', []))}")
+    check("RP-013 appendix SIGNATURE: fields as listed",
+          set(sig.get("fields", [])) == listed_fields,
+          f"extra {set(sig.get('fields', [])) - listed_fields}, "
+          f"missing {listed_fields - set(sig.get('fields', []))}")
+    power_up = json.loads(midi1._decode_mmc_response({"data": dict(MMC_RESPONSES)[
+        "command_error power-up state"]}))
+    check("RP-013 p.53: COMMAND ERROR power-up state 04 00 00 7F 00 is 'no_errors'",
+          (power_up.get("error"), power_up.get("error_halt"), power_up.get("level"))
+          == ("no_errors", False, 0), f"{power_up}")
     slave = json.loads(midi1._decode_mmc_response({"data": dict(MMC_RESPONSES)[
         "rp013 slave: selected time code"]}))
     check("RP-013 appendix: slave SELECTED TIME CODE 10:01:58:28",

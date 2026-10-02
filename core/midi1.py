@@ -1509,6 +1509,165 @@ _MMC_FIELD_CODECS = {
 }
 
 
+# MMC structured, mostly read-only fields (RP-013 section 6).
+
+def _mmc_code_names(codes, names: dict) -> list:
+    """Code numbers as names from a name -> code table, else "0xNN"."""
+    by_code = {v: k for k, v in names.items()}
+    return [by_code.get(code, f"0x{code:02X}") for code in codes]
+
+
+def _signature_bitmap_codes(bitmaps) -> tuple:
+    """Codes set in a SIGNATURE bitmap array (RP-013 p.48): each run of 20
+    bitmaps covers codes 00-7F in four 32-code blocks of 7, 7, 7, 7 and 4
+    bits; bitmaps 0-19 are the basic set, 20-39 the 00 xx extension set,
+    40-59 the 00 00 xx set. Returns (basic codes, extended codes as
+    "00 xx" / "00 00 xx" strings)."""
+    basic, extended = [], []
+    for index, byte in enumerate(bitmaps):
+        level, position = divmod(index, 20)
+        block, slot = divmod(position, 5)
+        base = 32 * block + 7 * slot
+        for bit in range(4 if slot == 4 else 7):
+            if byte >> bit & 1:
+                code = base + bit
+                if level == 0:
+                    basic.append(code)
+                else:
+                    extended.append(" ".join(["00"] * level + [f"{code:02X}"]))
+    return basic, extended
+
+
+def _decode_signature(data) -> dict:
+    vi, vf, va, vb, count_1 = data[0], data[1], data[2], data[3], data[4]
+    commands = data[5:5 + count_1]
+    count_2 = data[5 + count_1]
+    responses = data[6 + count_1:6 + count_1 + count_2]
+    if len(commands) != count_1 or len(responses) != count_2 or \
+            len(data) != 6 + count_1 + count_2:
+        raise ValueError("SIGNATURE counts don't match its data")
+    command_codes, extended_commands = _signature_bitmap_codes(commands)
+    field_codes, extended_fields = _signature_bitmap_codes(responses)
+    field_names = {**_INFO_FIELD_NAMES, **_MMC_RESPONSE_ONLY_NAMES,
+                   **_MMC_RESPONSE_HANDSHAKES, "extension": 0x00}
+    return {
+        "version": f"{vi}.{vf:02d}", "version_extension": [va, vb],
+        "commands": _mmc_code_names(command_codes, {**_COMMANDS["mmc"], "extension": 0x00}),
+        "fields": _mmc_code_names(field_codes, field_names),
+        "extended_commands": extended_commands, "extended_fields": extended_fields,
+        "command_bitmaps": list(commands), "field_bitmaps": list(responses),
+    }
+
+
+# COMMAND ERROR codes (RP-013 pp.52-53).
+_MMC_ERROR_CODES = {
+    "receive_buffer_overflow": 0x01, "sysex_length_error": 0x02,
+    "command_count_error": 0x03, "write_field_count_error": 0x04,
+    "illegal_group_name": 0x05, "illegal_procedure_name": 0x06,
+    "illegal_event_name": 0x07, "illegal_name_extension": 0x08,
+    "segmentation_error": 0x09,
+    "update_list_overflow": 0x20, "group_buffer_overflow": 0x21,
+    "undefined_procedure": 0x22, "procedure_buffer_overflow": 0x23,
+    "undefined_event": 0x24, "event_buffer_overflow": 0x25,
+    "blank_time_code": 0x26,
+    "unsupported_command": 0x40, "unrecognized_sub_command": 0x41,
+    "unrecognized_command_data": 0x42, "unsupported_field_in_command": 0x43,
+    "unsupported_field_in_procedure_read": 0x44,
+    "event_trigger_source_unavailable": 0x45, "nested_procedure_assemble": 0x46,
+    "recursive_procedure_execute": 0x47, "nested_event_define": 0x48,
+    "procedure_assemble_in_event_define": 0x49,
+    "write_to_unsupported_field": 0x60, "write_to_read_only_field": 0x61,
+    "unrecognized_write_data": 0x62, "unsupported_field_in_write_data": 0x63,
+    "no_errors": 0x7F,
+}
+
+
+def _decode_command_error(data) -> dict:
+    """COMMAND ERROR (RP-013 p.51): flags, level, error, then <count_1>
+    <offset> <command string> (the command that caused the error)."""
+    flags, level, error, count_1 = data[0], data[1], data[2], data[3]
+    rest = data[4:]
+    if len(rest) != count_1:
+        raise ValueError("COMMAND ERROR count_1 doesn't match its data")
+    out = {
+        "error_halt": bool(flags & 0x01), "procedure_assemble_error": bool(flags & 0x02),
+        "event_define_error": bool(flags & 0x04), "unsolicited": bool(flags & 0x10),
+        "previously_transmitted": bool(flags & 0x20), "level": level,
+        "error": _value_name(_MMC_ERROR_CODES, error),
+    }
+    if count_1:
+        out["offset"] = "unavailable" if rest[0] == 0x7F else rest[0]
+        out["command_bytes"] = list(rest[1:])
+    return out
+
+
+# MOTION CONTROL TALLY (RP-013 pp.56-57): the most recent Motion Control State
+# command and Motion Control Process, and a success level for each.
+_MMC_MOTION_STATES = ("stop", "play", "fast_forward", "rewind", "pause", "eject",
+                      "variable_play", "search", "shuttle", "step")
+_MMC_MCS_SUCCESS = {
+    "stop": {0: "in_transition", 1: "completely_stopped", 2: "failure", 3: "deduced_motion"},
+    "play": {0: "in_transition", 1: "requested_motion_achieved", 2: "failure",
+             3: "deduced_motion", 5: "playing_not_resolved"},
+    "fast_forward": {0: "in_transition", 1: "requested_motion_achieved", 2: "failure",
+                     3: "deduced_motion"},
+    "rewind": {0: "in_transition", 1: "requested_motion_achieved", 2: "failure",
+               3: "deduced_motion"},
+    "pause": {0: "in_transition", 1: "completely_stopped", 2: "failure"},
+    "eject": {0: "in_transition", 1: "media_ejected", 2: "failure"},
+    "variable_play": {0: "in_transition", 1: "requested_motion_achieved", 2: "failure"},
+    "search": {0: "in_transition", 1: "requested_motion_achieved", 2: "failure"},
+    "shuttle": {0: "in_transition", 1: "requested_motion_achieved", 2: "failure"},
+    "step": {0: "in_transition", 1: "step_completed", 2: "failure", 4: "step_in_progress"},
+}
+_MMC_MCP_SUCCESS = {
+    "locate": {0: "locating", 1: "locate_complete", 2: "failure",
+               4: "locating_deferred_play_pending",
+               6: "locating_deferred_variable_play_pending"},
+    "chase": {0: "synchronizing", 1: "synchronized", 2: "failure",
+              4: "chasing_not_in_play", 6: "parked"},
+}
+
+
+def _decode_motion_control_tally(data) -> dict:
+    state_code, process_code, levels = data[0], data[1], data[2]
+    state = _value_name(_COMMANDS["mmc"], state_code)
+    process = "none" if process_code == 0x7F else _value_name(_COMMANDS["mmc"], process_code)
+    state_level, process_level = levels & 0x07, (levels >> 4) & 0x07
+    out = {
+        "motion_state": state,
+        "motion_state_success": _MMC_MCS_SUCCESS.get(state, {}).get(state_level, state_level),
+        "motion_process": process,
+        "motion_process_success": _MMC_MCP_SUCCESS.get(process, {}).get(process_level,
+                                                                         process_level),
+    }
+    if len(data) > 3:
+        out["extension"] = list(data[3:])
+    return out
+
+
+def _decode_user_bits_field(data) -> dict:
+    if len(data) != 9:
+        raise ValueError("userbits fields have 9 bytes")
+    return {"binary_groups": list(data[:8]), "flags": data[8]}
+
+
+def _encode_user_bits_field(entry: dict) -> tuple:
+    """Standard Userbits (RP-013 section 3, the MTC User Bits u1-u9 layout):
+    'binary_groups' or 'characters', plus 'flags' (_user_bit_groups)."""
+    return (*_user_bit_groups(entry), _check_range("flags", entry.get("flags", 0), 0, 3))
+
+
+_MMC_FIELD_CODECS.update({
+    "signature": (None, _decode_signature),
+    "command_error": (None, _decode_command_error),
+    "motion_control_tally": (None, _decode_motion_control_tally),
+    "velocity_tally": (None, lambda data: _decode_speed(data)),  # defined further down
+    "selected_time_code_userbits": (None, _decode_user_bits_field),
+    "generator_userbits": (_encode_user_bits_field, _decode_user_bits_field),
+})
+
+
 def _mmc_response_field(name_byte: int, payload: list) -> dict:
     """One field of an MMC response, given its name byte and data (the
     count byte already removed)."""
