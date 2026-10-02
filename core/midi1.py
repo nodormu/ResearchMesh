@@ -161,6 +161,12 @@ _COMMANDS: dict = {
         "cue_point": 0x0B, "cue_point_with_info": 0x0C,
         "delete_cue_point": 0x0D, "event_name": 0x0E,
     },
+    # Sample Dump Standard: the sub-ID#1 (01-03), or 05 plus sub-ID#2 for
+    # the Sample Dump Extensions. Its handshakes are the file_dump ones.
+    "sample_dump": {
+        "header": (0x01,), "data_packet": (0x02,), "request": (0x03,),
+        "loop_points": (0x05, 0x01), "loop_points_request": (0x05, 0x02),
+    },
     # File Dump 07 <code>, plus the handshakes.
     "file_dump": {
         "header": 0x01, "data_packet": 0x02, "request": 0x03,
@@ -549,7 +555,8 @@ TOOLS = [
                                 "device_control", "controller_destination",
                                 "key_based_instrument_control",
                                 "midi_tuning", "notation",
-                                "mtc_cueing", "mtc_cueing_nrt", "file_dump",
+                                "mtc_cueing", "mtc_cueing_nrt", "sample_dump",
+                                "file_dump",
                                 # Several wire messages each; 'sent' is a list
                                 "rpn", "nrpn", "mtc_quarter_frame_sequence",
                             ],
@@ -1831,6 +1838,96 @@ _TUNING_PAYLOADS = {
 }
 
 
+# --- Sample Dump Standard (MIDI 1.0 Detailed Spec pp.35-39) --------------------
+# Numbers are LSB first in 7-bit bytes (14 or 21 bits). Data packets carry
+# 120 bytes of sample words, MSB first and left-justified: 2 bytes per word
+# for 8-14 bit formats, 3 for 15-21, 4 for 22-28 (spec example: the 12-bit
+# word FFFH is 7F 7C). Handshakes (ACK, NAK, WAIT, CANCEL, EOF) are the
+# generic ones built by file_dump.
+
+_SAMPLE_LOOP_TYPES = {"forward": 0x00, "bidirectional": 0x01, "off": 0x7F}
+_SAMPLE_PACKET_BYTES = 120
+
+
+def _split21(field: str, value: int) -> tuple:
+    """A 0-2097151 value as three 7-bit bytes, LSB first."""
+    _check_range(field, value, 0, 0x1FFFFF)
+    return value & 0x7F, (value >> 7) & 0x7F, (value >> 14) & 0x7F
+
+
+def _join21(b0: int, b1: int, b2: int) -> int:
+    return b0 | (b1 << 7) | (b2 << 14)
+
+
+def _sample_bytes_per_word(sample_format: int) -> int:
+    _check_range("sample_format", sample_format, 8, 28)
+    return 2 if sample_format <= 14 else 3 if sample_format <= 21 else 4
+
+
+def _pack_sample_words(words, sample_format: int) -> list:
+    """Sample words (0 = full negative, all ones = full positive) as packet
+    bytes: MSB first, left-justified, unused low bits 0."""
+    per_word = _sample_bytes_per_word(sample_format)
+    shift = 7 * per_word - sample_format
+    out: list = []
+    for word in words:
+        value = _check_range("words entry", word, 0, (1 << sample_format) - 1) << shift
+        out += [(value >> (7 * (per_word - 1 - i))) & 0x7F for i in range(per_word)]
+    if len(out) > _SAMPLE_PACKET_BYTES:
+        raise ValueError(
+            f"at most {_SAMPLE_PACKET_BYTES // per_word} words fit in a packet for "
+            f"a {sample_format}-bit format, got {len(words)}"
+        )
+    return out
+
+
+def _sample_packet_data(message: dict) -> list:
+    """The 120 data bytes: 'data' (raw bytes) or 'words' with
+    'sample_format', zero-padded as the spec requires for the last packet."""
+    data, words = message.get("data"), message.get("words")
+    if data is not None and words is not None:
+        raise ValueError("specify only ONE of 'data' or 'words', not both")
+    if words is not None:
+        out = _pack_sample_words(words, _required(message, "sample_format", "words"))
+    else:
+        out = [_check_range("data entry", b, 0, 127)
+               for b in _required_list(message, "data", "data_packet")]
+        if len(out) > _SAMPLE_PACKET_BYTES:
+            raise ValueError(f"'data' holds at most 120 bytes, got {len(out)}")
+    return out + [0] * (_SAMPLE_PACKET_BYTES - len(out))
+
+
+def _sample_loop_number(message: dict) -> tuple:
+    """A loop number, or "all" (7F 7F: delete all / request all loops)."""
+    loop = _required(message, "loop_number")
+    return (0x7F, 0x7F) if loop == "all" else _split14("loop_number", loop)
+
+
+def _sample_dump_payload(message: dict, command: str) -> tuple:
+    sample = _split14("sample_number", _required(message, "sample_number", command))
+    if command == "request":
+        return sample
+    if command == "loop_points_request":
+        return (*sample, *_sample_loop_number(message))
+    if command == "loop_points":
+        return (
+            *sample, *_sample_loop_number(message),
+            _SAMPLE_LOOP_TYPES[_choice(message, "loop_type", _SAMPLE_LOOP_TYPES, command)],
+            *_split21("loop_start", _required(message, "loop_start", command)),
+            *_split21("loop_end", _required(message, "loop_end", command)),
+        )
+    # header
+    return (
+        *sample,
+        _check_range("sample_format", _required(message, "sample_format", command), 8, 28),
+        *_split21("sample_period", _required(message, "sample_period", command)),
+        *_split21("sample_length", _required(message, "sample_length", command)),
+        *_split21("sustain_loop_start", _required(message, "sustain_loop_start", command)),
+        *_split21("sustain_loop_end", _required(message, "sustain_loop_end", command)),
+        _SAMPLE_LOOP_TYPES[_choice(message, "loop_type", _SAMPLE_LOOP_TYPES, command)],
+    )
+
+
 # --- MIDI Machine Control (RP-013) -------------------------------------------
 # Every command is F0 7F <device_id> 06 <opcode> [<count> <data...>] F7.
 # _mmc_command_bytes builds <opcode> [<count> <data...>]. Commands that carry
@@ -2627,6 +2724,31 @@ def _build_message(message: dict) -> "mido.Message":
             *_cueing_event(message, command),
             time=time,
         )
+    if msg_type == "sample_dump":
+        # Sample Dump Standard (MIDI 1.0 Detailed Spec pp.35-39), Universal
+        # Non-Real Time:
+        #   header:      F0 7E <id> 01 ss ss ee ff ff ff gg gg gg hh hh hh
+        #                ii ii ii jj F7  (sample number, format 8-28 bits,
+        #                period ns, length words, sustain loop start/end,
+        #                loop type)
+        #   data_packet: F0 7E <id> 02 kk <120 bytes> ll F7  (ll = XOR of
+        #                every byte from 7E through the data)
+        #   request:     F0 7E <id> 03 ss ss F7
+        #   loop_points: F0 7E <id> 05 01 ss ss bb bb cc dd dd dd ee ee ee F7
+        #   loop_points_request: F0 7E <id> 05 02 ss ss bb bb F7
+        # loop_number "all" is 7F 7F (delete all / request all).
+        command = _choice(message, "command", _COMMANDS["sample_dump"], "sample_dump")
+        device_id = _device_id(message)
+        if command == "data_packet":
+            packet = _check_range(
+                "packet_number", _required(message, "packet_number"), 0, 127,
+            )
+            data = (0x7E, device_id, 0x02, packet, *_sample_packet_data(message))
+            return _sysex(*data, _xor_checksum(data), time=time)
+        return _sysex(
+            0x7E, device_id, *_COMMANDS["sample_dump"][command],
+            *_sample_dump_payload(message, command), time=time,
+        )
     if msg_type == "file_dump":
         # File Dump (Universal Non-Real Time, MIDI 1.0 Detailed Spec):
         #   request:     F0 7E <device_id> 07 03 ss <type> <name> F7
@@ -3067,6 +3189,54 @@ def _decode_handshake(data: tuple) -> dict:
             "device_id": device_id, "packet_number": packet_number}
 
 
+def _decode_sample_dump(data: tuple) -> dict:
+    device_id, sub_id1 = data[1], data[2]
+    if sub_id1 == 0x05:
+        key, payload = (0x05, data[3]), data[4:]
+    else:
+        key, payload = (sub_id1,), data[3:]
+    command = _name_for(_COMMANDS["sample_dump"], key)
+    out: dict = {"type": "sample_dump", "command": command, "device_id": device_id}
+    if command == "data_packet":
+        if len(payload) != 1 + _SAMPLE_PACKET_BYTES + 1:
+            raise ValueError("a data packet has 120 data bytes")
+        out.update(packet_number=payload[0], data=list(payload[1:-1]),
+                   checksum_ok=_checksum_ok(data))
+        return out
+    out["sample_number"] = _join14(payload[0], payload[1])
+    rest = payload[2:]
+
+    def loop_number(lsb: int, msb: int):
+        return "all" if (lsb, msb) == (0x7F, 0x7F) else _join14(lsb, msb)
+
+    if command == "request":
+        if rest:
+            raise ValueError("Dump Request has no data after the sample number")
+    elif command == "loop_points_request":
+        lsb, msb = rest
+        out["loop_number"] = loop_number(lsb, msb)
+    elif command == "loop_points":
+        b0, b1, cc, *addresses = rest
+        if len(addresses) != 6:
+            raise ValueError("Loop Point Transmission is 17 bytes")
+        out.update(
+            loop_number=loop_number(b0, b1),
+            loop_type=_name_for(_SAMPLE_LOOP_TYPES, cc),
+            loop_start=_join21(*addresses[:3]), loop_end=_join21(*addresses[3:]),
+        )
+    else:  # header
+        if len(rest) != 14:
+            raise ValueError("Dump Header is 21 bytes")
+        out.update(
+            sample_format=rest[0],
+            sample_period=_join21(*rest[1:4]), sample_length=_join21(*rest[4:7]),
+            sustain_loop_start=_join21(*rest[7:10]),
+            sustain_loop_end=_join21(*rest[10:13]),
+            loop_type=_name_for(_SAMPLE_LOOP_TYPES, rest[13]),
+        )
+    return out
+
+
 def _decode_file_dump(data: tuple) -> dict:
     device_id, code = data[1], data[3]
     command = _name_for(_COMMANDS["file_dump"], code)
@@ -3410,6 +3580,7 @@ _SYSEX_DECODERS = {
     (0x7F, 0x01): _decode_mtc,
     **{(0x7E, code): _decode_handshake for code in _FILE_DUMP_HANDSHAKE.values()},
     (0x7E, 0x07): _decode_file_dump,
+    **{(0x7E, sub_id1): _decode_sample_dump for sub_id1 in (0x01, 0x02, 0x03, 0x05)},
     (0x7E, 0x08): _decode_midi_tuning,
     (0x7F, 0x08): _decode_midi_tuning,
     (0x7F, 0x03): _decode_notation,

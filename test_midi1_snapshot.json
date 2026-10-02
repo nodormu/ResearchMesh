@@ -285,6 +285,18 @@
   "err: rpn msb_only value 128": {
    "error": "ValueError"
   },
+  "err: sample_dump bad loop_type": {
+   "error": "ValueError"
+  },
+  "err: sample_dump data and words": {
+   "error": "ValueError"
+  },
+  "err: sample_dump format 29": {
+   "error": "ValueError"
+  },
+  "err: sample_dump too many 8-bit words": {
+   "error": "ValueError"
+  },
   "err: scale_octave 11 offsets": {
    "error": "ValueError"
   },
@@ -1530,6 +1542,54 @@
    ],
    [
     "B1 26 2C",
+    0
+   ]
+  ],
+  "sample_dump data_packet raw data": [
+   [
+    "F0 7E 7F 02 09 00 07 0E 15 1C 23 2A 31 38 3F 46 4D 54 5B 62 69 70 77 7E 05 0C 13 1A 21 28 2F 36 3D 44 4B 52 59 60 67 6E 75 7C 03 0A 11 18 1F 26 2D 34 3B 42 49 50 57 5E 65 6C 73 7A 01 08 0F 16 1D 24 2B 32 39 40 47 4E 55 5C 63 6A 71 78 7F 06 0D 14 1B 22 29 30 37 3E 45 4C 53 5A 61 68 6F 76 7D 04 0B 12 19 20 27 2E 35 3C 43 4A 51 58 5F 66 6D 74 7B 02 09 10 17 1E 25 2C 33 3A 41 02 F7",
+    0
+   ]
+  ],
+  "sample_dump data_packet words 12-bit": [
+   [
+    "F0 7E 7F 02 00 7F 7C 00 00 40 00 09 0C 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 45 F7",
+    0
+   ]
+  ],
+  "sample_dump data_packet words 24-bit": [
+   [
+    "F0 7E 7F 02 7F 00 00 00 00 04 22 11 10 08 44 22 20 0C 66 33 30 11 08 44 40 15 2A 55 50 19 4C 66 60 1D 6E 77 70 22 11 09 00 26 33 1A 10 2A 55 2B 20 2E 77 3C 30 33 19 4D 40 37 3B 5E 50 3B 5D 6F 60 40 00 00 70 44 22 12 00 48 44 23 10 4C 66 34 20 51 08 45 30 55 2A 56 40 59 4C 67 50 5D 6E 78 60 62 11 09 70 66 33 1B 00 6A 55 2C 10 6E 77 3D 20 73 19 4E 30 77 3B 5F 40 7B 5D 70 50 3F F7",
+    0
+   ]
+  ],
+  "sample_dump header": [
+   [
+    "F0 7E 7F 01 2C 02 10 14 31 01 20 0D 06 68 07 00 38 05 06 00 F7",
+    0
+   ]
+  ],
+  "sample_dump loop_points": [
+   [
+    "F0 7E 7F 05 01 01 00 02 00 01 0A 00 00 20 1C 01 F7",
+    0
+   ]
+  ],
+  "sample_dump loop_points delete all": [
+   [
+    "F0 7E 7F 05 01 01 00 7F 7F 7F 00 00 00 00 00 00 F7",
+    0
+   ]
+  ],
+  "sample_dump loop_points_request all": [
+   [
+    "F0 7E 7F 05 02 7F 7F 7F 7F F7",
+    0
+   ]
+  ],
+  "sample_dump request": [
+   [
+    "F0 7E 01 03 05 00 F7",
     0
    ]
   ],
