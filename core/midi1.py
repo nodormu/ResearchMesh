@@ -1339,6 +1339,25 @@ def _cueing_event(message: dict, command: str) -> tuple:
     return (sl, sm, *info)
 
 
+def _decode_track_bitmap(bitmap) -> dict:
+    """Standard Track Bitmap (RP-013 section 3). Byte 0 is 0 g f e d c b a:
+    a = video, b reserved, c = time code track, d = aux track A, e = aux
+    track B, f = track 1, g = track 2. Byte n (n >= 1) holds tracks
+    7n-4 .. 7n+2 in bits 0-6."""
+    first = bitmap[0] if bitmap else 0
+    tracks = [t for t, bit in ((1, 5), (2, 6)) if first & (1 << bit)]
+    tracks += [
+        3 + 7 * (index - 1) + bit
+        for index, byte in enumerate(bitmap) if index >= 1
+        for bit in range(7) if byte & (1 << bit)
+    ]
+    return {
+        "video": bool(first & 0x01), "time_code_track": bool(first & 0x04),
+        "aux_track_a": bool(first & 0x08), "aux_track_b": bool(first & 0x10),
+        "active_tracks": tracks,
+    }
+
+
 def _mmc_response_field(name_byte: int, payload: list) -> dict:
     """One field of an MMC response, given its name byte and data (the
     count byte already removed)."""
@@ -1363,17 +1382,11 @@ def _mmc_response_field(name_byte: int, payload: list) -> dict:
     if name in _TRACK_BITMAP_INFO_FIELDS:
         # <count> <bitmap bytes...>. A device may leave out trailing zero
         # bytes; missing tracks are inactive. Returns the raw bytes (for
-        # masked_write) and the active track numbers (bit 0 of byte 0 is
-        # track 1).
+        # masked_write) and what they mean (_decode_track_bitmap).
         return {
             "type": "field_value", "name": name,
             "byte_count": len(payload), "bitmap_bytes": list(payload),
-            "active_tracks": [
-                byte_index * 7 + bit_index + 1
-                for byte_index, byte_value in enumerate(payload)
-                for bit_index in range(7)
-                if byte_value & (1 << bit_index)
-            ],
+            **_decode_track_bitmap(payload),
         }
     return {"type": "field_value", "name": name, "data": list(payload)}
 

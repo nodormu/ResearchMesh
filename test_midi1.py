@@ -793,6 +793,15 @@ def check_stream_decoder(midi1) -> None:
           feed(a[:5] + a[6:]) == [])
 
 
+def check_track_bitmap(midi1) -> None:
+    """RP-013 Standard Track Bitmap: byte 0 is video, reserved, time code,
+    aux A, aux B, track 1, track 2; byte 1 is tracks 3-9."""
+    got = midi1._decode_track_bitmap([0b1100101, 0b1000001, 0b0000001])
+    check("track bitmap: byte 0 flags and tracks 1-2, byte 1 tracks 3-9, byte 2 from 10",
+          got == {"video": True, "time_code_track": True, "aux_track_a": False,
+                  "aux_track_b": False, "active_tracks": [1, 2, 3, 9, 10]}, f"{got}")
+
+
 def check_mmc_response_examples(midi1) -> None:
     """RP-013's appendix responses, field by field."""
     master = json.loads(midi1._decode_mmc_response({"data": dict(MMC_RESPONSES)[
@@ -1016,6 +1025,7 @@ def main() -> int:
     check_round_trip(midi1)
     check_decode_edges(midi1)
     check_stream_decoder(midi1)
+    check_track_bitmap(midi1)
     check_mmc_response_examples(midi1)
     check_device_replies(midi1)
 
