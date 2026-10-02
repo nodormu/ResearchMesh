@@ -248,6 +248,38 @@ CASES: list[tuple[str, dict]] = [
       for c in ("ack", "nak")],
     *[(f"file_dump {c}", {"type": "file_dump", "command": c, "device_id": 1})
       for c in ("eof", "wait", "cancel")],
+    # GM2 / CA (step 6a)
+    ("gm_system gm2_on", {"type": "gm_system", "command": "gm2_on"}),
+    ("device_control master_fine_tuning", {"type": "device_control", "command": "master_fine_tuning", "value": 8192}),
+    ("device_control master_coarse_tuning", {"type": "device_control", "command": "master_coarse_tuning", "value": 70}),
+    ("device_control gpc reverb", {"type": "device_control", "command": "global_parameter_control",
+                                   "effect": "reverb", "parameters": [{"parameter": "type", "value": 4},
+                                                                      {"parameter": "time", "value": 64}]}),
+    ("device_control gpc chorus numeric", {"type": "device_control", "command": "global_parameter_control",
+                                           "effect": "chorus", "parameters": [{"parameter": 3, "value": 16},
+                                                                              {"parameter": "send_to_reverb", "value": 9}]}),
+    ("device_control gpc raw widths", {"type": "device_control", "command": "global_parameter_control",
+                                       "slot_path": [[1, 3], [2, 4]], "parameter_width": 2, "value_width": 3,
+                                       "parameters": [{"parameter": [0, 1], "value": [5, 6, 7]}]}),
+    ("controller_destination channel_pressure", {"type": "controller_destination", "command": "channel_pressure",
+                                                 "channel": 6, "destinations": [{"parameter": "pitch", "range": 0x42},
+                                                                                {"parameter": "filter_cutoff", "range": 0x60}]}),
+    ("controller_destination poly_pressure", {"type": "controller_destination", "command": "poly_pressure",
+                                              "destinations": [{"parameter": "amplitude", "range": 0x40}]}),
+    ("controller_destination control_change", {"type": "controller_destination", "command": "control_change",
+                                               "channel": 2, "control": 1, "destinations": [{"parameter": 0x05, "range": 0x20}]}),
+    ("key_based_instrument_control", {"type": "key_based_instrument_control", "channel": 9, "key": 38,
+                                      "controllers": [{"control": 7, "value": 0x50}, {"control": 0x78, "value": 0x40}]}),
+    ("rpn modulation_depth_range", {"type": "rpn", "parameter": "modulation_depth_range", "value": 0x0040}),
+    ("rpn null", {"type": "rpn", "parameter": "null", "channel": 3}),
+    ("err: controller_destination control 0x30", {"type": "controller_destination", "command": "control_change",
+                                                  "control": 0x30, "destinations": [{"parameter": 0, "range": 1}]}),
+    ("err: key_based control data entry", {"type": "key_based_instrument_control", "key": 1,
+                                           "controllers": [{"control": 6, "value": 1}]}),
+    ("err: gpc effect and slot_path", {"type": "device_control", "command": "global_parameter_control",
+                                       "effect": "reverb", "slot_path": [[1, 1]], "parameters": [{"parameter": 0, "value": 1}]}),
+    ("err: gpc value width mismatch", {"type": "device_control", "command": "global_parameter_control",
+                                       "slot_path": [[1, 1]], "value_width": 2, "parameters": [{"parameter": 0, "value": [1]}]}),
     # Errors
     ("err: unknown type", {"type": "bogus"}),
     ("err: missing type", {}),
@@ -390,6 +422,19 @@ SPEC_EXAMPLES: list[tuple[str, dict, list[str]]] = [
     ("MIDI Tuning 'Changing Tuning Programs' Bn 64 03 65 00 06 tt",
      {"type": "rpn", "parameter": "tuning_program_select", "value": 5, "msb_only": True},
      ["B0 64 03", "B0 65 00", "B0 06 05"]),
+    ("CA-022 example: channel pressure -> pitch +2, cutoff +4800, LFO amp 25%",
+     {"type": "controller_destination", "command": "channel_pressure", "channel": 6,
+      "destinations": [{"parameter": "pitch", "range": 0x42},
+                       {"parameter": "filter_cutoff", "range": 0x60},
+                       {"parameter": "lfo_amplitude_depth", "range": 0x20}]},
+     ["F0 7F 7F 09 01 06 00 42 01 60 05 20 F7"]),
+    ("CA-026 Modulation Depth Range: Bn 64 05 65 00",
+     {"type": "rpn", "parameter": "modulation_depth_range", "value": 3, "msb_only": True},
+     ["B0 64 05", "B0 65 00", "B0 06 03"]),
+    ("GM2 4.4 reverb: F0 7F <id> 04 05 01 01 01 01 01 pp vv",
+     {"type": "device_control", "command": "global_parameter_control", "effect": "reverb",
+      "parameters": [{"parameter": "type", "value": 4}]},
+     ["F0 7F 7F 04 05 01 01 01 01 01 00 04 F7"]),
     # Captured from real hardware, not printed in a spec.
     ("Roland TR-8S Identity Reply (captured 2026-10-02)",
      {"type": "device_inquiry", "command": "reply", "device_id": 0x10,
@@ -560,8 +605,9 @@ def check_stream_decoder(midi1) -> None:
           [(c["channel"], c["parameter_number"], c["value"]) for c in got]
           == [(0, (1 << 7) | 2, 9), (1, (3 << 7) | 4, 10)], f"{got}")
 
-    check("stream: RPN Null ignores data entry",
-          feed([cc(101, 127), cc(100, 127), cc(6, 5)]) == [])
+    check("stream: RPN Null is reported and the data entry after it ignored",
+          feed([cc(101, 127), cc(100, 127), cc(6, 5)])
+          == [{"type": "rpn", "channel": 0, "parameter": "null"}])
     check("stream: Data Entry LSB with no MSB is ignored",
           feed([cc(99, 1), cc(98, 2), cc(38, 5)]) == [])
 
@@ -592,15 +638,10 @@ def check_device_replies(midi1) -> None:
 
 # --- Schema consistency ---------------------------------------------------------
 
-COMMAND_TYPES = ("mmc", "msc", "gm_system", "device_inquiry", "device_control",
-                 "channel_mode", "midi_tuning", "notation", "mtc_cueing",
-                 "mtc_cueing_nrt", "file_dump")
-
-
 def check_schema(midi1) -> None:
     props = midi1.TOOLS[0]["input_schema"]["properties"]["message"]["properties"]
     accepted: set = set()
-    for t in COMMAND_TYPES:
+    for t in midi1._COMMANDS:
         msg = {"type": t, "command": "__bogus__", "device_id": 1,
                "command_format": "lighting", "tuning_program": 0, "value": 0}
         try:

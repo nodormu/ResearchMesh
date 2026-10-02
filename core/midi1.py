@@ -109,12 +109,21 @@ _COMMANDS: dict = {
         "load": 0x05, "set": 0x06, "fire": 0x07, "all_off": 0x08,
         "restore": 0x09, "reset": 0x0A, "go_off": 0x0B,
     },
-    # Universal Non-Real Time 09 <code>.
-    "gm_system": {"on": 0x01, "off": 0x02},
+    # Universal Non-Real Time 09 <code>. on = GM1 System On; gm2_on = GM2
+    # System On (GM2 4.9.1).
+    "gm_system": {"on": 0x01, "off": 0x02, "gm2_on": 0x03},
     # Universal Non-Real Time 06 <code>.
     "device_inquiry": {"request": 0x01, "reply": 0x02},
-    # Universal Real Time 04 <code>.
-    "device_control": {"master_volume": 0x01, "master_balance": 0x02},
+    # Universal Real Time 04 <code> (MIDI 1.0 Detailed Spec; CA-025; GM2 4.4).
+    "device_control": {
+        "master_volume": 0x01, "master_balance": 0x02,
+        "master_fine_tuning": 0x03, "master_coarse_tuning": 0x04,
+        "global_parameter_control": 0x05,
+    },
+    # Controller Destination Setting, Universal Real Time 09 <code> (CA-022).
+    "controller_destination": {
+        "channel_pressure": 0x01, "poly_pressure": 0x02, "control_change": 0x03,
+    },
     # Control Change controller numbers.
     "channel_mode": {
         "all_sound_off": 120, "reset_all_controllers": 121,
@@ -534,7 +543,9 @@ TOOLS = [
                                 "sysex",
                                 "mtc_full", "mtc_nak", "mmc", "msc",
                                 "gm_system", "device_inquiry",
-                                "device_control", "midi_tuning", "notation",
+                                "device_control", "controller_destination",
+                                "key_based_instrument_control",
+                                "midi_tuning", "notation",
                                 "mtc_cueing", "mtc_cueing_nrt", "file_dump",
                                 # Several wire messages each; 'sent' is a list
                                 "rpn", "nrpn", "mtc_quarter_frame_sequence",
@@ -1565,6 +1576,95 @@ def _required_list(message: dict, field: str, context: str) -> list:
     return list(value)
 
 
+# --- GM2 and CA Universal SysEx ---------------------------------------------------
+
+# Global Parameter Control slot paths and GM2's parameter numbers (GM2 4.4-4.5).
+_GPC_EFFECTS = {"reverb": (0x01, 0x01), "chorus": (0x01, 0x02)}
+_GPC_PARAMETERS = {
+    "reverb": {"type": 0, "time": 1},
+    "chorus": {"type": 0, "mod_rate": 1, "mod_depth": 2, "feedback": 3,
+               "send_to_reverb": 4},
+}
+
+# Controller Destination controlled parameters (CA-022).
+_CONTROLLER_DESTINATIONS = {
+    "pitch": 0x00, "filter_cutoff": 0x01, "amplitude": 0x02,
+    "lfo_pitch_depth": 0x03, "lfo_filter_depth": 0x04,
+    "lfo_amplitude_depth": 0x05,
+}
+
+# Controllers Key-Based Instrument Control can't use (CA-023): Bank Select,
+# Data Entry, the RPN/NRPN and increment/decrement controllers, and the mode
+# messages 7A-7F. 78 and 79 are allowed; there they mean Fine/Coarse Tuning.
+_KEY_BASED_EXCLUDED_CONTROLS = frozenset(
+    {0x00, 0x20, 0x06, 0x26, *range(0x60, 0x66), *range(0x7A, 0x80)}
+)
+
+
+def _named_or_number(entry: dict, field: str, names: dict, context: str) -> int:
+    """A field given either as a name from `names` or as a 0-127 number."""
+    value = _required(entry, field, context)
+    if isinstance(value, str):
+        return names[_choice(entry, field, names, context)]
+    return _check_range(field, value, 0, 127)
+
+
+def _gpc_field(entry: dict, field: str, width: int, names: dict) -> list:
+    """One Global Parameter Control parameter or value: an int (or, for a
+    parameter, a name) when the width is 1, else a list of `width` raw bytes
+    in wire order."""
+    value = _required(entry, field, "parameters")
+    if isinstance(value, list):
+        if len(value) != width:
+            raise ValueError(f"'{field}' must have {width} bytes, got {value!r}")
+        return [_check_range(f"{field} byte", b, 0, 127) for b in value]
+    if width != 1:
+        raise ValueError(f"'{field}' must be a list of {width} bytes, got {value!r}")
+    return [_named_or_number(entry, field, names, "parameters")
+            if field == "parameter" else _check_range(field, value, 0, 127)]
+
+
+def _gpc_data(message: dict) -> tuple:
+    """Global Parameter Control (GM2 4.4-4.5): sw pw vw <slot path>
+    [<parameter> <value>]... 'effect' ("reverb" or "chorus") sets the slot
+    path and allows GM2 parameter names; otherwise 'slot_path' is a list of
+    [msb, lsb] pairs. Widths above 1 take raw byte lists."""
+    if message.get("effect") is not None and message.get("slot_path") is not None:
+        raise ValueError("specify only ONE of 'effect' or 'slot_path', not both")
+    effect = None
+    if message.get("effect") is not None:
+        effect = _choice(message, "effect", _GPC_EFFECTS, "global_parameter_control")
+        slot_path = [_GPC_EFFECTS[effect]]
+    else:
+        slot_path = _required_list(message, "slot_path", "global_parameter_control")
+    parameter_width = _check_range(
+        "parameter_width", message.get("parameter_width", 1), 1, 127,
+    )
+    value_width = _check_range("value_width", message.get("value_width", 1), 1, 127)
+    data = [len(slot_path), parameter_width, value_width]
+    for slot in slot_path:
+        if len(slot) != 2:
+            raise ValueError(f"each 'slot_path' entry must be [msb, lsb], got {slot!r}")
+        data += [_check_range("slot_path byte", b, 0, 127) for b in slot]
+    names = _GPC_PARAMETERS.get(effect, {})
+    data += _each("parameters", _required_list(message, "parameters", "global_parameter_control"),
+                  lambda entry: (
+                      *_gpc_field(entry, "parameter", parameter_width, names),
+                      *_gpc_field(entry, "value", value_width, names),
+                  ))
+    return tuple(data)
+
+
+def _key_based_pair(entry: dict) -> tuple:
+    control = _check_range("control", _required(entry, "control"), 0, 127)
+    if control in _KEY_BASED_EXCLUDED_CONTROLS:
+        raise ValueError(
+            f"'control' {control:#04x} can't be used in Key-Based Instrument "
+            f"Control (CA-023)"
+        )
+    return control, _check_range("value", _required(entry, "value"), 0, 127)
+
+
 # --- MIDI Machine Control (RP-013) -------------------------------------------
 # Every command is F0 7F <device_id> 06 <opcode> [<count> <data...>] F7.
 # _mmc_command_bytes builds <opcode> [<count> <data...>]. Commands that carry
@@ -2125,17 +2225,73 @@ def _build_message(message: dict) -> "mido.Message":
         #   master_volume:  F0 7F <device_id> 04 01 vv vv F7 (0 = off)
         #   master_balance: F0 7F <device_id> 04 02 bb bb F7 (0 = left,
         #                   16383 = right)
-        # value is 14 bits, LSB first. Master Fine/Coarse Tuning (04 03,
-        # 04 04; CA-025) aren't implemented.
+        #   master_fine_tuning:   F0 7F <device_id> 04 03 lsb msb F7
+        #                         (8192 = A440, +/-100 cents; CA-025)
+        #   master_coarse_tuning: F0 7F <device_id> 04 04 00 msb F7
+        #                         (value = msb, 64 = A440, semitones; CA-025)
+        #   global_parameter_control: F0 7F <device_id> 04 05 ... F7
+        #                         (reverb/chorus; see _gpc_data)
+        # value is 14 bits, LSB first, except for master_coarse_tuning.
         command = _choice(
             message, "command", _COMMANDS["device_control"], "device_control",
         )
-        value = _required(message, "value")
         device_id = _device_id(message)
+        if command == "global_parameter_control":
+            data = _gpc_data(message)
+        elif command == "master_coarse_tuning":
+            data = (0x00, _check_range("value", _required(message, "value"), 0, 127))
+        else:
+            data = _split14("value", _required(message, "value"))
         return _sysex(
-            0x7F, device_id, 0x04, _COMMANDS["device_control"][command],
-            *_split14("value", value),
+            0x7F, device_id, 0x04, _COMMANDS["device_control"][command], *data,
             time=time,
+        )
+    if msg_type == "controller_destination":
+        # Controller Destination Setting (CA-022; GM2 4.6), Universal Real
+        # Time. Assigns a controller to sound parameters, with a range each:
+        #   F0 7F <device_id> 09 01|02 0n [pp rr]... F7  channel/poly pressure
+        #   F0 7F <device_id> 09 03 0n cc [pp rr]... F7  control change cc
+        # cc must be 01-1F or 40-5F. pp: a _CONTROLLER_DESTINATIONS name or
+        # a number; rr's meaning comes from the recommended practice (GM2).
+        command = _choice(
+            message, "command", _COMMANDS["controller_destination"],
+            "controller_destination",
+        )
+        device_id = _device_id(message)
+        data = [_check_range("channel", channel, 0, 15)]
+        if command == "control_change":
+            control = _required(message, "control", command)
+            if not (0x01 <= control <= 0x1F or 0x40 <= control <= 0x5F):
+                raise ValueError(f"'control' must be 01-1F or 40-5F, got {control!r}")
+            data.append(control)
+        data += _each(
+            "destinations", _required_list(message, "destinations", command),
+            lambda entry: (
+                _named_or_number(entry, "parameter", _CONTROLLER_DESTINATIONS,
+                                 "destinations"),
+                _check_range("range", _required(entry, "range"), 0, 127),
+            ),
+        )
+        return _sysex(
+            0x7F, device_id, 0x09, _COMMANDS["controller_destination"][command],
+            *data, time=time,
+        )
+    if msg_type == "key_based_instrument_control":
+        # Key-Based Instrument Control (CA-023; GM2 4.8), Universal Real
+        # Time: per-key controller values, e.g. for one drum in a kit.
+        #   F0 7F <device_id> 0A 01 0n kk [nn vv]... F7
+        # Values are relative, 40 = the preset, except absolute ones such as
+        # Pan, Reverb Send and Chorus Send. 78/79 mean Fine/Coarse Tuning here.
+        device_id = _device_id(message)
+        key = _check_range("key", _required(message, "key"), 0, 127)
+        pairs = _each(
+            "controllers",
+            _required_list(message, "controllers", "key_based_instrument_control"),
+            _key_based_pair,
+        )
+        return _sysex(
+            0x7F, device_id, 0x0A, 0x01, _check_range("channel", channel, 0, 15),
+            key, *pairs, time=time,
         )
     if msg_type == "channel_mode":
         # Channel Mode messages: Control Change 120-127 (MIDI 1.0
@@ -2400,19 +2556,21 @@ def _build_message(message: dict) -> "mido.Message":
     )
 
 
-# Named RPNs: 0-4 from the MIDI 1.0 Detailed Spec Table IIIa, 6 from MPE.
-# RPN 5 (Modulation Depth Range, CA-026) isn't named; send it with
-# 'parameter_number'. NRPNs have no standard names.
+# Named RPNs: 0-4 from the MIDI 1.0 Detailed Spec Table IIIa, 5 from
+# CA-026, 6 from MPE, and RPN Null (7F 7F; GM2 3.4.5), which deselects so
+# that later Data Entry is ignored. NRPNs have no standard names.
 _RPN_NAMED_PARAMETERS = {
     "pitch_bend_sensitivity": 0x0000,
     "fine_tuning": 0x0001,
     "coarse_tuning": 0x0002,
     "tuning_program_select": 0x0003,
     "tuning_bank_select": 0x0004,
+    "modulation_depth_range": 0x0005,
     # MPE Configuration Message (M1-100-UM section 2.2.1): send on the
     # zone's Manager Channel (0 = Lower Zone, 15 = Upper Zone) with value =
     # number of Member Channels (0 turns the zone off) and msb_only true.
     "mpe_configuration": 0x0006,
+    "null": 0x3FFF,
 }
 
 
@@ -2445,6 +2603,13 @@ def _build_rpn_or_nrpn_sequence(message: dict, *, registered: bool) -> list:
         elif number is None:
             raise KeyError("'parameter' (or 'parameter_number')")
         select_lsb_cc, select_msb_cc = 100, 101
+        if name == "null":
+            return [
+                mido.Message("control_change", channel=channel, control=100,
+                             value=0x7F, time=time),
+                mido.Message("control_change", channel=channel, control=101,
+                             value=0x7F, time=0),
+            ]
     else:
         number = _required(message, "parameter_number")
         select_lsb_cc, select_msb_cc = 98, 99
@@ -2614,12 +2779,88 @@ def _decode_device_inquiry(data: tuple) -> dict:
     return out
 
 
+def _decode_gpc(payload) -> dict:
+    """Inverse of _gpc_data."""
+    slot_count, parameter_width, value_width = payload[0], payload[1], payload[2]
+    slots = [list(payload[3 + 2 * i:5 + 2 * i]) for i in range(slot_count)]
+    rest = payload[3 + 2 * slot_count:]
+    step = parameter_width + value_width
+    if not rest or len(rest) % step or parameter_width < 1 or value_width < 1:
+        raise ValueError("Global Parameter Control data doesn't fit its widths")
+    out: dict = {}
+    effect = next(
+        (name for name, path in _GPC_EFFECTS.items() if slots == [list(path)]), None,
+    )
+    if effect is not None:
+        out["effect"] = effect
+    else:
+        out["slot_path"] = slots
+    if parameter_width != 1:
+        out["parameter_width"] = parameter_width
+    if value_width != 1:
+        out["value_width"] = value_width
+    names = _GPC_PARAMETERS.get(effect, {})
+    parameters = []
+    for i in range(0, len(rest), step):
+        parameter = list(rest[i:i + parameter_width])
+        value = list(rest[i + parameter_width:i + step])
+        if parameter_width == 1:
+            parameter = parameter[0]
+            if parameter in names.values():
+                parameter = _name_for(names, parameter)
+        parameters.append({
+            "parameter": parameter, "value": value[0] if value_width == 1 else value,
+        })
+    out["parameters"] = parameters
+    return out
+
+
 def _decode_device_control(data: tuple) -> dict:
-    _, device_id, _, code, lsb, msb = data
+    device_id, code, payload = data[1], data[3], data[4:]
+    command = _name_for(_COMMANDS["device_control"], code)
+    out: dict = {"type": "device_control", "command": command, "device_id": device_id}
+    if command == "global_parameter_control":
+        out.update(_decode_gpc(payload))
+    elif command == "master_coarse_tuning":
+        lsb, msb = payload
+        if lsb != 0x00:
+            raise ValueError("Master Coarse Tuning LSB must be 00")
+        out["value"] = msb
+    else:
+        lsb, msb = payload
+        out["value"] = _join14(lsb, msb)
+    return out
+
+
+def _decode_controller_destination(data: tuple) -> dict:
+    device_id, code, channel = data[1], data[3], data[4]
+    command = _name_for(_COMMANDS["controller_destination"], code)
+    out: dict = {"type": "controller_destination", "command": command,
+                 "device_id": device_id, "channel": channel}
+    pairs = data[5:]
+    if command == "control_change":
+        out["control"], pairs = data[5], data[6:]
+    if not pairs or len(pairs) % 2:
+        raise ValueError("destinations must be parameter/range pairs")
+    out["destinations"] = [
+        {"parameter": _name_for(_CONTROLLER_DESTINATIONS, p)
+         if p in _CONTROLLER_DESTINATIONS.values() else p, "range": r}
+        for p, r in zip(pairs[0::2], pairs[1::2])
+    ]
+    return out
+
+
+def _decode_key_based(data: tuple) -> dict:
+    if data[3] != 0x01:
+        raise ValueError("only the Basic Message (0A 01) is defined")
+    device_id, channel, key, pairs = data[1], data[4], data[5], data[6:]
+    if not pairs or len(pairs) % 2:
+        raise ValueError("controllers must be number/value pairs")
     return {
-        "type": "device_control",
-        "command": _name_for(_COMMANDS["device_control"], code),
-        "device_id": device_id, "value": _join14(lsb, msb),
+        "type": "key_based_instrument_control", "device_id": device_id,
+        "channel": channel, "key": key,
+        "controllers": [{"control": c, "value": v}
+                        for c, v in zip(pairs[0::2], pairs[1::2])],
     }
 
 
@@ -3002,6 +3243,8 @@ _SYSEX_DECODERS = {
     (0x7F, 0x05): _decode_mtc_cueing,
     (0x7E, 0x04): _decode_mtc_cueing_nrt,
     (0x7F, 0x02): _decode_msc,
+    (0x7F, 0x09): _decode_controller_destination,
+    (0x7F, 0x0A): _decode_key_based,
     (0x7F, 0x06): _decode_mmc,
 }
 
@@ -3088,6 +3331,8 @@ class _StreamDecoder:
                 state["kind"] = kind
             state[part] = msg.value
             state["value_msb"] = None
+            if kind == "rpn" and state.get("msb") == 0x7F and state.get("lsb") == 0x7F:
+                return {"type": "rpn", "channel": msg.channel, "parameter": "null"}
             return None
         if msg.control not in (6, 38) or state.get("msb") is None or state.get("lsb") is None:
             return None
