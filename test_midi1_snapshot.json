@@ -192,6 +192,9 @@
   "err: key_based control data entry": {
    "error": "ValueError"
   },
+  "err: key_based_dump missing bank": {
+   "error": "KeyError"
+  },
   "err: midi_tuning 127 notes": {
    "error": "ValueError"
   },
@@ -273,11 +276,20 @@
   "err: rpn msb_only value 128": {
    "error": "ValueError"
   },
+  "err: scale_octave 11 offsets": {
+   "error": "ValueError"
+  },
+  "err: scale_octave channel 16": {
+   "error": "ValueError"
+  },
   "err: sysex byte 128": {
    "error": "ValueError"
   },
   "err: sysex missing data": {
    "error": "KeyError"
+  },
+  "err: tuning real_time not bool": {
+   "error": "ValueError"
   },
   "err: unknown type": {
    "error": "ValueError"
@@ -372,9 +384,69 @@
     0
    ]
   ],
+  "midi_tuning bulk_dump_request_bank": [
+   [
+    "F0 7E 7F 08 03 02 05 F7",
+    0
+   ]
+  ],
+  "midi_tuning key_based_dump": [
+   [
+    "F0 7E 7F 08 04 01 03 57 65 72 63 6B 6D 65 69 73 74 65 72 20 20 20 20 7F 7F 7F 01 08 7B 02 11 76 7F 7F 7F 04 23 6C 05 2C 66 7F 7F 7F 07 3E 5C 08 47 57 7F 7F 7F 0A 59 4D 0B 62 48 7F 7F 7F 0D 74 3D 0E 7D 38 7F 7F 7F 10 0F 2E 11 18 29 7F 7F 7F 13 2A 1F 14 33 1A 7F 7F 7F 16 45 0F 17 4E 0A 7F 7F 7F 19 60 00 1A 68 7B 7F 7F 7F 1C 7A 71 1D 03 6C 7F 7F 7F 1F 15 61 20 1E 5C 7F 7F 7F 22 30 52 23 39 4D 7F 7F 7F 25 4B 43 26 54 3D 7F 7F 7F 28 66 33 29 6F 2E 7F 7F 7F 2B 01 24 2C 0A 1F 7F 7F 7F 2E 1C 14 2F 25 0F 7F 7F 7F 31 37 05 32 40 00 7F 7F 7F 34 51 76 35 5A 71 7F 7F 7F 37 6C 66 38 75 61 7F 7F 7F 3A 07 57 3B 10 52 7F 7F 7F 3D 22 48 3E 2B 43 7F 7F 7F 40 3D 38 41 46 33 7F 7F 7F 43 58 29 44 61 24 7F 7F 7F 46 73 1A 47 7C 14 7F 7F 7F 49 0E 0A 4A 17 05 7F 7F 7F 4C 28 7B 4D 31 76 7F 7F 7F 4F 43 6C 50 4C 66 7F 7F 7F 52 5E 5C 53 67 57 7F 7F 7F 55 79 4D 56 02 48 7F 7F 7F 58 14 3D 59 1D 38 7F 7F 7F 5B 2F 2E 5C 38 29 7F 7F 7F 5E 4A 1F 5F 53 1A 7F 7F 7F 61 65 0F 62 6E 0A 7F 7F 7F 64 00 00 65 08 7B 7F 7F 7F 67 1A 71 68 23 6C 7F 7F 7F 6A 35 61 6B 3E 5C 7F 7F 7F 6D 50 52 6E 59 4D 7F 7F 7F 70 6B 43 71 74 3D 7F 7F 7F 73 06 33 74 0F 2E 7F 7F 7F 76 21 24 77 2A 1F 7F 7F 7F 79 3C 14 7A 45 0F 7F 7F 7F 7C 57 05 7D 60 00 7F 7F 7F 7F 71 76 0A F7",
+    0
+   ]
+  ],
   "midi_tuning note_change": [
    [
     "F0 7F 7F 08 02 00 03 45 45 00 00 46 46 7F 7E 47 7F 7F 7F F7",
+    0
+   ]
+  ],
+  "midi_tuning note_change_bank": [
+   [
+    "F0 7F 7F 08 07 04 01 01 3C 3C 40 00 F7",
+    0
+   ]
+  ],
+  "midi_tuning note_change_bank non real time": [
+   [
+    "F0 7E 7F 08 07 04 01 01 3D 7F 7F 7F F7",
+    0
+   ]
+  ],
+  "midi_tuning scale_octave_1byte": [
+   [
+    "F0 7F 7F 08 08 02 04 01 40 40 40 40 40 40 40 40 40 40 40 46 F7",
+    0
+   ]
+  ],
+  "midi_tuning scale_octave_1byte non real time": [
+   [
+    "F0 7E 7F 08 08 01 41 40 3A 3B 3C 3D 3E 3F 40 41 42 43 44 45 F7",
+    0
+   ]
+  ],
+  "midi_tuning scale_octave_2byte": [
+   [
+    "F0 7F 7F 08 09 03 7F 7F 40 00 40 00 40 00 40 00 40 00 40 00 40 00 40 00 40 00 40 00 40 00 40 00 F7",
+    0
+   ]
+  ],
+  "midi_tuning scale_octave_2byte non real time": [
+   [
+    "F0 7E 7F 08 09 00 00 08 00 00 7F 7F 00 00 7F 7F 00 00 7F 7F 00 00 7F 7F 00 00 7F 7F 00 00 7F 7F F7",
+    0
+   ]
+  ],
+  "midi_tuning scale_octave_dump_1byte": [
+   [
+    "F0 7E 7F 08 05 00 07 4A 75 73 74 20 20 20 20 20 20 20 20 20 20 20 20 40 34 44 50 32 3E 36 42 4E 30 3C 4C 25 F7",
+    0
+   ]
+  ],
+  "midi_tuning scale_octave_dump_2byte": [
+   [
+    "F0 7E 7F 08 06 7F 7F 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 40 00 00 00 7F 7F 3E 40 41 50 00 01 00 02 00 03 46 28 36 58 40 00 00 64 04 F7",
     0
    ]
   ],

@@ -130,10 +130,13 @@ _COMMANDS: dict = {
         "local_control": 122, "all_notes_off": 123, "omni_off": 124,
         "omni_on": 125, "mono_on": 126, "poly_on": 127,
     },
-    # MIDI Tuning 08 <code>.
+    # MIDI Tuning 08 <code> (MIDI Tuning Updated Specification).
     "midi_tuning": {
         "bulk_dump_request": 0x00, "bulk_dump_reply": 0x01,
-        "note_change": 0x02,
+        "note_change": 0x02, "bulk_dump_request_bank": 0x03,
+        "key_based_dump": 0x04, "scale_octave_dump_1byte": 0x05,
+        "scale_octave_dump_2byte": 0x06, "note_change_bank": 0x07,
+        "scale_octave_1byte": 0x08, "scale_octave_2byte": 0x09,
     },
     # Notation 03 <code>.
     "notation": {
@@ -1665,6 +1668,145 @@ def _key_based_pair(entry: dict) -> tuple:
     return control, _check_range("value", _required(entry, "value"), 0, 127)
 
 
+# --- MIDI Tuning (MIDI Tuning Updated Specification) ---------------------------
+# F0 7E|7F <device_id> 08 <code> <payload> F7. note_change is real time;
+# note_change_bank and the scale/octave changes take 'real_time' (default
+# true); everything else is non-real time. The dumps end with a checksum: the
+# XOR of every byte between F0 and the checksum.
+
+_TUNING_REAL_TIME_ONLY = frozenset({"note_change"})
+_TUNING_EITHER_TIME = frozenset(
+    {"note_change_bank", "scale_octave_1byte", "scale_octave_2byte"}
+)
+_TUNING_DUMPS = frozenset({
+    "bulk_dump_reply", "key_based_dump", "scale_octave_dump_1byte",
+    "scale_octave_dump_2byte",
+})
+
+
+def _tuning_real_time(message: dict, command: str) -> bool:
+    if command in _TUNING_REAL_TIME_ONLY:
+        return True
+    if command not in _TUNING_EITHER_TIME:
+        return False
+    real_time = message.get("real_time", True)
+    if not isinstance(real_time, bool):
+        raise ValueError(f"'real_time' must be true or false, got {real_time!r}")
+    return real_time
+
+
+def _tuning_bank(message: dict) -> int:
+    return _check_range("bank", _required(message, "bank"), 0, 127)
+
+
+def _tuning_program(message: dict) -> int:
+    return _check_range("tuning_program", _required(message, "tuning_program"), 0, 127)
+
+
+def _tuning_name(message: dict) -> tuple:
+    """The 16-character tuning name, space padded."""
+    name = message.get("tuning_name", "")
+    if len(name) > 16:
+        raise ValueError(
+            f"'tuning_name' must be at most 16 characters, got {len(name)} ({name!r})"
+        )
+    return _ascii("tuning_name", name.ljust(16))
+
+
+def _tuning_notes(message: dict, command: str) -> tuple:
+    """128 x [xx yy zz], note 0 first."""
+    notes = _required(message, "notes", command)
+    if len(notes) != 128:
+        raise ValueError(
+            f"'notes' must have exactly 128 entries (one per MIDI key number), "
+            f"got {len(notes)}"
+        )
+    return _each("notes", notes, _encode_tuning_frequency)
+
+
+def _tuning_changes(message: dict, command: str) -> tuple:
+    """ll then [kk xx yy zz] per entry."""
+    changes = _required_list(message, "changes", command)
+    if len(changes) > 127:
+        raise ValueError(f"'changes' must have 1-127 entries, got {len(changes)}")
+    return (len(changes), *_each("changes", changes, lambda entry: (
+        _check_range("key", _required(entry, "key"), 0, 127),
+        *_encode_tuning_frequency(entry),
+    )))
+
+
+def _tuning_offsets(message: dict, command: str, two_byte: bool) -> tuple:
+    """Scale/octave offsets for C through B. 1-byte: 0-127, 64 = 0 cents,
+    1 cent per step. 2-byte: 0-16383, 8192 = 0 cents, 200/16384 cents per
+    step, sent MSB first."""
+    offsets = _required(message, "offsets", command)
+    if len(offsets) != 12:
+        raise ValueError(f"'offsets' must have 12 entries (C to B), got {len(offsets)}")
+    if not two_byte:
+        return tuple(_check_range("offsets entry", v, 0, 127) for v in offsets)
+    out: list = []
+    for v in offsets:
+        lsb, msb = _split14("offsets entry", v)
+        out += [msb, lsb]
+    return tuple(out)
+
+
+def _channel_bitmap(message: dict, command: str) -> tuple:
+    """ff gg hh: ff bits 0-1 = channels 14-15, gg = channels 7-13, hh =
+    channels 0-6 (0-based); ff bits 2-6 are reserved and stay 0."""
+    ff = gg = hh = 0
+    for channel in _required_list(message, "channels", command):
+        _check_range("channels entry", channel, 0, 15)
+        if channel >= 14:
+            ff |= 1 << (channel - 14)
+        elif channel >= 7:
+            gg |= 1 << (channel - 7)
+        else:
+            hh |= 1 << channel
+    return ff, gg, hh
+
+
+def _decode_channel_bitmap(ff: int, gg: int, hh: int) -> list:
+    if ff & ~0x03:
+        raise ValueError("reserved channel bits are set")
+    return (
+        [c for c in range(7) if hh >> c & 1]
+        + [c + 7 for c in range(7) if gg >> c & 1]
+        + [c + 14 for c in range(2) if ff >> c & 1]
+    )
+
+
+# command -> payload after <code> (the checksum is added for dumps).
+_TUNING_PAYLOADS = {
+    "bulk_dump_request": lambda m, c: (_tuning_program(m),),
+    "bulk_dump_request_bank": lambda m, c: (_tuning_bank(m), _tuning_program(m)),
+    "bulk_dump_reply": lambda m, c: (
+        _tuning_program(m), *_tuning_name(m), *_tuning_notes(m, c),
+    ),
+    "key_based_dump": lambda m, c: (
+        _tuning_bank(m), _tuning_program(m), *_tuning_name(m), *_tuning_notes(m, c),
+    ),
+    "scale_octave_dump_1byte": lambda m, c: (
+        _tuning_bank(m), _tuning_program(m), *_tuning_name(m),
+        *_tuning_offsets(m, c, two_byte=False),
+    ),
+    "scale_octave_dump_2byte": lambda m, c: (
+        _tuning_bank(m), _tuning_program(m), *_tuning_name(m),
+        *_tuning_offsets(m, c, two_byte=True),
+    ),
+    "note_change": lambda m, c: (_tuning_program(m), *_tuning_changes(m, c)),
+    "note_change_bank": lambda m, c: (
+        _tuning_bank(m), _tuning_program(m), *_tuning_changes(m, c),
+    ),
+    "scale_octave_1byte": lambda m, c: (
+        *_channel_bitmap(m, c), *_tuning_offsets(m, c, two_byte=False),
+    ),
+    "scale_octave_2byte": lambda m, c: (
+        *_channel_bitmap(m, c), *_tuning_offsets(m, c, two_byte=True),
+    ),
+}
+
+
 # --- MIDI Machine Control (RP-013) -------------------------------------------
 # Every command is F0 7F <device_id> 06 <opcode> [<count> <data...>] F7.
 # _mmc_command_bytes builds <opcode> [<count> <data...>]. Commands that carry
@@ -2328,64 +2470,32 @@ def _build_message(message: dict) -> "mido.Message":
             time=time,
         )
     if msg_type == "midi_tuning":
-        # MIDI Tuning (MIDI Tuning Updated Specification):
-        #   bulk_dump_request: F0 7E <device_id> 08 00 tt F7
-        #   bulk_dump_reply:   F0 7E <device_id> 08 01 tt <16-char name>
-        #                      [xx yy zz] x128 (note 0 first) chksum F7
-        #   note_change:       F0 7F <device_id> 08 02 tt ll
-        #                      [kk xx yy zz] x ll F7
-        # Checksum: XOR of every byte between F0 and the checksum. The
-        # updated spec says the original bulk dump's checksum text is
-        # ambiguous, that receivers may ignore it, and that every other
-        # dump uses this rule.
-        # The bank and scale/octave messages in the updated spec (08 03-09)
-        # aren't implemented.
+        # MIDI Tuning (MIDI Tuning Updated Specification); payloads in
+        # _TUNING_PAYLOADS:
+        #   bulk_dump_request        7E 08 00 tt
+        #   bulk_dump_reply          7E 08 01 tt <name> [xx yy zz]x128 chksum
+        #   note_change              7F 08 02 tt ll [kk xx yy zz]...
+        #   bulk_dump_request_bank   7E 08 03 bb tt
+        #   key_based_dump           7E 08 04 bb tt <name> [xx yy zz]x128 chksum
+        #   scale_octave_dump_1byte  7E 08 05 bb tt <name> [xx]x12 chksum
+        #   scale_octave_dump_2byte  7E 08 06 bb tt <name> [xx yy]x12 chksum
+        #   note_change_bank         7F|7E 08 07 bb tt ll [kk xx yy zz]...
+        #   scale_octave_1byte       7F|7E 08 08 ff gg hh [ss]x12
+        #   scale_octave_2byte       7F|7E 08 09 ff gg hh [ss tt]x12
+        # The updated spec says the original bulk dump's checksum text is
+        # ambiguous and receivers may ignore it.
         command = _choice(
             message, "command", _COMMANDS["midi_tuning"], "midi_tuning",
         )
-        code = _COMMANDS["midi_tuning"][command]
         device_id = _device_id(message)
-        program = _check_range(
-            "tuning_program", _required(message, "tuning_program"), 0, 127,
+        header = 0x7F if _tuning_real_time(message, command) else 0x7E
+        data = (
+            header, device_id, 0x08, _COMMANDS["midi_tuning"][command],
+            *_TUNING_PAYLOADS[command](message, command),
         )
-
-        if command == "bulk_dump_request":
-            return _sysex(0x7E, device_id, 0x08, code, program, time=time)
-
-        if command == "bulk_dump_reply":
-            name = message.get("tuning_name", "")
-            if len(name) > 16:
-                raise ValueError(
-                    f"'tuning_name' must be at most 16 characters, got "
-                    f"{len(name)} ({name!r})"
-                )
-            notes = _required(message, "notes", command)
-            if len(notes) != 128:
-                raise ValueError(
-                    f"'notes' must have exactly 128 entries (one per MIDI key "
-                    f"number), got {len(notes)}"
-                )
-            data = (
-                0x7E, device_id, 0x08, code, program,
-                *_ascii("tuning_name", name.ljust(16)),
-                *_each("notes", notes, _encode_tuning_frequency),
-            )
-            return _sysex(*data, _xor_checksum(data), time=time)
-
-        # note_change: [kk xx yy zz] per entry.
-        changes = _required_list(message, "changes", command)
-        if len(changes) > 127:
-            raise ValueError(
-                f"'changes' must have 1-127 entries, got {len(changes)}"
-            )
-        return _sysex(
-            0x7F, device_id, 0x08, code, program, len(changes),
-            *_each("changes", changes, lambda entry: (
-                _check_range("key", _required(entry, "key"), 0, 127),
-                *_encode_tuning_frequency(entry),
-            )),
-            time=time,
-        )
+        if command in _TUNING_DUMPS:
+            data = (*data, _xor_checksum(data))
+        return _sysex(*data, time=time)
     if msg_type == "notation":
         # Notation Information (Universal Real Time, MIDI 1.0 Detailed
         # Spec):
@@ -2938,33 +3048,55 @@ def _decode_file_dump(data: tuple) -> dict:
 
 
 def _decode_midi_tuning(data: tuple) -> dict:
-    device_id, code, program = data[1], data[3], data[4]
+    """Inverse of the midi_tuning builder."""
+    header, device_id, code = data[0], data[1], data[3]
     command = _name_for(_COMMANDS["midi_tuning"], code)
-    out: dict = {"type": "midi_tuning", "command": command,
-                 "device_id": device_id, "tuning_program": program}
+    out: dict = {"type": "midi_tuning", "command": command, "device_id": device_id}
+    real_time = header == 0x7F
+    if command in _TUNING_EITHER_TIME:
+        out["real_time"] = real_time
+    elif real_time != (command in _TUNING_REAL_TIME_ONLY):
+        raise ValueError(f"{command} has the wrong real-time/non-real-time header")
+    rest = list(data[4:-1] if command in _TUNING_DUMPS else data[4:])
+
+    def take(n: int) -> list:
+        if len(rest) < n:
+            raise ValueError(f"{command} is truncated")
+        chunk = rest[:n]
+        del rest[:n]
+        return chunk
 
     def frequency(xx: int, yy: int, zz: int) -> dict:
         if (xx, yy, zz) == (0x7F, 0x7F, 0x7F):
             return {"no_change": True}
         return {"semitone": xx, "cents": _join14(zz, yy) * 100 / 16384}
 
-    if command == "bulk_dump_reply":
-        name, freq = data[5:21], data[21:-1]
-        if len(freq) != 384:
-            raise ValueError("bulk dump needs 128 x 3 frequency bytes")
-        out.update(
-            tuning_name=bytes(name).decode("ascii").rstrip(" "),
-            notes=[frequency(*freq[i:i + 3]) for i in range(0, 384, 3)],
-            checksum_ok=_checksum_ok(data),
-        )
-    elif command == "note_change":
-        count, entries = data[5], data[6:]
-        if len(entries) != 4 * count:
-            raise ValueError("note change count doesn't match its entries")
+    if command in ("scale_octave_1byte", "scale_octave_2byte"):
+        out["channels"] = _decode_channel_bitmap(*take(3))
+    else:
+        if command not in ("bulk_dump_request", "bulk_dump_reply", "note_change"):
+            out["bank"] = take(1)[0]
+        out["tuning_program"] = take(1)[0]
+    if command in _TUNING_DUMPS:
+        out["tuning_name"] = bytes(take(16)).decode("ascii").rstrip(" ")
+    if command in ("bulk_dump_reply", "key_based_dump"):
+        freq = take(384)
+        out["notes"] = [frequency(*freq[i:i + 3]) for i in range(0, 384, 3)]
+    elif command in ("note_change", "note_change_bank"):
+        entries = take(4 * take(1)[0])
         out["changes"] = [
             {"key": entries[i], **frequency(*entries[i + 1:i + 4])}
             for i in range(0, len(entries), 4)
         ]
+    elif command in ("scale_octave_dump_1byte", "scale_octave_1byte"):
+        out["offsets"] = take(12)
+    elif command in ("scale_octave_dump_2byte", "scale_octave_2byte"):
+        pairs = take(24)
+        out["offsets"] = [_join14(pairs[i + 1], pairs[i]) for i in range(0, 24, 2)]
+    if rest:
+        raise ValueError(f"{command} has extra bytes")
+    if command in _TUNING_DUMPS:
+        out["checksum_ok"] = _checksum_ok(data)
     return out
 
 
