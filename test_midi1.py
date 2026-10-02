@@ -446,6 +446,14 @@ CASES: list[tuple[str, dict]] = [
                                   "fields": [{"name": "track_mute", "active_tracks": [318]}]}),
     ("mmc write generator_userbits", {"type": "mmc", "command": "write", "fields": [
         {"name": "generator_userbits", "characters": "REEL", "flags": 1}]}),
+    ("mmc write set-ups", {"type": "mmc", "command": "write", "fields": [
+        {"name": "generator_set_up", "run_reference": "internal_drop_a", "copy_jam_reference": "external",
+         "copy_jam_source": "selected_master_code", "copy_jam_mode": "continue"},
+        {"name": "midi_time_code_set_up", "transmit_while_stopped": True, "transmit_userbits": True,
+         "source": "generator_time_code"}]}),
+    ("err: mmc write generator_set_up run_reference 9", {"type": "mmc", "command": "write", "fields": [
+        {"name": "generator_set_up", "run_reference": 9, "copy_jam_reference": 0,
+         "copy_jam_source": 1, "copy_jam_mode": 0}]}),
     # Errors
     ("err: unknown type", {"type": "bogus"}),
     ("err: missing type", {}),
@@ -536,6 +544,17 @@ MMC_RESPONSES: list[tuple[str, list[int]]] = [
     ("velocity_tally reverse half speed", [0xF0, 0x7F, 0x01, 0x07, 0x49, 0x03, 0x40, 0x40, 0x00, 0xF7]),
     ("selected_time_code_userbits", [0xF0, 0x7F, 0x01, 0x07, 0x47, 0x09, 0x0C, 0x04, 0x05, 0x04, 0x05,
                                      0x04, 0x02, 0x05, 0x01, 0xF7]),
+    # Step 6f-2b-2b.
+    ("generator_command_tally copy/jam lost source", [0xF0, 0x7F, 0x01, 0x07, 0x5B, 0x02, 0x02, 0x12, 0xF7]),
+    ("generator_set_up", [0xF0, 0x7F, 0x01, 0x07, 0x5C, 0x03, 0x12, 0x01, 0x01, 0xF7]),
+    ("mtc_command_tally follow", [0xF0, 0x7F, 0x01, 0x07, 0x5E, 0x02, 0x02, 0x01, 0xF7]),
+    ("mtc_set_up", [0xF0, 0x7F, 0x01, 0x07, 0x5F, 0x02, 0x15, 0x06, 0xF7]),
+    ("procedure_response", [0xF0, 0x7F, 0x01, 0x07, 0x60, 0x0A, 0x02, 0x01,
+                            0x44, 0x06, 0x01, 0x61, 0x25, 0x34, 0x10, 0x00, 0xF7]),
+    ("procedure_response invalid", [0xF0, 0x7F, 0x01, 0x07, 0x60, 0x01, 0x7F, 0xF7]),
+    ("event_response", [0xF0, 0x7F, 0x01, 0x07, 0x61, 0x09, 0x03, 0x42, 0x01,
+                        0x61, 0x25, 0x34, 0x10, 0x00, 0x06, 0xF7]),
+    ("failure text", [0xF0, 0x7F, 0x01, 0x07, 0x65, 0x09] + list(b"Tape jam!") + [0xF7]),
 ]
 
 META_CASES: list[tuple[str, dict]] = [

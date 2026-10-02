@@ -1668,6 +1668,126 @@ _MMC_FIELD_CODECS.update({
 })
 
 
+# Generator and MIDI Time Code tallies and set-ups (RP-013 pp.68-70).
+_MMC_COMMAND_SUCCESS = {0: "in_transition", 1: "successful", 2: "failure"}
+_MMC_GENERATOR_RUN_REFERENCE = {
+    "internal_standard": 0, "external": 1, "internal_drop_a": 2, "internal_drop_b": 3,
+    "local": 7,
+}
+_MMC_GENERATOR_JAM_REFERENCE = {"source_frame_edges": 0, "external": 1, "local": 7}
+_MMC_GENERATOR_JAM_SOURCE = {
+    "selected_time_code": 0x01, "selected_master_code": 0x02, "local": 0x7F,
+}
+_MMC_GENERATOR_JAM_MODE = {"stop_with_source": 0x00, "continue": 0x01}
+_MMC_MTC_SOURCE = {
+    "selected_time_code": 0x01, "selected_master_code": 0x02,
+    "generator_time_code": 0x06, "midi_time_code_input": 0x07, "local": 0x7F,
+}
+_MMC_MTC_FLAGS = (
+    "transmit_while_stopped", "stopped_full_messages", "transmit_while_fast",
+    "fast_full_messages", "transmit_userbits", "mute_on_response_cable",
+)
+
+
+def _decode_generator_command_tally(data) -> dict:
+    command, status = data
+    return {
+        "command": _value_name(_MMC_GENERATOR_ACTIONS, command),
+        "success": _MMC_COMMAND_SUCCESS.get(status & 0x07, status & 0x07),
+        "source_data_lost": bool(status & 0x10),
+        "frame_sync_reference_lost": bool(status & 0x20),
+    }
+
+
+def _encode_generator_set_up(entry: dict) -> tuple:
+    """GENERATOR SET UP: <reference> = 0 yyy 0 nnn (nnn run mode, yyy
+    copy/jam), <source>, <copy/jam mode>."""
+    run = _named_value(entry, "run_reference", _MMC_GENERATOR_RUN_REFERENCE)
+    jam = _named_value(entry, "copy_jam_reference", _MMC_GENERATOR_JAM_REFERENCE)
+    if run > 7 or jam > 7:
+        raise ValueError("'run_reference' and 'copy_jam_reference' are 3-bit (0-7)")
+    return (
+        (jam << 4) | run,
+        _named_value(entry, "copy_jam_source", _MMC_GENERATOR_JAM_SOURCE),
+        _named_value(entry, "copy_jam_mode", _MMC_GENERATOR_JAM_MODE),
+    )
+
+
+def _decode_generator_set_up(data) -> dict:
+    reference, source, mode = data
+    if reference & 0x88:
+        raise ValueError("GENERATOR SET UP reference bits 3 and 7 must be 0")
+    return {
+        "run_reference": _value_name(_MMC_GENERATOR_RUN_REFERENCE, reference & 0x07),
+        "copy_jam_reference": _value_name(_MMC_GENERATOR_JAM_REFERENCE, reference >> 4),
+        "copy_jam_source": _value_name(_MMC_GENERATOR_JAM_SOURCE, source),
+        "copy_jam_mode": _value_name(_MMC_GENERATOR_JAM_MODE, mode),
+    }
+
+
+def _decode_mtc_command_tally(data) -> dict:
+    command, status = data
+    return {
+        "command": _value_name(_MMC_MTC_COMMAND_ACTIONS, command),
+        "success": _MMC_COMMAND_SUCCESS.get(status & 0x07, status & 0x07),
+    }
+
+
+def _encode_mtc_set_up(entry: dict) -> tuple:
+    """MIDI TIME CODE SET UP: <flags> (bits a-f in _MMC_MTC_FLAGS order),
+    <source>."""
+    flags = sum(1 << bit for bit, name in enumerate(_MMC_MTC_FLAGS) if entry.get(name))
+    return flags, _named_value(entry, "source", _MMC_MTC_SOURCE)
+
+
+def _decode_mtc_set_up(data) -> dict:
+    flags, source = data
+    if flags & 0x40:
+        raise ValueError("MIDI TIME CODE SET UP flag bit 6 must be 0")
+    return {**{name: bool(flags >> bit & 1) for bit, name in enumerate(_MMC_MTC_FLAGS)},
+            "source": _value_name(_MMC_MTC_SOURCE, source)}
+
+
+def _decode_procedure_response(data) -> dict:
+    """PROCEDURE RESPONSE (RP-013 p.71): the procedure and its commands;
+    procedure 7F means none set or defined."""
+    if data[0] == 0x7F:
+        return {"procedure": "invalid"}
+    return {"procedure": data[0], "commands": _mmc_parse_commands(data[1:])}
+
+
+def _decode_event_response(data) -> dict:
+    """EVENT RESPONSE (RP-013 p.71): event, flags (as EVENT [DEFINE]),
+    trigger source, event time, one command; event 7F means none set or
+    defined."""
+    if data[0] == 0x7F:
+        return {"event": "invalid"}
+    event, flags, source = data[0], data[1], data[2]
+    commands = _mmc_parse_commands(data[8:])
+    if len(commands) != 1:
+        raise ValueError("an EVENT RESPONSE carries exactly one command")
+    return {
+        "event": event,
+        "direction": _name_for(_MMC_EVENT_DIRECTIONS, flags & 0x03),
+        "all_speeds": bool(flags & 0x10), "non_delete": bool(flags & 0x40),
+        "trigger_source": _info_field_name(source),
+        "event_time": _decode_standard_time_code(*data[3:8]),
+        "trigger_command": commands[0],
+    }
+
+
+_MMC_FIELD_CODECS.update({
+    "generator_command_tally": (None, _decode_generator_command_tally),
+    "generator_set_up": (_encode_generator_set_up, _decode_generator_set_up),
+    "midi_time_code_command_tally": (None, _decode_mtc_command_tally),
+    "midi_time_code_set_up": (_encode_mtc_set_up, _decode_mtc_set_up),
+    # The response decoders call functions defined further down.
+    "procedure_response": (None, lambda data: _decode_procedure_response(data)),
+    "event_response": (None, lambda data: _decode_event_response(data)),
+    "failure": (None, lambda data: {"text": bytes(data).decode("ascii")}),
+})
+
+
 def _mmc_response_field(name_byte: int, payload: list) -> dict:
     """One field of an MMC response, given its name byte and data (the
     count byte already removed)."""

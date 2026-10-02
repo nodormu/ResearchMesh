@@ -246,6 +246,9 @@
   "err: mmc wait with other commands": {
    "error": "ValueError"
   },
+  "err: mmc write generator_set_up run_reference 9": {
+   "error": "ValueError"
+  },
   "err: mmc write read-only field": {
    "error": "ValueError"
   },
@@ -933,6 +936,12 @@
   "mmc write generator_userbits": [
    [
     "F0 7F 7F 06 40 0B 5D 09 0C 04 05 04 05 04 02 05 01 F7",
+    0
+   ]
+  ],
+  "mmc write set-ups": [
+   [
+    "F0 7F 7F 06 40 09 5C 03 12 02 01 5F 02 11 06 F7",
     0
    ]
   ],
@@ -1998,12 +2007,66 @@
   "err wrong length": {
    "error": "field 0x01 (selected_time_code) needs 5 data byte(s), got 2"
   },
+  "event_response": {
+   "all_speeds": false,
+   "device_id": 1,
+   "direction": "both",
+   "event": 3,
+   "event_time": {
+    "blank": false,
+    "color_frame": false,
+    "frame_rate": "30nondrop",
+    "frames": 16,
+    "hours": 1,
+    "minutes": 37,
+    "negative": false,
+    "seconds": 52,
+    "subframes": 0,
+    "use_status_byte": false
+   },
+   "name": "event_response",
+   "non_delete": true,
+   "status": "ok",
+   "trigger_command": {
+    "command": "record_strobe",
+    "type": "mmc"
+   },
+   "trigger_source": "selected_time_code",
+   "type": "field_value"
+  },
+  "failure text": {
+   "device_id": 1,
+   "name": "failure",
+   "status": "ok",
+   "text": "Tape jam!",
+   "type": "field_value"
+  },
   "fixed_speed undefined code": {
    "device_id": 1,
    "name": "fixed_speed",
    "status": "ok",
    "type": "field_value",
    "value": 62
+  },
+  "generator_command_tally copy/jam lost source": {
+   "command": "copy_jam",
+   "device_id": 1,
+   "frame_sync_reference_lost": false,
+   "name": "generator_command_tally",
+   "source_data_lost": true,
+   "status": "ok",
+   "success": "failure",
+   "type": "field_value"
+  },
+  "generator_set_up": {
+   "copy_jam_mode": "continue",
+   "copy_jam_reference": "external",
+   "copy_jam_source": "selected_time_code",
+   "device_id": 1,
+   "name": "generator_set_up",
+   "run_reference": "internal_drop_a",
+   "status": "ok",
+   "type": "field_value"
   },
   "gp0 status byte": {
    "blank": true,
@@ -2029,6 +2092,57 @@
    "name": "wait",
    "status": "ok",
    "type": "handshake"
+  },
+  "mtc_command_tally follow": {
+   "command": "follow",
+   "device_id": 1,
+   "name": "midi_time_code_command_tally",
+   "status": "ok",
+   "success": "successful",
+   "type": "field_value"
+  },
+  "mtc_set_up": {
+   "device_id": 1,
+   "fast_full_messages": false,
+   "mute_on_response_cable": false,
+   "name": "midi_time_code_set_up",
+   "source": "generator_time_code",
+   "status": "ok",
+   "stopped_full_messages": false,
+   "transmit_userbits": true,
+   "transmit_while_fast": true,
+   "transmit_while_stopped": true,
+   "type": "field_value"
+  },
+  "procedure_response": {
+   "commands": [
+    {
+     "command": "stop",
+     "type": "mmc"
+    },
+    {
+     "command": "locate",
+     "frame_rate": "30nondrop",
+     "frames": 16,
+     "hours": 1,
+     "minutes": 37,
+     "seconds": 52,
+     "subframes": 0,
+     "type": "mmc"
+    }
+   ],
+   "device_id": 1,
+   "name": "procedure_response",
+   "procedure": 2,
+   "status": "ok",
+   "type": "field_value"
+  },
+  "procedure_response invalid": {
+   "device_id": 1,
+   "name": "procedure_response",
+   "procedure": "invalid",
+   "status": "ok",
+   "type": "field_value"
   },
   "record_status bits": {
    "activity": "record_insert",
