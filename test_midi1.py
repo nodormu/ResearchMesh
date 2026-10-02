@@ -1058,6 +1058,59 @@ class _FakePort:
         pass
 
 
+def check_describe(midi1) -> None:
+    """describe's docs (_DOCS) match the code: types and commands exist,
+    every example builds and decodes back to the same bytes, and every field
+    an example uses is documented."""
+    docs = midi1._DOCS
+    check("describe: every documented type is a message type",
+          set(docs) <= set(midi1._MESSAGE_TYPES), f"{sorted(set(docs) - set(midi1._MESSAGE_TYPES))}")
+    wrong_commands = [t for t, d in docs.items() if "commands" in d
+                      and set(d["commands"]) != set(midi1._COMMANDS[t])]
+    check("describe: a documented type with commands documents each one",
+          not wrong_commands, f"{wrong_commands}")
+
+    examples = []
+    for t, d in docs.items():
+        for command, entry in d.get("commands", {None: d}).items():
+            examples.append((t, command, {**d["fields"], **entry["fields"]}, entry["example"]))
+    undocumented, mismatched = [], []
+    for t, command, fields, example in examples:
+        extra = set(example) - {"type", "command"} - set(fields)
+        if extra or example.get("type") != t or example.get("command") != command:
+            undocumented.append(f"{t}/{command}: {sorted(extra)}")
+        try:
+            wire = midi1._build_message_sequence(dict(example))
+            if len(wire) == 1:
+                rebuilt = [midi1._build_message(dict(midi1._decode_message(wire[0])))]
+            else:
+                stream = midi1._StreamDecoder()
+                completed = [c for c in (stream.feed(m) for m in wire) if c is not None]
+                rebuilt = midi1._build_message_sequence(dict(completed[-1]))
+            if [m.bytes() for m in rebuilt] != [m.bytes() for m in wire]:
+                mismatched.append(f"{t}/{command}")
+        except Exception as e:  # reported as a failure
+            mismatched.append(f"{t}/{command}: {type(e).__name__}: {e}")
+    check(f"describe: all {len(examples)} examples use only documented fields",
+          not undocumented, f"{undocumented[:5]}")
+    check(f"describe: all {len(examples)} examples build and decode to the same bytes",
+          not mismatched, f"{mismatched[:5]}")
+
+    def describe(**message):
+        return json.loads(midi1._run({"action": "describe", **({"message": message} if message else {})}))
+
+    listing = describe()
+    check("describe: no type lists every message type",
+          list(listing.get("types", {})) == list(midi1._MESSAGE_TYPES), f"{listing}"[:200])
+    one = describe(type="channel_mode", command="mono_on")
+    check("describe: a command merges type and command fields, with its example",
+          set(one.get("fields", {})) == {"channel", "channel_count"}
+          and one.get("example", {}).get("command") == "mono_on", f"{one}")
+    check("describe: unknown type and unknown command are errors",
+          "error" in describe(type="nope") and "error" in describe(type="channel_mode", command="nope"))
+    print(f"  info  describe documents {len(docs)} of {len(midi1._MESSAGE_TYPES)} types")
+
+
 def _fake_input(midi1, name: str):
     buf, event = deque(maxlen=10), threading.Event()
     midi1._OPEN_PORTS[name] = ("input", _FakePort())
@@ -1313,6 +1366,7 @@ def main() -> int:
 
     print("\nschema")
     check_schema(midi1)
+    check_describe(midi1)
 
     print("\npoll wait")
     check_poll_wait(midi1)

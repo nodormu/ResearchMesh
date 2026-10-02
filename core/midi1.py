@@ -42,6 +42,8 @@ Actions (dispatched by `_run`):
                         a fixed duration, with Start/Continue before and Stop
                         after. One 'send' per tool call is too slow and uneven
                         to drive a device's tempo.
+  - describe            the fields of one message type (and command) from
+                        _DOCS, with an example; with no type, the type list.
 
 Where messages are built: single wire messages in `_build_message`,
 multi-message types in `_build_message_sequence`, file-only meta events in
@@ -415,10 +417,13 @@ TOOLS = [
                     "enum": [
                         "list_devices", "open", "close", "send", "poll",
                         "read_midi_file", "write_midi_file",
-                        "decode_mmc_response", "run_clock",
+                        "decode_mmc_response", "run_clock", "describe",
                     ],
                     "description": (
-                        "Which MIDI operation to perform. A 'poll' entry with "
+                        "Which MIDI operation to perform. 'describe' with "
+                        "'message': {'type': T} returns T's fields and an "
+                        "example (add 'command' for one command's fields); "
+                        "with no 'message' it lists every type. A 'poll' entry with "
                         "'overflow': true marks where the input queue overflowed "
                         "(a burst of over 2000 events) and messages were lost. "
                         "'at_open': true marks messages in the burst that arrives "
@@ -923,10 +928,12 @@ def _run(tool_input: dict) -> str:
         return _decode_mmc_response(tool_input)
     if action == "run_clock":
         return _run_clock(tool_input)
+    if action == "describe":
+        return _describe(tool_input)
     return _err(
         f"unknown action {action!r} — expected one of "
         "list_devices, open, close, send, poll, read_midi_file, "
-        "write_midi_file, decode_mmc_response, run_clock"
+        "write_midi_file, decode_mmc_response, run_clock, describe"
     )
 
 
@@ -3904,6 +3911,232 @@ def _build_message_sequence(message: dict) -> list:
     if msg_type == "mmc" and message.get("segment"):
         return _build_mmc_segments(message)
     return [_build_message(message)]
+
+
+# --- describe: field documentation per message type ------------------------
+# _DOCS[type]: "summary", "fields" (name -> text) and an "example" message;
+# a type with a 'command' has "commands" instead of "example", each command
+# with its own "summary", "fields" and "example". describe merges the type's
+# fields with the command's. Names and ranges come from the tables the
+# builders use; test_midi1.py builds and decodes every example and checks
+# that every field an example uses is documented.
+
+_CHANNEL_DOC = "0-15 (MIDI channels 1-16), default 0"
+_DEVICE_ID_DOC = "0-127, default 127 (all devices)"
+_TIME_CODE_DOCS = {
+    "hours": "0-23, required",
+    "minutes": "0-59, required",
+    "seconds": "0-59, required",
+    "frames": "0-29, required",
+    "frame_rate": f"one of {', '.join(_FRAME_RATE_BITS)}; required, no default",
+}
+_TC_EXAMPLE = {"hours": 1, "minutes": 37, "seconds": 52, "frames": 16}
+
+
+def _no_fields(summary: str, example: dict) -> dict:
+    return {"summary": summary, "fields": {}, "example": example}
+
+
+_DOCS: dict = {
+    "note_on": {
+        "summary": "Note On (9n).",
+        "fields": {"channel": _CHANNEL_DOC, "note": "0-127, required",
+                   "velocity": "0-127, default 64; 0 is a note off to receivers"},
+        "example": {"type": "note_on", "channel": 0, "note": 60, "velocity": 100},
+    },
+    "note_off": {
+        "summary": "Note Off (8n).",
+        "fields": {"channel": _CHANNEL_DOC, "note": "0-127, required",
+                   "velocity": "0-127 (release velocity), default 0"},
+        "example": {"type": "note_off", "channel": 0, "note": 60},
+    },
+    "control_change": {
+        "summary": ("Control Change (Bn). Controllers 120-127 decode as "
+                    "channel_mode; for RPN/NRPN use rpn and nrpn."),
+        "fields": {"channel": _CHANNEL_DOC, "control": "0-127, required",
+                   "value": "0-127, default 0"},
+        "example": {"type": "control_change", "channel": 0, "control": 7, "value": 100},
+    },
+    "program_change": {
+        "summary": "Program Change (Cn).",
+        "fields": {"channel": _CHANNEL_DOC, "program": "0-127, required"},
+        "example": {"type": "program_change", "channel": 0, "program": 5},
+    },
+    "pitchwheel": {
+        "summary": "Pitch Bend (En).",
+        "fields": {"channel": _CHANNEL_DOC, "pitch": "-8192 to 8191, default 0 (center)"},
+        "example": {"type": "pitchwheel", "channel": 0, "pitch": 4096},
+    },
+    "aftertouch": {
+        "summary": "Channel Pressure (Dn): one value for the whole channel.",
+        "fields": {"channel": _CHANNEL_DOC, "value": "0-127, default 0"},
+        "example": {"type": "aftertouch", "channel": 0, "value": 64},
+    },
+    "polytouch": {
+        "summary": "Polyphonic Key Pressure (An): one value per note.",
+        "fields": {"channel": _CHANNEL_DOC, "note": "0-127, required",
+                   "value": "0-127, default 0"},
+        "example": {"type": "polytouch", "channel": 0, "note": 60, "value": 64},
+    },
+    "channel_mode": {
+        "summary": ("Channel Mode messages: Control Change 120-127 by name. "
+                    "omni_off, omni_on, mono_on and poly_on also act as All "
+                    "Notes Off on the receiver."),
+        "fields": {"channel": _CHANNEL_DOC},
+        "commands": {
+            "all_sound_off": _no_fields("CC 120, value 0.", {
+                "type": "channel_mode", "command": "all_sound_off"}),
+            "reset_all_controllers": _no_fields("CC 121, value 0.", {
+                "type": "channel_mode", "command": "reset_all_controllers"}),
+            "local_control": {
+                "summary": "CC 122: local keyboard connected to the synth (127) or not (0).",
+                "fields": {"on": "true or false, required"},
+                "example": {"type": "channel_mode", "command": "local_control", "on": False},
+            },
+            "all_notes_off": _no_fields("CC 123, value 0.", {
+                "type": "channel_mode", "command": "all_notes_off"}),
+            "omni_off": _no_fields("CC 124, value 0.", {
+                "type": "channel_mode", "command": "omni_off"}),
+            "omni_on": _no_fields("CC 125, value 0.", {
+                "type": "channel_mode", "command": "omni_on"}),
+            "mono_on": {
+                "summary": "CC 126: Mono mode.",
+                "fields": {"channel_count": (
+                    "0-16, required: the number of channels; 0 means as many "
+                    "as the receiver has voices")},
+                "example": {"type": "channel_mode", "command": "mono_on", "channel_count": 4},
+            },
+            "poly_on": _no_fields("CC 127, value 0.", {
+                "type": "channel_mode", "command": "poly_on"}),
+        },
+    },
+    "quarter_frame": {
+        "summary": ("MTC Quarter Frame (F1), one piece. For a whole time use "
+                    "mtc_quarter_frame_sequence."),
+        "fields": {"frame_type": "0-7, required (which nibble)",
+                   "frame_value": "0-15, required"},
+        "example": {"type": "quarter_frame", "frame_type": 0, "frame_value": 0},
+    },
+    "songpos": {
+        "summary": "Song Position Pointer (F2), in MIDI beats (6 clocks each).",
+        "fields": {"pos": "0-16383, default 0"},
+        "example": {"type": "songpos", "pos": 32},
+    },
+    "song_select": {
+        "summary": "Song Select (F3).",
+        "fields": {"song": "0-127, required"},
+        "example": {"type": "song_select", "song": 3},
+    },
+    "tune_request": _no_fields("Tune Request (F6).", {"type": "tune_request"}),
+    "clock": _no_fields("Timing Clock (F8), 24 per quarter note; for a steady "
+                        "stream use the run_clock action.", {"type": "clock"}),
+    "start": _no_fields("Start (FA).", {"type": "start"}),
+    "continue": _no_fields("Continue (FB).", {"type": "continue"}),
+    "stop": _no_fields("Stop (FC).", {"type": "stop"}),
+    "active_sensing": _no_fields(
+        "Active Sensing (FE). Received only on an input opened with "
+        "'active_sensing': true.", {"type": "active_sensing"}),
+    "reset": _no_fields("System Reset (FF).", {"type": "reset"}),
+    "sysex": {
+        "summary": "Any System Exclusive message, as raw data bytes.",
+        "fields": {"data": ("list of 0-127, required; without the F0 and F7, "
+                            "which are added")},
+        "example": {"type": "sysex", "data": [0x7E, 0x7F, 0x06, 0x01]},
+    },
+    "rpn": {
+        "summary": ("Registered Parameter change: CC 100/101 select it, CC 6 "
+                    "(and CC 38) set it. Sent as 3 or 4 Control Changes."),
+        "fields": {
+            "channel": _CHANNEL_DOC,
+            "parameter": (f"one of {', '.join(_RPN_NAMED_PARAMETERS)}; or give "
+                          "'parameter_number'. 'null' sends only the deselect "
+                          "(CC 100/101 = 127) and takes no value."),
+            "parameter_number": "0-16383, in place of 'parameter'",
+            "value": "0-16383 (14-bit), or 0-127 with msb_only; required",
+            "msb_only": "true sends only CC 6 (7-bit value); default false",
+        },
+        "example": {"type": "rpn", "channel": 0, "parameter": "pitch_bend_sensitivity",
+                    "value": 2, "msb_only": True},
+    },
+    "nrpn": {
+        "summary": ("Non-Registered Parameter change: CC 98/99 select it, CC 6 "
+                    "(and CC 38) set it. Sent as 3 or 4 Control Changes."),
+        "fields": {
+            "channel": _CHANNEL_DOC,
+            "parameter_number": "0-16383, required (MSB << 7 | LSB)",
+            "value": "0-16383 (14-bit), or 0-127 with msb_only; required",
+            "msb_only": "true sends only CC 6 (7-bit value); default false",
+        },
+        "example": {"type": "nrpn", "channel": 0, "parameter_number": 0x1F28,
+                    "value": 8192},
+    },
+    "mtc_quarter_frame_sequence": {
+        "summary": ("The 8 MTC Quarter Frames (F1) for one time, the same "
+                    "position as mtc_full. A snapshot, not a running clock."),
+        "fields": {**_TIME_CODE_DOCS,
+                   "direction": "'forward' (types 0-7, default) or 'reverse' (7-0)"},
+        "example": {"type": "mtc_quarter_frame_sequence", **_TC_EXAMPLE,
+                    "frame_rate": "30nondrop"},
+    },
+    "mtc_full": {
+        "summary": "MTC Full Message (F0 7F id 01 01): jump to a position in one message.",
+        "fields": {**_TIME_CODE_DOCS, "device_id": _DEVICE_ID_DOC},
+        "example": {"type": "mtc_full", **_TC_EXAMPLE, "frame_rate": "25"},
+    },
+    "mtc_nak": {
+        "summary": ("MTC sync-dropped NAK (F0 7E id 7E pp): the receiver treats "
+                    "it as tape stopped. Same bytes as file_dump 'nak'."),
+        "fields": {"device_id": _DEVICE_ID_DOC, "packet_number": "0-127, default 0"},
+        "example": {"type": "mtc_nak", "device_id": 0x7F},
+    },
+    "mtc_user_bits": {
+        "summary": "MTC User Bits (F0 7F id 01 02): the 32 SMPTE user bits.",
+        "fields": {
+            "device_id": _DEVICE_ID_DOC,
+            "binary_groups": "8 values 0-15, group 1 first; or give 'characters'",
+            "characters": ("4 characters (codes 0-255), in place of "
+                           "'binary_groups'; the first character is groups 8 and 7"),
+            "flags": "0-3, default 0: bit 0 = SMPTE bit 43, bit 1 = SMPTE bit 59",
+        },
+        "example": {"type": "mtc_user_bits", "characters": "ABCD"},
+    },
+}
+
+
+def _describe(tool_input: dict) -> str:
+    """The describe action: _DOCS for 'message' {'type', 'command'}, or the
+    type list when no type is given."""
+    message = tool_input.get("message") or {}
+    msg_type = message.get("type")
+    if msg_type is None:
+        return json.dumps({
+            "status": "ok",
+            "types": {t: _DOCS[t]["summary"] if t in _DOCS else None for t in _MESSAGE_TYPES},
+            "note": ("describe with 'message': {'type': T} for T's fields; a "
+                     "'time' field (delta ticks) applies in write_midi_file only"),
+        })
+    if msg_type not in _MESSAGE_TYPES:
+        return _err(f"unknown type {msg_type!r}; describe with no 'message' lists them")
+    doc = _DOCS.get(msg_type)
+    if doc is None:
+        return _err(f"no field documentation for {msg_type!r}")
+    out = {"status": "ok", "type": msg_type, "summary": doc["summary"],
+           "fields": dict(doc["fields"])}
+    commands = doc.get("commands")
+    if commands is None:
+        out["example"] = doc["example"]
+        return json.dumps(out)
+    command = message.get("command")
+    if command is None:
+        out["fields"]["command"] = "required, one of the names in 'commands'"
+        out["commands"] = {name: entry["summary"] for name, entry in commands.items()}
+        return json.dumps(out)
+    if command not in commands:
+        return _err(f"unknown {msg_type} command {command!r}; valid: {sorted(commands)}")
+    entry = commands[command]
+    out.update(command=command, summary=entry["summary"], example=entry["example"])
+    out["fields"].update(entry["fields"])
+    return json.dumps(out)
 
 
 # mido's meta message types (mido.midifiles.meta._META_SPEC_BY_TYPE).
