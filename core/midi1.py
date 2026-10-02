@@ -1,8 +1,11 @@
 """MIDI 1.0 tool: device discovery, port I/O, typed message building, and
 .mid/.syx files.
 
-Built on mido with the python-rtmidi backend. If mido isn't installed, the
-module still imports and every action returns an install hint.
+Built on mido. Output ports and port listing use mido's python-rtmidi
+backend; input ports are ALSA sequencer clients midi1 opens itself through
+cffi (_AlsaInput). If mido isn't installed, the module still imports and
+every action returns an install hint; without cffi or libasound.so.2, only
+opening an input fails.
 
 Actions (dispatched by `_run`):
   - list_devices        input and output port names.
@@ -17,7 +20,9 @@ Actions (dispatched by `_run`):
                         text, the raw hex, the decoded dict (_decode_message),
                         any RPN/NRPN or Quarter Frame change it completes
                         (_StreamDecoder), and a wall-clock 'received_at'
-                        taken when the message arrived.
+                        taken when the message arrived. An entry with
+                        'overflow': true marks where the input queue
+                        overflowed and messages were lost.
                         'timeout_seconds' (0-60, default 0) waits until a
                         message arrives or the timeout passes.
   - read_midi_file      .mid/.midi (mido.MidiFile) or .syx
@@ -39,18 +44,24 @@ multi-message types in `_build_message_sequence`, file-only meta events in
 SysEx 'data' excludes F0/F7; mido adds them on send and strips them on
 receive. Every data byte must be 0-127.
 
-Input ports are rtmidi.MidiIn objects opened by _RtMidiInput, not mido
-ports: mido's rtmidi backend always filters out Active Sensing. 'open' with
-'active_sensing': true passes it through to 'poll'.
+Input ports are _AlsaInput, not mido ports. rtmidi's input client has a
+200-event kernel queue; a faster burst (a device's backlog at open, a large
+SysEx) overflows it, and the kernel then discards everything queued.
+_AlsaInput's client has the kernel's largest queue, 2000 events, and reports
+an overflow. mido's rtmidi input also always drops Active Sensing; 'open'
+with 'active_sensing': true passes it through to 'poll'.
 
 Open ports and input buffers live in process memory; handles don't survive a
 ResearchMesh restart.
 """
 
 import asyncio
+import errno
 import itertools
 import json
 import os
+import re
+import select
 import threading
 import time
 from collections import deque
@@ -61,6 +72,44 @@ try:
 except ImportError as e:
     mido = None  # type: ignore[assignment]
     _MIDO_IMPORT_ERROR = e
+
+# ALSA sequencer, for input ports (_AlsaInput). Declarations match
+# /usr/include/alsa/seq.h, seqmid.h and seq_midi_event.h; event structs stay
+# opaque, since snd_midi_event_decode turns each event back into MIDI bytes.
+try:
+    from cffi import FFI
+    _ALSA_FFI = FFI()
+    _ALSA_FFI.cdef("""
+        typedef struct _snd_seq snd_seq_t;
+        typedef struct snd_seq_event snd_seq_event_t;
+        typedef struct _snd_seq_client_pool snd_seq_client_pool_t;
+        typedef struct snd_midi_event snd_midi_event_t;
+        struct pollfd { int fd; short events; short revents; };
+        int snd_seq_open(snd_seq_t **handle, const char *name, int streams, int mode);
+        int snd_seq_close(snd_seq_t *handle);
+        int snd_seq_set_client_name(snd_seq_t *seq, const char *name);
+        int snd_seq_create_simple_port(snd_seq_t *seq, const char *name,
+                                       unsigned int caps, unsigned int type);
+        int snd_seq_connect_from(snd_seq_t *seq, int my_port, int src_client, int src_port);
+        int snd_seq_set_client_pool_input(snd_seq_t *seq, size_t size);
+        int snd_seq_client_pool_malloc(snd_seq_client_pool_t **ptr);
+        void snd_seq_client_pool_free(snd_seq_client_pool_t *ptr);
+        int snd_seq_get_client_pool(snd_seq_t *handle, snd_seq_client_pool_t *info);
+        size_t snd_seq_client_pool_get_input_pool(const snd_seq_client_pool_t *info);
+        int snd_seq_poll_descriptors(snd_seq_t *handle, struct pollfd *pfds,
+                                     unsigned int space, short events);
+        int snd_seq_event_input(snd_seq_t *handle, snd_seq_event_t **ev);
+        int snd_midi_event_new(size_t bufsize, snd_midi_event_t **rdev);
+        void snd_midi_event_free(snd_midi_event_t *dev);
+        void snd_midi_event_no_status(snd_midi_event_t *dev, int on);
+        long snd_midi_event_decode(snd_midi_event_t *dev, unsigned char *buf,
+                                   long count, const snd_seq_event_t *ev);
+    """)
+    _ALSA = _ALSA_FFI.dlopen("libasound.so.2")
+    _ALSA_IMPORT_ERROR: Exception | None = None
+except (ImportError, OSError) as e:
+    _ALSA_FFI = _ALSA = None
+    _ALSA_IMPORT_ERROR = e
 
 # --- Command tables ------------------------------------------------------
 # For each message type with a 'command' field: command name -> the byte that
@@ -362,7 +411,11 @@ TOOLS = [
                         "read_midi_file", "write_midi_file",
                         "decode_mmc_response", "run_clock",
                     ],
-                    "description": "Which MIDI operation to perform.",
+                    "description": (
+                        "Which MIDI operation to perform. A 'poll' entry with "
+                        "'overflow': true marks where the input queue overflowed "
+                        "(a burst of over 2000 events) and messages were lost."
+                    ),
                 },
                 "port_name": {
                     "type": "string",
@@ -754,16 +807,17 @@ TOOLS = [
 _TOOL_NAMES = {t["name"] for t in TOOLS}
 _MESSAGE_TYPES = TOOLS[0]["input_schema"]["properties"]["message"]["properties"]["type"]["enum"]
 
-# handle -> (direction, port): a mido output port or an _RtMidiInput.
+# handle -> (direction, port): a mido output port or an _AlsaInput.
 # Process memory only.
 _OPEN_PORTS: dict = {}
 _HANDLE_COUNTER = itertools.count(1)
 
 # Per input handle: a deque of (received_at, mido.Message), an Event that
-# _poll waits on, and a _StreamDecoder that _poll feeds in arrival order. The callback _open registers fills both. It replaces mido's
-# internal queue (mido's rtmidi Input delivers each message to the callback
-# or the queue, never both) so each message gets a time.time() stamp when it
-# arrives. The deque drops its oldest entries past _INPUT_BUFFER_MAXLEN.
+# _poll waits on, and a _StreamDecoder that _poll feeds in arrival order. The
+# callbacks _open gives _AlsaInput fill the deque and set the Event; each
+# message is stamped with time.time() when it arrives, and an overflow is
+# queued as (time, None). The deque drops its oldest entries past
+# _INPUT_BUFFER_MAXLEN.
 _INPUT_BUFFER_MAXLEN = 10_000
 _INPUT_BUFFERS: dict = {}
 _INPUT_EVENTS: dict = {}
@@ -874,46 +928,136 @@ def _list_devices() -> str:
     return json.dumps({"status": "ok", "inputs": inputs, "outputs": outputs})
 
 
-class _RtMidiInput:
-    """An input port opened with rtmidi.MidiIn directly. mido's rtmidi Input
-    calls ignore_types(False, False, True), which drops Active Sensing with
-    no way to change it; this does the same open and parse
-    (mido.Message.from_bytes on each complete message rtmidi delivers) with
-    the filter chosen here. SysEx and timing messages are always passed."""
+# The largest input pool the kernel gives a sequencer client
+# (SNDRV_SEQ_MAX_CLIENT_EVENTS in include/sound/seq_kernel.h). A larger request
+# is ignored without an error, so _AlsaInput reads the size back.
+_ALSA_INPUT_POOL = 2000
 
-    def __init__(self, port_name: str, on_message, active_sensing: bool) -> None:
-        import rtmidi
-        from mido.backends.rtmidi_utils import expand_alsa_port_name
 
-        self._rt = rtmidi.MidiIn()
+def _alsa_port_address(port_name: str) -> tuple:
+    """(full port name, client, port) for an input port name as list_devices
+    gives it, or a shorter form mido accepts ("client:port name")."""
+    from mido.backends.rtmidi_utils import expand_alsa_port_name
+
+    names = mido.get_input_names()
+    port_name = expand_alsa_port_name(names, port_name)
+    found = re.search(r" (\d+):(\d+)$", port_name) if port_name in names else None
+    if found is None:
+        raise OSError(f"unknown port {port_name!r}")
+    return port_name, int(found.group(1)), int(found.group(2))
+
+
+class _AlsaInput:
+    """An input port as an ALSA sequencer client of its own, subscribed to
+    the device's port, with an input pool of _ALSA_INPUT_POOL events. A
+    thread waits on the client's poll descriptor, reads every queued event,
+    turns it back into bytes (snd_midi_event_decode) and parses them with
+    mido.Parser, which joins SysEx split across events. on_message gets each
+    mido.Message; on_overflow is called when the kernel reports the pool
+    overflowed (it has then discarded everything queued)."""
+
+    def __init__(self, port_name: str, on_message, on_overflow, active_sensing: bool) -> None:
+        if _ALSA is None:
+            raise OSError(f"input ports need cffi and libasound.so.2 ({_ALSA_IMPORT_ERROR})")
+        self.name, client, port = _alsa_port_address(port_name)
+        ffi, lib = _ALSA_FFI, _ALSA
+        handle = ffi.new("snd_seq_t **")
+        # SND_SEQ_OPEN_INPUT = 2, SND_SEQ_NONBLOCK = 1
+        rc = lib.snd_seq_open(handle, b"default", 2, 1)
+        if rc < 0:
+            raise OSError(f"snd_seq_open failed ({rc})")
+        self._seq = handle[0]
+        self._decoder = ffi.NULL
         try:
-            names = self._rt.get_ports()
-            if self._rt.get_current_api() == rtmidi.API_LINUX_ALSA:
-                port_name = expand_alsa_port_name(names, port_name)
-            if port_name not in names:
-                raise OSError(f"unknown port {port_name!r}")
-            self._rt.ignore_types(sysex=False, timing=False,
-                                  active_sense=not active_sensing)
-            self._on_message = on_message
-            # Before open_port, so nothing waits in rtmidi's own queue.
-            self._rt.set_callback(self._callback)
-            self._rt.open_port(names.index(port_name))
+            lib.snd_seq_set_client_name(self._seq, b"midi1")
+            pool = self._set_input_pool()
+            if pool != _ALSA_INPUT_POOL:
+                raise OSError(f"input pool is {pool} events, not {_ALSA_INPUT_POOL}")
+            # caps WRITE | SUBS_WRITE; type MIDI_GENERIC | APPLICATION
+            my_port = lib.snd_seq_create_simple_port(
+                self._seq, b"input", (1 << 1) | (1 << 6), (1 << 1) | (1 << 20))
+            if my_port < 0:
+                raise OSError(f"snd_seq_create_simple_port failed ({my_port})")
+            decoder = ffi.new("snd_midi_event_t **")
+            if lib.snd_midi_event_new(0, decoder) < 0:
+                raise OSError("snd_midi_event_new failed")
+            self._decoder = decoder[0]
+            lib.snd_midi_event_no_status(self._decoder, 1)  # full status bytes
+            pfd = ffi.new("struct pollfd[1]")
+            if lib.snd_seq_poll_descriptors(self._seq, pfd, 1, select.POLLIN) != 1:
+                raise OSError("snd_seq_poll_descriptors failed")
+            self._fd = pfd[0].fd
+            self._on_message, self._on_overflow = on_message, on_overflow
+            self._active_sensing = active_sensing
+            self._stop = False
+            self._thread = threading.Thread(target=self._read, daemon=True,
+                                            name=f"midi1 input {self.name}")
+            self._thread.start()
+            # Subscribing opens the device's input; a backlog arrives now.
+            rc = lib.snd_seq_connect_from(self._seq, my_port, client, port)
+            if rc < 0:
+                raise OSError(f"can't subscribe to {client}:{port} ({rc})")
         except Exception:
-            self._rt.delete()
+            self.close()
             raise
-        self.name = port_name
 
-    def _callback(self, event, _data) -> None:
+    def _set_input_pool(self) -> int:
+        lib, ffi = _ALSA, _ALSA_FFI
+        lib.snd_seq_set_client_pool_input(self._seq, _ALSA_INPUT_POOL)
+        info = ffi.new("snd_seq_client_pool_t **")
+        if lib.snd_seq_client_pool_malloc(info) < 0:
+            raise OSError("snd_seq_client_pool_malloc failed")
         try:
-            msg = mido.Message.from_bytes(event[0])
-        except ValueError:
-            return  # not a complete MIDI message; mido drops these too
-        self._on_message(msg)
+            if lib.snd_seq_get_client_pool(self._seq, info[0]) < 0:
+                raise OSError("snd_seq_get_client_pool failed")
+            return lib.snd_seq_client_pool_get_input_pool(info[0])
+        finally:
+            lib.snd_seq_client_pool_free(info[0])
+
+    def _read(self) -> None:
+        ffi, lib = _ALSA_FFI, _ALSA
+        poller = select.poll()
+        poller.register(self._fd, select.POLLIN)
+        event = ffi.new("snd_seq_event_t **")
+        size = 4096
+        out = ffi.new("unsigned char[]", size)
+        parser = mido.Parser()
+        while not self._stop:
+            poller.poll(100)  # ms; also how often _stop is checked
+            while not self._stop:
+                rc = lib.snd_seq_event_input(self._seq, event)
+                if rc == -errno.EAGAIN:
+                    break
+                if rc == -errno.ENOSPC:
+                    parser = mido.Parser()  # a SysEx in progress is lost too
+                    self._on_overflow()
+                    continue
+                if rc < 0:
+                    break
+                n = lib.snd_midi_event_decode(self._decoder, out, size, event[0])
+                while n == -errno.ENOMEM:  # a SysEx chunk larger than the buffer
+                    size *= 4
+                    out = ffi.new("unsigned char[]", size)
+                    n = lib.snd_midi_event_decode(self._decoder, out, size, event[0])
+                if n <= 0:
+                    continue  # not a MIDI event (port subscribed, client start, ...)
+                parser.feed(bytes(ffi.buffer(out, n)))
+                for msg in parser:
+                    if msg.type == "active_sensing" and not self._active_sensing:
+                        continue
+                    self._on_message(msg)
 
     def close(self) -> None:
-        self._rt.cancel_callback()
-        self._rt.close_port()
-        self._rt.delete()
+        self._stop = True
+        thread = getattr(self, "_thread", None)
+        if thread is not None and thread is not threading.current_thread():
+            thread.join()
+        if self._decoder != _ALSA_FFI.NULL:
+            _ALSA.snd_midi_event_free(self._decoder)
+            self._decoder = _ALSA_FFI.NULL
+        if self._seq is not None:
+            _ALSA.snd_seq_close(self._seq)
+            self._seq = None
 
 
 def _open(tool_input: dict) -> str:
@@ -933,9 +1077,9 @@ def _open(tool_input: dict) -> str:
 
     try:
         if direction == "input":
-            # Runs on rtmidi's thread with a parsed mido.Message.
-            # deque append/popleft and Event set/wait/clear need no lock
-            # with one producer and one consumer.
+            # Both run on _AlsaInput's thread. deque append/popleft and
+            # Event set/wait/clear need no lock with one producer and one
+            # consumer.
             buf: deque = deque(maxlen=_INPUT_BUFFER_MAXLEN)
             event = threading.Event()
 
@@ -943,7 +1087,11 @@ def _open(tool_input: dict) -> str:
                 _buf.append((time.time(), msg))
                 _event.set()
 
-            port = _RtMidiInput(port_name, _on_message, active_sensing)
+            def _on_overflow(_buf: deque = buf, _event: threading.Event = event) -> None:
+                _buf.append((time.time(), None))
+                _event.set()
+
+            port = _AlsaInput(port_name, _on_message, _on_overflow, active_sensing)
             _INPUT_BUFFERS[handle] = buf
             _INPUT_EVENTS[handle] = event
             _STREAM_DECODERS[handle] = _StreamDecoder()
@@ -4724,11 +4872,16 @@ def _poll(tool_input: dict) -> str:
 
     # 'received_at' was stamped by the callback on arrival. 'decoded' is the
     # dict 'send' takes; 'completes' is an RPN/NRPN change or Quarter Frame
-    # time that this message finishes.
+    # time that this message finishes. An overflow (msg None) lost messages,
+    # so partial RPN/NRPN, Quarter Frame and segment state starts over.
     stream = _STREAM_DECODERS.setdefault(handle, _StreamDecoder())
     messages = []
     while buf:
         received_at, msg = buf.popleft()
+        if msg is None:
+            messages.append({"received_at": received_at, "overflow": True})
+            stream = _STREAM_DECODERS[handle] = _StreamDecoder()
+            continue
         entry = {
             "received_at": received_at, "message": str(msg),
             "hex": msg.hex(), "decoded": _decode_message(msg),

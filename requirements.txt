@@ -83,6 +83,12 @@ mido[ports-rtmidi]>=1.3  # `midi1` — MIDI 1.0 device I/O (core/midi1.py). The
                          # dispatcher): missing this only disables `midi1`,
                          # same "declares itself, returns an install hint"
                          # contract as every other tool in this section.
+cffi>=1.15               # `midi1` input ports (core/midi1.py, _AlsaInput): an
+                         # ALSA sequencer client opened through cffi with the
+                         # system libasound.so.2, so its kernel input queue can
+                         # be 2000 events (rtmidi's is 200 and loses bursts).
+                         # Without it, sending works and opening an input
+                         # returns an error.
 # `memory` needs nothing beyond the standard library (core/memory.py).
 
 ruff>=0.16               # linter, `pyproject.toml`'s `[tool.ruff.lint]` tunes it for this

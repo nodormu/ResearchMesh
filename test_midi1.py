@@ -1120,7 +1120,18 @@ def check_poll_wait(midi1) -> None:
           [m.get("completes", {}).get("value") for m in msgs]
           == [None, None, None, 0x40, (0x40 << 7) | 0x05], f"{[m.get('completes') for m in msgs]}")
 
-    for name in ("fake-stale", "fake-arrive", "fake-ready", "fake-zero", "fake-decode"):
+    buf, event = _fake_input(midi1, "fake-overflow")
+    midi1._STREAM_DECODERS["fake-overflow"] = midi1._StreamDecoder()
+    for m in (M("control_change", control=99, value=1), M("control_change", control=98, value=2),
+              None, M("control_change", control=6, value=9)):
+        buf.append((time.time(), m))
+    _, msgs = _timed_poll(midi1, "fake-overflow", 0)
+    check("poll: an overflow is an entry in order, and partial NRPN state starts over",
+          [m.get("overflow", False) for m in msgs] == [False, False, True, False]
+          and "completes" not in msgs[3], f"{msgs}")
+
+    for name in ("fake-stale", "fake-arrive", "fake-ready", "fake-zero", "fake-decode",
+                 "fake-overflow"):
         midi1._close({"handle": name})
 
 
@@ -1177,11 +1188,69 @@ def check_live_loopback(midi1) -> None:
         call(action="close", handle=o["handle"])
         call(action="close", handle=i["handle"])
 
+    check_live_bursts(midi1, call, in_port, out_port)
+
     for kw, name in (({"direction": "output", "active_sensing": True}, "on an output"),
                      ({"direction": "input", "active_sensing": "yes"}, "not a boolean"),
                      ({"direction": "input", "port_name": "no such port"}, "unknown port")):
         r = call(action="open", **{"port_name": in_port, **kw})
         check(f"open: error for active_sensing / port ({name})", "error" in r, f"{r}")
+
+
+def check_live_bursts(midi1, call, in_port: str, out_port: str) -> None:
+    """Bursts through Midi Through, sent straight from the output port object
+    (one 'send' per tool call is too slow to make a burst)."""
+    import rtmidi
+
+    M = midi1.mido.Message
+
+    def burst(n: int):
+        i = call(action="open", port_name=in_port, direction="input")
+        o = call(action="open", port_name=out_port, direction="output")
+        out = midi1._OPEN_PORTS[o["handle"]][1]
+        sent = [M("polytouch", note=k % 128, value=(k // 128) % 128) for k in range(n)]
+        # The sender can raise once the receiver's queue is full (recorded in
+        # midi1-completeness-gaps.md, step 7b); count what went out.
+        sent_ok = 0
+        for m in sent:
+            try:
+                out.send(m)
+            except rtmidi.RtMidiError:
+                break
+            sent_ok += 1
+        time.sleep(1.0)
+        with open("/proc/asound/seq/clients") as f:
+            pools = f.read()
+        got = call(action="poll", handle=i["handle"])["messages"]
+        call(action="close", handle=o["handle"])
+        call(action="close", handle=i["handle"])
+        return sent[:sent_ok], got, pools
+
+    sent, got, pools = burst(1500)
+    check("live burst: the input client's kernel pool is 2000 events",
+          re.search(r'"midi1" \[User Legacy\].*?Input pool :\s+Pool size\s+:\s+2000', pools, re.DOTALL)
+          is not None)
+    check("live burst: 1500 events in a burst all arrive, in order",
+          [m["hex"] for m in got] == [m.hex() for m in sent], f"{len(got)} of {len(sent)}")
+
+    sent, got, _ = burst(6000)
+    overflowed = any(m.get("overflow") for m in got)
+    check("live burst: 6000 events either all arrive or the loss is marked",
+          overflowed or [m["hex"] for m in got] == [m.hex() for m in sent],
+          f"{len(got)} entries for {len(sent)} sent, overflow {overflowed}")
+
+    i = call(action="open", port_name=in_port, direction="input")
+    o = call(action="open", port_name=out_port, direction="output")
+    data = [k % 128 for k in range(8000)]
+    try:
+        call(action="send", handle=o["handle"], message={"type": "sysex", "data": data})
+        got = call(action="poll", handle=i["handle"], timeout_seconds=2)["messages"]
+    finally:
+        call(action="close", handle=o["handle"])
+        call(action="close", handle=i["handle"])
+    check("live burst: an 8000-byte SysEx arrives whole",
+          len(got) == 1 and got[0]["decoded"] == {"type": "sysex", "data": data},
+          f"{[(m.get('decoded', {}).get('type'), len(m.get('decoded', {}).get('data', []))) for m in got]}")
 
 
 def main() -> int:
