@@ -594,7 +594,7 @@ def build_snapshot(midi1) -> dict:
         try:
             built = midi1._build_message_sequence(dict(msg))
             out["messages"][name] = [[m.hex(), m.time] for m in built]
-        except Exception as e:  # noqa: BLE001 - the type is what's recorded
+        except Exception as e:  # the exception type is what's recorded
             out["messages"][name] = {"error": type(e).__name__}
     for name, data in MMC_RESPONSES:
         out["mmc_responses"][name] = json.loads(midi1._decode_mmc_response({"data": data}))
@@ -893,7 +893,7 @@ def check_stream_decoder(midi1) -> None:
     def wire(msg):
         return midi1._build_message_sequence(dict(msg))
 
-    spec = dict(dict((n, m) for n, m, _ in SPEC_EXAMPLES)[
+    spec = dict({n: m for n, m, _ in SPEC_EXAMPLES}[
         "RP-013 p.8 segmentation: 11-byte command string as counts 05/05/04, ids 42/01/00"])
     got = feed(wire(spec))
     check("stream: RP-013 p.8 segments reassemble to the four commands, segment_size 4",
@@ -949,7 +949,7 @@ def check_mmc_response_examples(midi1) -> None:
     check("RP-013 appendix: master response has two fields",
           master.get("type") == "fields" and len(fields) == 2, f"{master}")
     if len(fields) == 2:
-        tc, tally = fields
+        tc, _tally = fields
         check("RP-013 appendix: SELECTED TIME CODE 00:22:05:12, 30 fps, status byte",
               (tc["name"], tc["hours"], tc["minutes"], tc["seconds"], tc["frames"],
                tc["frame_rate"], tc["use_status_byte"])
@@ -1027,7 +1027,7 @@ def check_schema(midi1) -> None:
     for t in props["type"]["enum"]:
         try:
             midi1._build_message_sequence({"type": t})
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             if "unknown message type" in str(e):
                 no_builder.append(t)
     check("every type in the schema has a builder", not no_builder, f"{no_builder}")

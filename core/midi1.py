@@ -255,7 +255,7 @@ def _command_enum() -> list:
     return names
 
 
-TOOLS = [
+TOOLS: list[dict] = [
     {
         "name": "midi1",
         "description": (
@@ -1213,14 +1213,14 @@ def _additional_info_bytes(message: dict, command: str) -> list:
             "specify only ONE of 'additional_info_message' or "
             "'additional_info_bytes', not both"
         )
-    if info_message is None and raw_bytes is None:
+    if raw_bytes is not None:
+        return list(raw_bytes)
+    if info_message is None:
         raise KeyError(
             f"'additional_info_message' (or 'additional_info_bytes') — "
             f"required for {command!r}"
         )
-    if info_message is not None:
-        return _build_message(info_message).bytes()
-    return list(raw_bytes)
+    return _build_message(info_message).bytes()
 
 
 def _cueing_event(message: dict, command: str) -> tuple:
@@ -1719,7 +1719,7 @@ def _mmc_response_field(name_byte: int, payload: list) -> dict:
     if codec is not None:
         try:
             return {"type": "field_value", "name": name, **codec[1](payload)}
-        except (ValueError, KeyError, IndexError):
+        except (ValueError, KeyError, IndexError, TypeError):
             pass  # wrong length or an undefined code: report the raw data
     return {"type": "field_value", "name": name, "data": list(payload)}
 
@@ -1790,7 +1790,7 @@ def _decode_mmc_response(tool_input: dict) -> str:
         )
     try:
         fields = _mmc_response_fields(list(data))
-    except ValueError as e:
+    except (ValueError, TypeError) as e:
         return _err(str(e))
     return json.dumps({"status": "ok", **fields})
 
@@ -1934,7 +1934,7 @@ def _required(message: dict, field: str, context: "str | None" = None):
 
 def _check_range(field: str, value, low: int, high: int):
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"'{field}' must be an integer, got {value!r}")
+        raise TypeError(f"'{field}' must be an integer, got {value!r}")
     if not (low <= value <= high):
         raise ValueError(f"'{field}' must be {low}-{high}, got {value!r}")
     return value
@@ -2096,7 +2096,7 @@ def _gpc_data(message: dict) -> tuple:
         if len(slot) != 2:
             raise ValueError(f"each 'slot_path' entry must be [msb, lsb], got {slot!r}")
         data += [_check_range("slot_path byte", b, 0, 127) for b in slot]
-    names = _GPC_PARAMETERS.get(effect, {})
+    names = _GPC_PARAMETERS.get(effect, {}) if effect is not None else {}
     data += _each("parameters", _required_list(message, "parameters", "global_parameter_control"),
                   lambda entry: (
                       *_gpc_field(entry, "parameter", parameter_width, names),
@@ -2138,7 +2138,7 @@ def _tuning_real_time(message: dict, command: str) -> bool:
         return False
     real_time = message.get("real_time", True)
     if not isinstance(real_time, bool):
-        raise ValueError(f"'real_time' must be true or false, got {real_time!r}")
+        raise TypeError(f"'real_time' must be true or false, got {real_time!r}")
     return real_time
 
 
@@ -2387,6 +2387,8 @@ def _each(field: str, entries, encode) -> tuple:
             raise KeyError(f"'{field}'[{index}]: {e}") from e
         except ValueError as e:
             raise ValueError(f"'{field}'[{index}]: {e}") from e
+        except TypeError as e:
+            raise TypeError(f"'{field}'[{index}]: {e}") from e
     return tuple(out)
 
 
@@ -2637,7 +2639,7 @@ def _mmc_command_segment(message: dict, command: str) -> tuple:
     # message (_build_mmc_segments).
     first = message.get("first", False)
     if not isinstance(first, bool):
-        raise ValueError(f"'first' must be true or false, got {first!r}")
+        raise TypeError(f"'first' must be true or false, got {first!r}")
     remaining = _check_range("remaining", _required(message, "remaining", command), 0, 63)
     data = [_check_range("data entry", b, 0, 127)
             for b in _required(message, "data", command)]
@@ -2888,7 +2890,7 @@ _MSC_DATA_BUILDERS = {
 
 _REQUIRED = object()
 
-_MIDO_FIELDS = {
+_MIDO_FIELDS: dict[str, dict] = {
     "note_on": {"note": _REQUIRED, "velocity": 64},
     "note_off": {"note": _REQUIRED, "velocity": 0},
     "control_change": {"control": _REQUIRED, "value": 0},
@@ -4702,8 +4704,9 @@ def _build_meta_message(message: dict) -> "mido.MetaMessage":
 # reproduces the original message.
 
 
-def _name_for(table: dict, code: int) -> str:
-    """The name whose value is `code` in a name -> code table."""
+def _name_for(table: dict, code: "int | tuple") -> str:
+    """The name whose value is `code` in a name -> code table (codes are
+    ints, or tuples where a command takes two bytes, as in sample_dump)."""
     for name, value in table.items():
         if value == code:
             return name
@@ -4783,15 +4786,14 @@ def _decode_gpc(payload) -> dict:
         out["parameter_width"] = parameter_width
     if value_width != 1:
         out["value_width"] = value_width
-    names = _GPC_PARAMETERS.get(effect, {})
+    names = _GPC_PARAMETERS.get(effect, {}) if effect is not None else {}
     parameters = []
     for i in range(0, len(rest), step):
-        parameter = list(rest[i:i + parameter_width])
+        parameter: list | int | str = list(rest[i:i + parameter_width])
         value = list(rest[i + parameter_width:i + step])
         if parameter_width == 1:
-            parameter = parameter[0]
-            if parameter in names.values():
-                parameter = _name_for(names, parameter)
+            code = rest[i]
+            parameter = _name_for(names, code) if code in names.values() else code
         parameters.append({
             "parameter": parameter, "value": value[0] if value_width == 1 else value,
         })
@@ -4908,6 +4910,7 @@ def _decode_handshake(data: tuple) -> dict:
 
 def _decode_sample_dump(data: tuple) -> dict:
     device_id, sub_id1 = data[1], data[2]
+    key: tuple
     if sub_id1 == 0x05:
         key, payload = (0x05, data[3]), data[4:]
     else:
@@ -5506,7 +5509,7 @@ class _StreamDecoder:
                 return {"type": "mmc_response", "device_id": fields.pop("device_id"),
                         "response": fields, "segments": len(pieces)}
             commands = _mmc_parse_commands(whole)
-        except (ValueError, KeyError, IndexError):
+        except (ValueError, KeyError, IndexError, TypeError):
             return None
         if len(commands) == 1:
             command = commands[0]
@@ -5565,7 +5568,7 @@ class _StreamDecoder:
             rebuilt = _build_rpn_or_nrpn_sequence(
                 dict(combined), registered=state["kind"] == "rpn",
             )
-        except (KeyError, ValueError):
+        except (KeyError, ValueError, TypeError):
             return None
         return combined if rebuilt[-1].bytes() == msg.bytes() else None
 
@@ -5596,7 +5599,7 @@ class _StreamDecoder:
         }
         try:
             rebuilt = _build_quarter_frame_sequence(dict(combined))
-        except (KeyError, ValueError):
+        except (KeyError, ValueError, TypeError):
             return None
         if [(m.frame_type, m.frame_value) for m in rebuilt] != received:
             return None

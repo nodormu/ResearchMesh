@@ -367,7 +367,7 @@
    "error": "KeyError"
   },
   "err: tuning real_time not bool": {
-   "error": "ValueError"
+   "error": "TypeError"
   },
   "err: unknown type": {
    "error": "ValueError"
