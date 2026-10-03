@@ -851,9 +851,8 @@ _FRAME_RATE_BITS = {"24": 0b00, "25": 0b01, "30drop": 0b10, "30nondrop": 0b11}
 
 
 def _encode_smpte_hour_byte(hours: int, frame_rate: str) -> int:
-    if not (0 <= hours <= 23):
-        raise ValueError(f"'hours' must be 0-23, got {hours!r}")
-    if frame_rate not in _FRAME_RATE_BITS:
+    _check_range("hours", hours, 0, 23)
+    if not isinstance(frame_rate, str) or frame_rate not in _FRAME_RATE_BITS:
         raise ValueError(
             f"'frame_rate' must be one of {sorted(_FRAME_RATE_BITS)}, "
             f"got {frame_rate!r}"
@@ -871,7 +870,7 @@ def _encode_standard_speed(speed: float, reverse: bool) -> tuple:
     round(speed * 2**(14 - sss)). The smallest sss that fits is used, for
     the most precision.
     """
-    if speed < 0:
+    if _as_number("speed", speed) < 0:
         raise ValueError(
             f"'speed' must be >= 0 (use 'reverse' for direction), "
             f"got {speed!r}"
@@ -1010,7 +1009,7 @@ def _resolve_info_field_name(
     require_mask_writeable: the field must be in
     _MASK_WRITEABLE_INFO_FIELDS (a masked_write target).
     """
-    if name not in _INFO_FIELD_NAMES:
+    if _as_text('Information Field name', name) not in _INFO_FIELD_NAMES:
         raise ValueError(
             f"unknown Information Field name {name!r}; must be one of "
             f"{sorted(_INFO_FIELD_NAMES)}"
@@ -1047,7 +1046,7 @@ def _encode_nested_mmc_command(
     - forbid_execute_name: no nested PROCEDURE [EXECUTE] of the procedure
       being assembled (PROCEDURE [ASSEMBLE] only).
     """
-    if nested.get("type") != "mmc":
+    if _as_dict("nested command", nested).get("type") != "mmc":
         raise ValueError(
             f"nested commands must be type 'mmc', got "
             f"{nested.get('type')!r}"
@@ -1114,12 +1113,9 @@ def _encode_standard_time_code(
     (estimated, invalid, video field 1, no time code) when i=1.
     All flags default to off.
     """
-    if not (0 <= minutes <= 59):
-        raise ValueError(f"'minutes' must be 0-59, got {minutes!r}")
-    if not (0 <= seconds <= 59):
-        raise ValueError(f"'seconds' must be 0-59, got {seconds!r}")
-    if not (0 <= frames <= 29):
-        raise ValueError(f"'frames' must be 0-29, got {frames!r}")
+    _check_range("minutes", minutes, 0, 59)
+    _check_range("seconds", seconds, 0, 59)
+    _check_range("frames", frames, 0, 29)
     hr_byte = _encode_smpte_hour_byte(hours, frame_rate)
     mn_byte = (0x40 if color_frame else 0x00) | minutes
     sc_byte = (0x40 if blank else 0x00) | seconds
@@ -1136,10 +1132,7 @@ def _encode_standard_time_code(
             | (0x08 if no_time_code else 0x00)
         )
     else:
-        if not (0 <= subframes <= 99):
-            raise ValueError(
-                f"'subframes' must be 0-99, got {subframes!r}"
-            )
+        _check_range("subframes", subframes, 0, 99)
         fifth_byte = subframes
     return hr_byte, mn_byte, sc_byte, fr_byte, fifth_byte
 
@@ -1214,13 +1207,13 @@ def _additional_info_bytes(message: dict, command: str) -> list:
             "'additional_info_bytes', not both"
         )
     if raw_bytes is not None:
-        return list(raw_bytes)
+        return _as_list("additional_info_bytes", raw_bytes)
     if info_message is None:
         raise KeyError(
             f"'additional_info_message' (or 'additional_info_bytes') — "
             f"required for {command!r}"
         )
-    return _build_message(info_message).bytes()
+    return _build_message(_as_dict("additional_info_message", info_message)).bytes()
 
 
 def _cueing_event(message: dict, command: str) -> tuple:
@@ -1333,7 +1326,7 @@ def _encode_track_bitmap(entry: dict) -> tuple:
                       ("aux_track_b", 4)):
         if entry.get(flag):
             out[0] |= 1 << bit
-    for track in entry.get("active_tracks", []):
+    for track in _as_list("active_tracks", entry.get("active_tracks", [])):
         _check_range("active_tracks entry", track, 1, 317)
         if track <= 2:
             out[0] |= 1 << (track + 4)
@@ -1801,7 +1794,7 @@ def _encode_msc_ascii_field(name: str, value: str) -> tuple:
     Only the character set is checked; the spec's rules for stray dots
     apply to receivers.
     """
-    if not value or any(c not in "0123456789." for c in value):
+    if not _as_text(name, value) or any(c not in "0123456789." for c in value):
         raise ValueError(
             f"{name!r} must be a non-empty string of digits and '.' only, "
             f"got {value!r}"
@@ -1847,9 +1840,8 @@ def _encode_tuning_frequency(entry: dict) -> tuple:
         raise KeyError("'semitone' (or 'no_change': true)")
     if cents is None:
         raise KeyError("'cents' (or 'no_change': true)")
-    if not (0 <= semitone <= 127):
-        raise ValueError(f"'semitone' must be 0-127, got {semitone!r}")
-    if not (0 <= cents < 100):
+    _check_range("semitone", semitone, 0, 127)
+    if not (0 <= _as_number("cents", cents) < 100):
         raise ValueError(f"'cents' must be 0 <= cents < 100, got {cents!r}")
     frac14 = round(cents / 100.0 * 16384)
     frac14 = min(frac14, 16383)  # cents just under 100 can round to 16384
@@ -1861,8 +1853,9 @@ def _encode_time_signature_pair(numerator: int, denominator: int) -> tuple:
     the note value (2, 4, 8, ...), as in mido's time_signature meta event;
     the wire byte is its power of 2.
     """
-    if not (0 <= numerator <= 127):
-        raise ValueError(f"'numerator' must be 0-127, got {numerator!r}")
+    _check_range("numerator", numerator, 0, 127)
+    if isinstance(denominator, bool) or not isinstance(denominator, int):
+        raise TypeError(f"'denominator' must be an integer, got {denominator!r}")
     if denominator < 1 or (denominator & (denominator - 1)) != 0:
         raise ValueError(
             f"'denominator' must be a positive power of 2 (1, 2, 4, 8, "
@@ -1882,8 +1875,8 @@ def _nibblize(raw_bytes) -> tuple:
     91 46 7F -> 01 09 06 04 0F 07.
     """
     out: list = []
-    for b in raw_bytes:
-        if not (0 <= b <= 255):
+    for b in _as_list("additional_info_bytes", raw_bytes):
+        if isinstance(b, bool) or not isinstance(b, int) or not (0 <= b <= 255):
             raise ValueError(
                 f"additional-info bytes must each be 0-255 (a full "
                 f"8-bit MIDI byte, pre-nibblization), got {b!r}"
@@ -1909,7 +1902,7 @@ def _encode_file_dump_data(stored_bytes) -> tuple:
         group = stored_bytes[group_start:group_start + 7]
         sign_byte = 0
         for i, b in enumerate(group):
-            if not (0 <= b <= 255):
+            if isinstance(b, bool) or not isinstance(b, int) or not (0 <= b <= 255):
                 raise ValueError(
                     f"stored bytes must each be 0-255, got {b!r}"
                 )
@@ -1940,9 +1933,36 @@ def _check_range(field: str, value, low: int, high: int):
     return value
 
 
+def _as_list(field: str, value) -> list:
+    """A list field's value; anything else is a TypeError."""
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    raise TypeError(f"'{field}' must be a list, got {value!r}")
+
+
+def _as_dict(field: str, value) -> dict:
+    """An object (dict) field's value; anything else is a TypeError."""
+    if isinstance(value, dict):
+        return value
+    raise TypeError(f"'{field}' must be an object, got {value!r}")
+
+
+def _as_text(field: str, value) -> str:
+    if isinstance(value, str):
+        return value
+    raise TypeError(f"'{field}' must be text, got {value!r}")
+
+
+def _as_number(field: str, value) -> "int | float":
+    """An int or float (not a bool)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"'{field}' must be a number, got {value!r}")
+    return value
+
+
 def _choice(message: dict, field: str, table, context: str):
     """Read a required field whose value must be a key of `table`."""
-    value = _required(message, field)
+    value = _as_text(field, _required(message, field))
     if value not in table:
         raise ValueError(
             f"'{field}' must be one of {sorted(table)} for {context!r}, "
@@ -1980,7 +2000,7 @@ def _xor_checksum(data) -> int:
 def _ascii(field: str, text: str, *, printable: bool = False) -> tuple:
     """Encode text as 7-bit ASCII bytes; printable=True allows 20h-7Eh only."""
     low, high = (0x20, 0x7E) if printable else (0x00, 0x7F)
-    for c in text:
+    for c in _as_text(field, text):
         if not (low <= ord(c) <= high):
             kind = "printable ASCII (0x20-0x7E)" if printable else "7-bit ASCII"
             raise ValueError(f"'{field}' must be {kind}, got {c!r}")
@@ -1997,9 +2017,9 @@ def _time_code_fields(message: dict, *extra: str, context: "str | None" = None) 
 def _required_list(message: dict, field: str, context: str) -> list:
     """A required field that must be a non-empty list."""
     value = message.get(field)
-    if not value:
+    if value is None or value == [] or value == ():
         raise KeyError(f"'{field}' (required non-empty list for {context!r})")
-    return list(value)
+    return _as_list(field, value)
 
 
 def _user_bit_groups(message: dict) -> tuple:
@@ -2012,7 +2032,7 @@ def _user_bit_groups(message: dict) -> tuple:
     if groups is not None and characters is not None:
         raise ValueError("specify only ONE of 'binary_groups' or 'characters', not both")
     if characters is not None:
-        if len(characters) != 4:
+        if len(_as_text("characters", characters)) != 4:
             raise ValueError(f"'characters' must be 4 characters, got {characters!r}")
         nibbles = [0] * 8
         for index, char in enumerate(characters):
@@ -2020,7 +2040,7 @@ def _user_bit_groups(message: dict) -> tuple:
             nibbles[7 - 2 * index] = code >> 4
             nibbles[6 - 2 * index] = code & 0x0F
         return tuple(nibbles)
-    groups = _required(message, "binary_groups")
+    groups = _as_list("binary_groups", _required(message, "binary_groups"))
     if len(groups) != 8:
         raise ValueError(f"'binary_groups' must have 8 entries, got {len(groups)}")
     return tuple(_check_range("binary_groups entry", g, 0, 15) for g in groups)
@@ -2093,7 +2113,7 @@ def _gpc_data(message: dict) -> tuple:
     value_width = _check_range("value_width", message.get("value_width", 1), 1, 127)
     data = [len(slot_path), parameter_width, value_width]
     for slot in slot_path:
-        if len(slot) != 2:
+        if not isinstance(slot, (list, tuple)) or len(slot) != 2:
             raise ValueError(f"each 'slot_path' entry must be [msb, lsb], got {slot!r}")
         data += [_check_range("slot_path byte", b, 0, 127) for b in slot]
     names = _GPC_PARAMETERS.get(effect, {}) if effect is not None else {}
@@ -2152,7 +2172,7 @@ def _tuning_program(message: dict) -> int:
 
 def _tuning_name(message: dict) -> tuple:
     """The 16-character tuning name, space padded."""
-    name = message.get("tuning_name", "")
+    name = _as_text("tuning_name", message.get("tuning_name", ""))
     if len(name) > 16:
         raise ValueError(
             f"'tuning_name' must be at most 16 characters, got {len(name)} ({name!r})"
@@ -2162,7 +2182,7 @@ def _tuning_name(message: dict) -> tuple:
 
 def _tuning_notes(message: dict, command: str) -> tuple:
     """128 x [xx yy zz], note 0 first."""
-    notes = _required(message, "notes", command)
+    notes = _as_list("notes", _required(message, "notes", command))
     if len(notes) != 128:
         raise ValueError(
             f"'notes' must have exactly 128 entries (one per MIDI key number), "
@@ -2186,7 +2206,7 @@ def _tuning_offsets(message: dict, command: str, two_byte: bool) -> tuple:
     """Scale/octave offsets for C through B. 1-byte: 0-127, 64 = 0 cents,
     1 cent per step. 2-byte: 0-16383, 8192 = 0 cents, 200/16384 cents per
     step, sent MSB first."""
-    offsets = _required(message, "offsets", command)
+    offsets = _as_list("offsets", _required(message, "offsets", command))
     if len(offsets) != 12:
         raise ValueError(f"'offsets' must have 12 entries (C to B), got {len(offsets)}")
     if not two_byte:
@@ -2286,7 +2306,7 @@ def _pack_sample_words(words, sample_format: int) -> list:
     per_word = _sample_bytes_per_word(sample_format)
     shift = 7 * per_word - sample_format
     out: list = []
-    for word in words:
+    for word in _as_list("words", words):
         value = _check_range("words entry", word, 0, (1 << sample_format) - 1) << shift
         out += [(value >> (7 * (per_word - 1 - i))) & 0x7F for i in range(per_word)]
     if len(out) > _SAMPLE_PACKET_BYTES:
@@ -2380,7 +2400,9 @@ def _each(field: str, entries, encode) -> tuple:
     """encode(entry) for every entry of a list field, concatenated. An error
     is re-raised with the entry's index in front."""
     out: list = []
-    for index, entry in enumerate(entries):
+    for index, entry in enumerate(_as_list(field, entries)):
+        if not isinstance(entry, dict):
+            raise TypeError(f"'{field}'[{index}] must be an object, got {entry!r}")
         try:
             out += encode(entry)
         except KeyError as e:
@@ -2580,7 +2602,8 @@ def _mmc_write(message: dict, command: str) -> tuple:
     # RP-013's appendix example <TIME STANDARD> <count=01> 03.
     data: list = []
     for field in _required_list(message, "fields", command):
-        name = _required(field, "name", "each 'fields' entry")
+        field = _as_dict("fields entry", field)
+        name = _as_text("name", _required(field, "name", "each 'fields' entry"))
         codec = _MMC_FIELD_CODECS.get(name)
         if codec is not None and codec[0] is not None:
             payload = codec[0](field)
@@ -2610,6 +2633,7 @@ def _mmc_masked_write(message: dict, command: str) -> tuple:
     # byte. mask and data are 7-bit, so 7F means all ones.
     data: list = []
     for field in _required_list(message, "fields", command):
+        field = _as_dict("fields entry", field)
         name = _required(field, "name", "each 'fields' entry")
         data.append(_resolve_info_field_name(name, require_mask_writeable=True))
         for key in ("byte_number", "mask", "data"):
@@ -2642,7 +2666,7 @@ def _mmc_command_segment(message: dict, command: str) -> tuple:
         raise TypeError(f"'first' must be true or false, got {first!r}")
     remaining = _check_range("remaining", _required(message, "remaining", command), 0, 63)
     data = [_check_range("data entry", b, 0, 127)
-            for b in _required(message, "data", command)]
+            for b in _as_list("data", _required(message, "data", command))]
     return ((0x40 if first else 0x00) | remaining, *data)
 
 
@@ -2812,7 +2836,7 @@ def _msc_2pc_prefix(message: dict, command: str) -> tuple:
 
 def _msc_cue_data(message: dict) -> tuple:
     """d1 d2 d3 d4 (section 6.8); zeros when unknown, as the spec asks."""
-    values = message.get("cue_data", [0, 0, 0, 0])
+    values = _as_list("cue_data", message.get("cue_data", [0, 0, 0, 0]))
     if len(values) != 4:
         raise ValueError(f"'cue_data' must have 4 values, got {values!r}")
     return tuple(_check_range("cue_data entry", v, 0, 127) for v in values)
@@ -2937,7 +2961,7 @@ def _build_message(message: dict) -> "mido.Message":
         raw_data = message.get("data")
         if raw_data is None:
             raise KeyError("'data'")
-        return mido.Message("sysex", data=tuple(raw_data), time=time)
+        return mido.Message("sysex", data=tuple(_as_list("data", raw_data)), time=time)
     if msg_type == "mtc_full":
         # MTC Full Message (RP-004/008): jumps to a position in one
         # message instead of eight Quarter Frames.
@@ -3030,7 +3054,7 @@ def _build_message(message: dict) -> "mido.Message":
         member = _required(message, "device_family_member_code", "reply")
         software_revision = _required(message, "software_revision", "reply")
 
-        if isinstance(manufacturer_id, int):
+        if isinstance(manufacturer_id, int) and not isinstance(manufacturer_id, bool):
             if not (1 <= manufacturer_id <= 127):
                 raise ValueError(
                     "'manufacturer_id' as a single int must be 1-127 (use "
@@ -3039,7 +3063,7 @@ def _build_message(message: dict) -> "mido.Message":
                 )
             mfr_bytes: tuple = (manufacturer_id,)
         else:
-            mfr_bytes = tuple(manufacturer_id)
+            mfr_bytes = tuple(_as_list("manufacturer_id", manufacturer_id))
             if len(mfr_bytes) != 3 or mfr_bytes[0] != 0:
                 raise ValueError(
                     "'manufacturer_id' as a list/tuple must have exactly "
@@ -3048,7 +3072,7 @@ def _build_message(message: dict) -> "mido.Message":
             for b in mfr_bytes:
                 _check_range("manufacturer_id byte", b, 0, 127)
 
-        revision_bytes = tuple(software_revision)
+        revision_bytes = tuple(_as_list("software_revision", software_revision))
         if len(revision_bytes) != 4:
             raise ValueError(
                 f"'software_revision' must be exactly 4 bytes, got "
@@ -3105,7 +3129,7 @@ def _build_message(message: dict) -> "mido.Message":
         device_id = _device_id(message)
         data = [_check_range("channel", channel, 0, 15)]
         if command == "control_change":
-            control = _required(message, "control", command)
+            control = _check_range("control", _required(message, "control", command), 0, 127)
             if not (0x01 <= control <= 0x1F or 0x40 <= control <= 0x5F):
                 raise ValueError(f"'control' must be 01-1F or 40-5F, got {control!r}")
             data.append(control)
@@ -3366,7 +3390,7 @@ def _build_message(message: dict) -> "mido.Message":
         source = _check_range(
             "source_device_id", _required(message, "source_device_id"), 0, 126,
         )
-        file_type = _required(message, "file_type")
+        file_type = _as_text("file_type", _required(message, "file_type"))
         if len(file_type) != 4:
             raise ValueError(
                 f"'file_type' must be exactly 4 characters (e.g. 'MIDI', "
@@ -3512,7 +3536,7 @@ def _mmc_command_string(message: dict) -> tuple:
             raise ValueError("specify only ONE of 'command' or 'batch', not both")
         entries = _required_list(message, "batch", "mmc")
         for entry in entries:
-            if entry.get("type", "mmc") != "mmc":
+            if _as_dict("batch entry", entry).get("type", "mmc") != "mmc":
                 raise ValueError(f"'batch' entries must be mmc commands, got {entry!r}")
         names = [_choice(entry, "command", _COMMANDS["mmc"], "mmc") for entry in entries]
         alone = sorted({"wait", "resume", "command_segment"} & set(names))
@@ -3560,7 +3584,10 @@ def _build_message_sequence(message: dict) -> list:
         return _build_rpn_or_nrpn_sequence(message, registered=False)
     if msg_type == "mtc_quarter_frame_sequence":
         return _build_quarter_frame_sequence(message)
-    if msg_type == "mmc" and message.get("segment"):
+    segment = message.get("segment", False) if msg_type == "mmc" else False
+    if not isinstance(segment, bool):
+        raise TypeError(f"'segment' must be true or false, got {segment!r}")
+    if segment:
         return _build_mmc_segments(message)
     return [_build_message(message)]
 

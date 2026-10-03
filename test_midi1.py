@@ -1145,6 +1145,48 @@ def check_describe(midi1) -> None:
           not missing, f"{missing}")
 
 
+# Python's own wording for a type mistake that reached an operation unchecked.
+PYTHON_TYPE_WORDING = (
+    "not supported between", "unsupported operand", "object is not", "has no len",
+    "expected string", "object has no attribute", "can't", "cannot", "argument",
+    "must be real number", "invalid literal", "index", "unhashable",
+    "object cannot be interpreted", "bytes must be in range", "ord()",
+)
+
+
+def check_wrong_types() -> None:
+    """Every field of every valid case (and of the first entry of a list of
+    objects) set to a wrong-typed value gives midi1's own KeyError,
+    ValueError or TypeError, never Python's."""
+    from core import midi1
+
+    bad_values = ["1", 1.5, [1], None, True, {}]
+    raw, count = [], 0
+    for name, msg in CASES:
+        if name.startswith("err:"):
+            continue
+        variants = []
+        for key, value in msg.items():
+            if key == "type":
+                continue
+            variants += [(f"{key}={b!r}", {**msg, key: b}) for b in bad_values]
+            if isinstance(value, list) and value and isinstance(value[0], dict):
+                variants += [(f"{key}[0].{k}={b!r}", {**msg, key: [{**value[0], k: b}, *value[1:]]})
+                             for k in value[0] for b in bad_values]
+        for label, bad in variants:
+            count += 1
+            try:
+                midi1._build_message_sequence(dict(bad))
+            except (KeyError, ValueError, TypeError) as e:
+                if isinstance(e, KeyError) or not any(w in str(e) for w in PYTHON_TYPE_WORDING):
+                    continue
+                raw.append(f"{name} {label}: {type(e).__name__}: {e}")
+            except Exception as e:  # any other exception type is a raw error
+                raw.append(f"{name} {label}: {type(e).__name__}: {e}")
+    check(f"wrong types: all {count} wrong-typed variants get midi1's own error",
+          not raw, "; ".join(raw[:3]))
+
+
 def _fake_input(midi1, name: str):
     buf, event = deque(maxlen=10), threading.Event()
     midi1._OPEN_PORTS[name] = ("input", _FakePort())
@@ -1401,6 +1443,7 @@ def main() -> int:
     print("\nschema")
     check_schema(midi1)
     check_describe(midi1)
+    check_wrong_types()
 
     print("\npoll wait")
     check_poll_wait(midi1)
