@@ -1,11 +1,11 @@
 """MIDI 1.0 tool: device discovery, port I/O, typed message building, and
 .mid/.syx files.
 
-Built on mido. Output ports and port listing use mido's python-rtmidi
-backend; input ports are ALSA sequencer clients midi1 opens itself through
-cffi (_AlsaInput). If mido isn't installed, the module still imports and
-every action returns an install hint; without cffi or libasound.so.2, only
-opening an input fails.
+Built on mido for messages and files, and mido's python-rtmidi backend for
+port listing. Ports themselves are ALSA sequencer clients midi1 opens through
+cffi (_AlsaInput, _AlsaOutput). If mido isn't installed, the module still
+imports and every action returns an install hint; without cffi or
+libasound.so.2, only opening a port fails.
 
 Actions (dispatched by `_run`):
   - list_devices        input and output port names.
@@ -59,6 +59,12 @@ _AlsaInput's client has the kernel's largest queue, 2000 events, and reports
 an overflow. mido's rtmidi input also always drops Active Sensing; 'open'
 with 'active_sensing': true passes it through to 'poll'.
 
+Output ports are _AlsaOutput. rtmidi's output sends a SysEx as one event, and
+alsa-lib refuses an event as large as its 16,384-byte output buffer, so a
+SysEx over 16,353 data bytes couldn't be sent. _AlsaOutput splits SysEx into
+256-byte events, ALSA's own transport for large SysEx, and retries while a
+receiving queue is full.
+
 Open ports and input buffers live in process memory; handles don't survive a
 ResearchMesh restart.
 """
@@ -81,15 +87,24 @@ except ImportError as e:
     mido = None  # type: ignore[assignment]
     _MIDO_IMPORT_ERROR = e
 
-# ALSA sequencer, for input ports (_AlsaInput). Declarations match
-# /usr/include/alsa/seq.h, seqmid.h and seq_midi_event.h; event structs stay
-# opaque, since snd_midi_event_decode turns each event back into MIDI bytes.
+# ALSA sequencer, for input and output ports (_AlsaInput, _AlsaOutput).
+# Declarations match /usr/include/alsa/seq.h, seqmid.h, seq_event.h and
+# seq_midi_event.h. Of snd_seq_event_t only the header fields are named;
+# snd_midi_event_encode_byte/decode fill and read the 12-byte data union.
 try:
     from cffi import FFI
     _ALSA_FFI = FFI()
     _ALSA_FFI.cdef("""
         typedef struct _snd_seq snd_seq_t;
-        typedef struct snd_seq_event snd_seq_event_t;
+        typedef struct { unsigned char client; unsigned char port; } snd_seq_addr_t;
+        typedef struct { unsigned int tv_sec; unsigned int tv_nsec; } snd_seq_real_time_t;
+        typedef union { unsigned int tick; snd_seq_real_time_t time; } snd_seq_timestamp_t;
+        typedef struct snd_seq_event {
+            unsigned char type; unsigned char flags; unsigned char tag;
+            unsigned char queue; snd_seq_timestamp_t time;
+            snd_seq_addr_t source; snd_seq_addr_t dest;
+            unsigned char data[12];
+        } snd_seq_event_t;
         typedef struct _snd_seq_client_pool snd_seq_client_pool_t;
         typedef struct snd_midi_event snd_midi_event_t;
         struct pollfd { int fd; short events; short revents; };
@@ -99,6 +114,11 @@ try:
         int snd_seq_create_simple_port(snd_seq_t *seq, const char *name,
                                        unsigned int caps, unsigned int type);
         int snd_seq_connect_from(snd_seq_t *seq, int my_port, int src_client, int src_port);
+        int snd_seq_connect_to(snd_seq_t *seq, int my_port, int dest_client, int dest_port);
+        int snd_seq_event_output(snd_seq_t *handle, snd_seq_event_t *ev);
+        int snd_seq_drain_output(snd_seq_t *handle);
+        int snd_seq_drop_output(snd_seq_t *handle);
+        long snd_midi_event_encode_byte(snd_midi_event_t *dev, int c, snd_seq_event_t *ev);
         int snd_seq_set_client_pool_input(snd_seq_t *seq, size_t size);
         int snd_seq_client_pool_malloc(snd_seq_client_pool_t **ptr);
         void snd_seq_client_pool_free(snd_seq_client_pool_t *ptr);
@@ -114,6 +134,10 @@ try:
                                    long count, const snd_seq_event_t *ev);
     """)
     _ALSA = _ALSA_FFI.dlopen("libasound.so.2")
+    # seq_event.h's event is 28 bytes; a different size means the layout above
+    # doesn't match this platform.
+    if _ALSA_FFI.sizeof("snd_seq_event_t") != 28:
+        raise OSError("snd_seq_event_t layout doesn't match this platform")
     _ALSA_IMPORT_ERROR: Exception | None = None
 except (ImportError, OSError) as e:
     _ALSA_FFI = _ALSA = None
@@ -474,7 +498,7 @@ TOOLS: list[dict] = [
 _TOOL_NAMES = {t["name"] for t in TOOLS}
 _MESSAGE_TYPES = TOOLS[0]["input_schema"]["properties"]["message"]["properties"]["type"]["enum"]
 
-# handle -> (direction, port): a mido output port or an _AlsaInput.
+# handle -> (direction, port): an _AlsaOutput or an _AlsaInput.
 # Process memory only.
 _OPEN_PORTS: dict = {}
 _HANDLE_COUNTER = itertools.count(1)
@@ -603,12 +627,12 @@ def _list_devices() -> str:
 _ALSA_INPUT_POOL = 2000
 
 
-def _alsa_port_address(port_name: str) -> tuple:
-    """(full port name, client, port) for an input port name as list_devices
-    gives it, or a shorter form mido accepts ("client:port name")."""
+def _alsa_port_address(port_name: str, direction: str = "input") -> tuple:
+    """(full port name, client, port) for a port name as list_devices gives
+    it, or a shorter form mido accepts ("client:port name")."""
     from mido.backends.rtmidi_utils import expand_alsa_port_name
 
-    names = mido.get_input_names()
+    names = mido.get_input_names() if direction == "input" else mido.get_output_names()
     port_name = expand_alsa_port_name(names, port_name)
     found = re.search(r" (\d+):(\d+)$", port_name) if port_name in names else None
     if found is None:
@@ -764,6 +788,96 @@ class _AlsaInput:
             self._seq = None
 
 
+# SysEx goes out in events of at most this many bytes: far under alsa-lib's
+# 16,384-byte output buffer (one event at least that size fails with -EINVAL)
+# and under a device driver's rawmidi buffer, which refuses an event larger
+# than its free space.
+_ALSA_SYSEX_CHUNK = 256
+# How long _AlsaOutput keeps retrying while the receiver's queue is full.
+_ALSA_SEND_PATIENCE = 5.0
+
+
+class _AlsaOutput:
+    """An output port as an ALSA sequencer client of its own, connected to
+    the device's port. send() feeds a message's bytes to
+    snd_midi_event_encode_byte, which emits an event per complete message
+    and splits a long SysEx into _ALSA_SYSEX_CHUNK-byte SysEx events (ALSA's
+    own transport for large SysEx; receivers join them up to F7). Events are
+    sent direct, so a full receiving queue comes back as an error from the
+    write; send() then waits and retries, for up to _ALSA_SEND_PATIENCE
+    seconds without progress."""
+
+    def __init__(self, port_name: str) -> None:
+        if _ALSA is None:
+            raise OSError(f"output ports need cffi and libasound.so.2 ({_ALSA_IMPORT_ERROR})")
+        self.name, client, port = _alsa_port_address(port_name, "output")
+        ffi, lib = _ALSA_FFI, _ALSA
+        handle = ffi.new("snd_seq_t **")
+        rc = lib.snd_seq_open(handle, b"default", 1, 0)  # SND_SEQ_OPEN_OUTPUT, blocking
+        if rc < 0:
+            raise OSError(f"snd_seq_open failed ({rc})")
+        self._seq = handle[0]
+        self._encoder = ffi.NULL
+        try:
+            lib.snd_seq_set_client_name(self._seq, b"midi1")
+            # caps READ | SUBS_READ; type MIDI_GENERIC | APPLICATION
+            self._port = lib.snd_seq_create_simple_port(
+                self._seq, b"output", (1 << 0) | (1 << 5), (1 << 1) | (1 << 20))
+            if self._port < 0:
+                raise OSError(f"snd_seq_create_simple_port failed ({self._port})")
+            encoder = ffi.new("snd_midi_event_t **")
+            if lib.snd_midi_event_new(_ALSA_SYSEX_CHUNK, encoder) < 0:
+                raise OSError("snd_midi_event_new failed")
+            self._encoder = encoder[0]
+            rc = lib.snd_seq_connect_to(self._seq, self._port, client, port)
+            if rc < 0:
+                raise OSError(f"can't connect to {client}:{port} ({rc})")
+        except Exception:
+            self.close()
+            raise
+
+    def send(self, msg: "mido.Message") -> None:
+        ffi, lib = _ALSA_FFI, _ALSA
+        event = ffi.new("snd_seq_event_t *")
+        for byte in msg.bytes():
+            if lib.snd_midi_event_encode_byte(self._encoder, byte, event) == 1:
+                self._deliver(event)
+                event = ffi.new("snd_seq_event_t *")
+
+    def _deliver(self, event) -> None:
+        """Send one encoded event to the subscribers, direct; retry while
+        the receiver's queue is full (-ENOMEM, -EAGAIN)."""
+        lib = _ALSA
+        event.source.port = self._port
+        event.dest.client = 254  # SND_SEQ_ADDRESS_SUBSCRIBERS
+        event.dest.port = 253  # SND_SEQ_ADDRESS_UNKNOWN
+        event.queue = 253  # SND_SEQ_QUEUE_DIRECT
+        rc = lib.snd_seq_event_output(self._seq, event)
+        if rc < 0:
+            raise OSError(f"snd_seq_event_output failed ({rc})")
+        give_up = time.monotonic() + _ALSA_SEND_PATIENCE
+        while True:
+            rc = lib.snd_seq_drain_output(self._seq)
+            if rc >= 0:
+                return
+            queue_full = rc in (-errno.ENOMEM, -errno.EAGAIN)
+            if not queue_full or time.monotonic() > give_up:
+                lib.snd_seq_drop_output(self._seq)
+                reason = errno.errorcode.get(-rc, str(rc))
+                if queue_full:
+                    reason += f", still full after {_ALSA_SEND_PATIENCE:.0f} s"
+                raise OSError(f"the receiver didn't accept the message ({reason})")
+            time.sleep(0.002)
+
+    def close(self) -> None:
+        if self._encoder != _ALSA_FFI.NULL:
+            _ALSA.snd_midi_event_free(self._encoder)
+            self._encoder = _ALSA_FFI.NULL
+        if self._seq is not None:
+            _ALSA.snd_seq_close(self._seq)
+            self._seq = None
+
+
 def _open(tool_input: dict) -> str:
     port_name = tool_input.get("port_name")
     direction = tool_input.get("direction")
@@ -779,6 +893,7 @@ def _open(tool_input: dict) -> str:
 
     handle = f"midi1-{next(_HANDLE_COUNTER)}"
 
+    port: _AlsaInput | _AlsaOutput
     try:
         if direction == "input":
             # Runs on _AlsaInput's thread. deque append/popleft and Event
@@ -795,7 +910,7 @@ def _open(tool_input: dict) -> str:
             _INPUT_EVENTS[handle] = event
             _STREAM_DECODERS[handle] = _StreamDecoder()
         else:
-            port = mido.open_output(port_name)
+            port = _AlsaOutput(port_name)
     except Exception as e:
         _INPUT_BUFFERS.pop(handle, None)
         _INPUT_EVENTS.pop(handle, None)
@@ -807,7 +922,7 @@ def _open(tool_input: dict) -> str:
 
     _OPEN_PORTS[handle] = (direction, port)
     result = {"status": "ok", "handle": handle, "direction": direction, "port_name": port_name}
-    if direction == "input":
+    if isinstance(port, _AlsaInput):
         result["opened_at"] = port.opened_at
     return json.dumps(result)
 

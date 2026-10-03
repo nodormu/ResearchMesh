@@ -29,7 +29,7 @@ dependencies = [
     "piper-tts",               # `speak` — see requirements.txt for the full note
     "faster-whisper",          # `listen` — see requirements.txt for the full note
     "mido[ports-rtmidi]>=1.3", # `midi1` — see requirements.txt for the full note
-    "cffi>=1.15",              # `midi1` input ports — see requirements.txt for the full note
+    "cffi>=1.15",              # `midi1` ports — see requirements.txt for the full note
     "ruff>=0.16",              # linter — added back by explicit user request, see
                                # requirements.txt for the full note
     "mypy>=2.0",               # type checker — used by this project (CI's third gate),

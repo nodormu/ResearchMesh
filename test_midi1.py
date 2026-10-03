@@ -1393,8 +1393,6 @@ def check_live_loopback(midi1) -> None:
 def check_live_bursts(midi1, call, in_port: str, out_port: str) -> None:
     """Bursts through Midi Through, sent straight from the output port object
     (one 'send' per tool call is too slow to make a burst)."""
-    import rtmidi
-
     M = midi1.mido.Message
 
     def burst(n: int):
@@ -1402,13 +1400,13 @@ def check_live_bursts(midi1, call, in_port: str, out_port: str) -> None:
         o = call(action="open", port_name=out_port, direction="output")
         out = midi1._OPEN_PORTS[o["handle"]][1]
         sent = [M("polytouch", note=k % 128, value=(k // 128) % 128) for k in range(n)]
-        # The sender can raise once the receiver's queue is full (recorded in
-        # midi1-completeness-gaps.md, step 7b); count what went out.
+        # _AlsaOutput retries while the receiver's queue is full; an error
+        # here means it gave up. Count what went out.
         sent_ok = 0
         for m in sent:
             try:
                 out.send(m)
-            except rtmidi.RtMidiError:
+            except OSError:
                 break
             sent_ok += 1
         time.sleep(1.0)
@@ -1427,23 +1425,30 @@ def check_live_bursts(midi1, call, in_port: str, out_port: str) -> None:
           [m["hex"] for m in got] == [m.hex() for m in sent], f"{len(got)} of {len(sent)}")
 
     sent, got, _ = burst(6000)
-    overflowed = any(m.get("overflow") for m in got)
-    check("live burst: 6000 events either all arrive or the loss is marked",
-          overflowed or [m["hex"] for m in got] == [m.hex() for m in sent],
-          f"{len(got)} entries for {len(sent)} sent, overflow {overflowed}")
+    check("live burst: 6000 events all arrive, in order, with no overflow",
+          len(sent) == 6000 and [m["hex"] for m in got] == [m.hex() for m in sent],
+          f"{len(got)} entries for {len(sent)} sent, "
+          f"overflow {any(m.get('overflow') for m in got)}")
 
-    i = call(action="open", port_name=in_port, direction="input")
-    o = call(action="open", port_name=out_port, direction="output")
-    data = [k % 128 for k in range(8000)]
-    try:
-        call(action="send", handle=o["handle"], message={"type": "sysex", "data": data})
-        got = call(action="poll", handle=i["handle"], timeout_seconds=2)["messages"]
-    finally:
-        call(action="close", handle=o["handle"])
-        call(action="close", handle=i["handle"])
-    check("live burst: an 8000-byte SysEx arrives whole",
-          len(got) == 1 and got[0]["decoded"] == {"type": "sysex", "data": data},
-          f"{[(m.get('decoded', {}).get('type'), len(m.get('decoded', {}).get('data', []))) for m in got]}")
+    # 16,354 data bytes was the first size rtmidi's output couldn't send.
+    for size in (8000, 16354, 100000):
+        i = call(action="open", port_name=in_port, direction="input")
+        o = call(action="open", port_name=out_port, direction="output")
+        data = [k % 128 for k in range(size)]
+        try:
+            sent_result = call(action="send", handle=o["handle"],
+                               message={"type": "sysex", "data": data})
+            got = call(action="poll", handle=i["handle"], timeout_seconds=2)["messages"]
+            time.sleep(0.2)
+            got += call(action="poll", handle=i["handle"])["messages"]
+        finally:
+            call(action="close", handle=o["handle"])
+            call(action="close", handle=i["handle"])
+        check(f"live burst: a {size:,}-byte SysEx is sent and arrives whole",
+              "error" not in sent_result and len(got) == 1
+              and got[0]["decoded"] == {"type": "sysex", "data": data},
+              f"{sent_result.get('error')}; "
+              f"{[(m.get('decoded', {}).get('type'), len(m.get('decoded', {}).get('data', []))) for m in got]}")
 
 
 def main() -> int:
