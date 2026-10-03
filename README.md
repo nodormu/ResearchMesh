@@ -115,8 +115,13 @@ Claude chooses the tools and keeps working until it has an answer.
   Python 3.11 and 3.14.
 - **`python test_model_compat_live.py` is separate, outside CI** (real API, ~9 requests): checks the
   per-model tool-compatibility handler against Anthropic's actual error wording.
-- **No unit tests, and CI doesn't exercise the tools themselves** — that needs LibreOffice,
-  a browser, an X11 display, and real API credits.
+- **`python test_midi1.py` tests the `midi1` tool**, outside CI. It covers message bytes against a
+  recorded snapshot, the specs' worked examples, decoding and the `describe` docs. Its live part
+  sends through ALSA's built-in `Midi Through` port and reads it back, including bursts and SysEx
+  up to 100,000 bytes. `Midi Through` comes with the `snd-seq-dummy` kernel module, normally
+  loaded; without it, the test prints `skip  live loopback` and runs the rest.
+- **`test_midi1.py` is the one tool test suite, and CI doesn't exercise the tools themselves** —
+  that needs LibreOffice, a browser, an X11 display, and real API credits.
 - **Two things a linter will flag that are deliberate.** Broad `except Exception`/
   `BaseException` is the design — every local tool must catch anything and return an error
   string instead of crashing the chat loop (`BLE001` is off project-wide for this reason).
@@ -858,6 +863,8 @@ mcp_server.py                    the other direction — serve this agent to an 
 .mcp.json                        example Claude Code registration for mcp_server.py
 smoke_test.py                    fast wiring checks — no API key, no network
 test_model_compat_live.py        live check of the model-compat handler (spends tokens, not in CI)
+test_midi1.py                    midi1 tests; the live part uses ALSA's Midi Through (not in CI)
+test_midi1_snapshot.json         recorded message bytes test_midi1.py compares against
 .github/workflows/ci.yml         runs ruff, mypy, smoke_test.py on push and PR
 config.toml                      model + MCP server list (no secrets; committed)
 pyproject.toml                   metadata, deps, and the ruff exemptions (lint config)
