@@ -106,6 +106,7 @@ try:
             unsigned char data[12];
         } snd_seq_event_t;
         typedef struct _snd_seq_client_pool snd_seq_client_pool_t;
+        typedef struct _snd_seq_client_info snd_seq_client_info_t;
         typedef struct snd_midi_event snd_midi_event_t;
         struct pollfd { int fd; short events; short revents; };
         int snd_seq_open(snd_seq_t **handle, const char *name, int streams, int mode);
@@ -115,6 +116,11 @@ try:
                                        unsigned int caps, unsigned int type);
         int snd_seq_connect_from(snd_seq_t *seq, int my_port, int src_client, int src_port);
         int snd_seq_connect_to(snd_seq_t *seq, int my_port, int dest_client, int dest_port);
+        int snd_seq_client_info_malloc(snd_seq_client_info_t **ptr);
+        void snd_seq_client_info_free(snd_seq_client_info_t *ptr);
+        int snd_seq_get_any_client_info(snd_seq_t *handle, int client,
+                                        snd_seq_client_info_t *info);
+        int snd_seq_client_info_get_card(const snd_seq_client_info_t *info);
         int snd_seq_event_output(snd_seq_t *handle, snd_seq_event_t *ev);
         int snd_seq_drain_output(snd_seq_t *handle);
         int snd_seq_drop_output(snd_seq_t *handle);
@@ -793,8 +799,48 @@ class _AlsaInput:
 # and under a device driver's rawmidi buffer, which refuses an event larger
 # than its free space.
 _ALSA_SYSEX_CHUNK = 256
-# How long _AlsaOutput keeps retrying while the receiver's queue is full.
+# How long _AlsaOutput waits while a receiver's queue, or a device's output
+# buffer, stays full.
 _ALSA_SEND_PATIENCE = 5.0
+
+
+def _rawmidi_output(card: int, port: int) -> "tuple[str, int] | None":
+    """(/proc file, Output index) of the rawmidi output behind sequencer port
+    `port` of sound card `card`, or None. snd-seq-midi numbers a card's
+    ports across its rawmidi devices in device order, max(outputs, inputs)
+    ports per device."""
+    import glob
+
+    paths = sorted(glob.glob(f"/proc/asound/card{card}/midi[0-9]*"),
+                   key=lambda p: int(p.rsplit("midi", 1)[1]))
+    first = 0
+    for path in paths:
+        try:
+            with open(path) as f:
+                text = f.read()
+        except OSError:
+            return None
+        outputs = len(re.findall(r"^Output \d+$", text, re.MULTILINE))
+        inputs = len(re.findall(r"^Input \d+$", text, re.MULTILINE))
+        count = max(outputs, inputs)
+        if port < first + count:
+            index = port - first
+            return (path, index) if index < outputs else None
+        first += count
+    return None
+
+
+def _rawmidi_avail(path: str, index: int) -> "int | None":
+    """Free bytes in an open rawmidi output's buffer ("Avail" in /proc), or
+    None when not shown."""
+    try:
+        with open(path) as f:
+            text = f.read()
+    except OSError:
+        return None
+    block = re.search(rf"^Output {index}$((?:\n  .*)*)", text, re.MULTILINE)
+    avail = re.search(r"Avail\s+:\s+(\d+)", block.group(1)) if block else None
+    return int(avail.group(1)) if avail else None
 
 
 class _AlsaOutput:
@@ -805,7 +851,14 @@ class _AlsaOutput:
     own transport for large SysEx; receivers join them up to F7). Events are
     sent direct, so a full receiving queue comes back as an error from the
     write; send() then waits and retries, for up to _ALSA_SEND_PATIENCE
-    seconds without progress."""
+    seconds without progress.
+
+    Toward a hardware port the kernel's snd-seq-midi writes each event into
+    the device's rawmidi buffer (4096 bytes by default) and drops one that
+    doesn't fit, logging "seq_midi: MIDI output buffer overrun" but
+    returning no error. So for a port backed by a sound card's rawmidi
+    output, each event waits until that buffer's free space ("Avail" in
+    /proc/asound) holds it."""
 
     def __init__(self, port_name: str) -> None:
         if _ALSA is None:
@@ -818,6 +871,7 @@ class _AlsaOutput:
             raise OSError(f"snd_seq_open failed ({rc})")
         self._seq = handle[0]
         self._encoder = ffi.NULL
+        self._rawmidi: tuple[str, int] | None = None
         try:
             lib.snd_seq_set_client_name(self._seq, b"midi1")
             # caps READ | SUBS_READ; type MIDI_GENERIC | APPLICATION
@@ -832,22 +886,59 @@ class _AlsaOutput:
             rc = lib.snd_seq_connect_to(self._seq, self._port, client, port)
             if rc < 0:
                 raise OSError(f"can't connect to {client}:{port} ({rc})")
+            card = self._card_of(client)
+            self._rawmidi = _rawmidi_output(card, port) if card >= 0 else None
         except Exception:
             self.close()
             raise
 
+    def _card_of(self, client: int) -> int:
+        """The sound card behind a sequencer client, or -1."""
+        ffi, lib = _ALSA_FFI, _ALSA
+        info = ffi.new("snd_seq_client_info_t **")
+        if lib.snd_seq_client_info_malloc(info) < 0:
+            return -1
+        try:
+            if lib.snd_seq_get_any_client_info(self._seq, client, info[0]) < 0:
+                return -1
+            return lib.snd_seq_client_info_get_card(info[0])
+        finally:
+            lib.snd_seq_client_info_free(info[0])
+
     def send(self, msg: "mido.Message") -> None:
         ffi, lib = _ALSA_FFI, _ALSA
         event = ffi.new("snd_seq_event_t *")
+        pending = 0  # bytes fed into the event being built
         for byte in msg.bytes():
+            pending += 1
             if lib.snd_midi_event_encode_byte(self._encoder, byte, event) == 1:
-                self._deliver(event)
+                self._deliver(event, pending)
                 event = ffi.new("snd_seq_event_t *")
+                pending = 0
 
-    def _deliver(self, event) -> None:
-        """Send one encoded event to the subscribers, direct; retry while
-        the receiver's queue is full (-ENOMEM, -EAGAIN)."""
+    def _wait_for_room(self, size: int) -> None:
+        """Wait until the device's rawmidi buffer has `size` bytes free."""
+        if self._rawmidi is None:
+            return
+        last, since = None, time.monotonic()
+        while True:
+            avail = _rawmidi_avail(*self._rawmidi)
+            if avail is None or avail >= size:
+                return
+            if avail != last:
+                last, since = avail, time.monotonic()
+            elif time.monotonic() - since > _ALSA_SEND_PATIENCE:
+                raise OSError(
+                    f"the device didn't take data: its output buffer stayed at "
+                    f"{avail} free bytes for {_ALSA_SEND_PATIENCE:.0f} s"
+                )
+            time.sleep(0.001)
+
+    def _deliver(self, event, size: int) -> None:
+        """Send one encoded event (`size` MIDI bytes) to the subscribers,
+        direct; retry while the receiver's queue is full (-ENOMEM, -EAGAIN)."""
         lib = _ALSA
+        self._wait_for_room(size)
         event.source.port = self._port
         event.dest.client = 254  # SND_SEQ_ADDRESS_SUBSCRIBERS
         event.dest.port = 253  # SND_SEQ_ADDRESS_UNKNOWN

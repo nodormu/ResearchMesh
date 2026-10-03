@@ -1229,6 +1229,36 @@ def check_wrong_types() -> None:
           not raw, "; ".join(raw[:3]))
 
 
+def check_rawmidi_proc(midi1) -> None:
+    """_rawmidi_output's port numbering and _rawmidi_avail's parsing, on
+    made-up /proc/asound files (a card with two rawmidi devices)."""
+    import glob as glob_module
+    import tempfile
+
+    real_glob = glob_module.glob
+    with tempfile.TemporaryDirectory() as root:
+        card = f"{root}/card9"
+        os.makedirs(card)
+        with open(f"{card}/midi0", "w") as f:
+            f.write("X\n\nType: Legacy\nOutput 0\n  Tx bytes     : 5\nOutput 1\n  Tx bytes     : 0\n"
+                    "Input 0\n  Rx bytes     : 0\n")
+        with open(f"{card}/midi1", "w") as f:
+            f.write("X\n\nType: Legacy\nOutput 0\n  Tx bytes     : 9\n  Owner PID    : 1\n"
+                    "  Mode         : native\n  Buffer size  : 4096\n  Avail        : 1234\n"
+                    "Input 0\n  Rx bytes     : 0\nInput 1\n  Rx bytes     : 0\n")
+        glob_module.glob = lambda pattern: real_glob(pattern.replace("/proc/asound", root))
+        try:
+            mapping = [midi1._rawmidi_output(9, port) for port in range(5)]
+        finally:
+            glob_module.glob = real_glob
+        check("rawmidi: ports number across devices, max(outputs, inputs) each",
+              mapping == [(f"{card}/midi0", 0), (f"{card}/midi0", 1), (f"{card}/midi1", 0),
+                          None, None], f"{mapping}")
+        check("rawmidi: Avail is read from an open output, None from a closed one",
+              midi1._rawmidi_avail(f"{card}/midi1", 0) == 1234
+              and midi1._rawmidi_avail(f"{card}/midi0", 0) is None)
+
+
 def _fake_input(midi1, name: str):
     buf, event = deque(maxlen=10), threading.Event()
     midi1._OPEN_PORTS[name] = ("input", _FakePort())
@@ -1492,6 +1522,7 @@ def main() -> int:
     check_schema(midi1)
     check_describe(midi1)
     check_wrong_types()
+    check_rawmidi_proc(midi1)
 
     print("\npoll wait")
     check_poll_wait(midi1)
