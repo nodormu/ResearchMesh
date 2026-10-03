@@ -673,6 +673,11 @@ class _OpenBurst:
         return False
 
 
+# POLLIN from <asm-generic/poll.h>; select.POLLIN doesn't exist on Windows,
+# where this module also loads (it only uses ALSA on Linux).
+_POLLIN = 0x0001
+
+
 class _AlsaInput:
     """An input port as an ALSA sequencer client of its own, subscribed to
     the device's port, with an input pool of _ALSA_INPUT_POOL events. A
@@ -712,7 +717,7 @@ class _AlsaInput:
             self._decoder = decoder[0]
             lib.snd_midi_event_no_status(self._decoder, 1)  # full status bytes
             pfd = ffi.new("struct pollfd[1]")
-            if lib.snd_seq_poll_descriptors(self._seq, pfd, 1, select.POLLIN) != 1:
+            if lib.snd_seq_poll_descriptors(self._seq, pfd, 1, _POLLIN) != 1:
                 raise OSError("snd_seq_poll_descriptors failed")
             self._fd = pfd[0].fd
             self._deliver = deliver
@@ -748,14 +753,12 @@ class _AlsaInput:
 
     def _read(self) -> None:
         ffi, lib = _ALSA_FFI, _ALSA
-        poller = select.poll()
-        poller.register(self._fd, select.POLLIN)
         event = ffi.new("snd_seq_event_t **")
         size = 4096
         out = ffi.new("unsigned char[]", size)
         parser = mido.Parser()
         while not self._stop:
-            poller.poll(100)  # ms; also how often _stop is checked
+            select.select([self._fd], [], [], 0.1)  # also how often _stop is checked
             while not self._stop:
                 rc = lib.snd_seq_event_input(self._seq, event)
                 if rc == -errno.EAGAIN:
