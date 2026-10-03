@@ -273,6 +273,9 @@
   "err: mmc write track 318": {
    "error": "ValueError"
   },
+  "err: msc 2pc checksum name": {
+   "error": "ValueError"
+  },
   "err: msc abort status low bits": {
    "error": "ValueError"
   },
@@ -995,6 +998,18 @@
   "mmc write vitc and update rate": [
    [
     "F0 7F 7F 06 40 08 63 03 01 10 7F 41 01 02 F7",
+    0
+   ]
+  ],
+  "msc 2pc computed checksum, cancelled": [
+   [
+    "F0 7F 7F 02 01 25 64 0A 02 40 07 00 F7",
+    0
+   ]
+  ],
+  "msc 2pc computed checksum, standing_by": [
+   [
+    "F0 7F 7F 02 10 21 14 40 02 00 21 25 34 10 00 34 2E 35 F7",
     0
    ]
   ],

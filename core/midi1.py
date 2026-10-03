@@ -2824,12 +2824,45 @@ _MSC_ABORT_STATUS = {
 }
 
 
+# MSC 6.5 checksum. command_format, command and data (with the checksum's own
+# two bytes zeroed, and a zero byte added if the count is odd) are summed as
+# 2-byte values, overflow ignored; the device ID is added; the sum is ANDed
+# with 7F7F and sent LSB first. 6.5 doesn't say which byte of each pair is the
+# low one, so both pairings are offered by name.
+_MSC_2PC_COMMANDS = frozenset(
+    {"standby", "standing_by", "go_2pc", "complete", "cancel", "cancelled", "abort"}
+)
+_MSC_CHECKSUM_ORDERS = ("lsb_first", "msb_first")
+
+
+def _msc_2pc_checksum(device_id: int, command_format: int, code: int,
+                      data, order: str) -> tuple:
+    """(cc LSB, cc MSB) for a 2PC message whose <data> is `data` (its first
+    two bytes, the checksum's place, are taken as zero)."""
+    body = [command_format, code, 0, 0, *data[2:]]
+    if len(body) % 2:
+        body.append(0)
+    pairs = zip(body[0::2], body[1::2])
+    total = sum(a | (b << 8) if order == "lsb_first" else (a << 8) | b for a, b in pairs)
+    total = (total + device_id) & 0x7F7F
+    return total & 0x7F, (total >> 8) & 0x7F
+
+
+def _msc_checksum_bytes(message: dict, command: str) -> tuple:
+    """cc cc as given: 0-16383 sent LSB first, or a name from
+    _MSC_CHECKSUM_ORDERS, for which the msc branch of _build_message
+    computes the bytes once the whole message is known (placeholder 00 00)."""
+    checksum = _required(message, "checksum", command)
+    if isinstance(checksum, str):
+        _choice(message, "checksum", _MSC_CHECKSUM_ORDERS, command)
+        return (0, 0)
+    return _split14("checksum", checksum)
+
+
 def _msc_2pc_prefix(message: dict, command: str) -> tuple:
-    """cc cc nn nn: the checksum and sequence number, LSB first. The
-    checksum is supplied by the caller: section 6.5 sums 2-byte values
-    without saying their byte order."""
+    """cc cc nn nn: the checksum and sequence number, LSB first."""
     return (
-        *_split14("checksum", _required(message, "checksum", command)),
+        *_msc_checksum_bytes(message, command),
         *_split14("sequence_number", _required(message, "sequence_number", command)),
     )
 
@@ -2874,7 +2907,7 @@ def _msc_2pc_status(message: dict, command: str) -> tuple:
         else _check_range("status", status, 0, 0xFFFC)
     if code % 4:
         raise ValueError(f"'status' must have its low 2 bits 0, got {code:#06x}")
-    checksum = _split14("checksum", _required(message, "checksum", command))
+    checksum = _msc_checksum_bytes(message, command)
     sequence = _split14("sequence_number", _required(message, "sequence_number", command))
     return (*checksum, (code // 4) & 0x7F, (code // 512) & 0x7F, *sequence)
 
@@ -3012,12 +3045,16 @@ def _build_message(message: dict) -> "mido.Message":
     if msg_type == "msc":
         # MIDI Show Control (RP-002/014); see _MSC_DATA_BUILDERS: the 11
         # General Category commands, the 15 Sound Commands and the 7
-        # Two-Phase Commit commands (whose 'checksum' the caller supplies).
+        # Two-Phase Commit commands. A 2PC 'checksum' given as a pairing
+        # name is computed here (_msc_2pc_checksum).
         command_format = _msc_command_format(message)
         command = _choice(message, "command", _COMMANDS["msc"], "msc")
         device_id = _device_id(message)
         builder = _MSC_DATA_BUILDERS.get(command)
         data = builder(message, command) if builder else ()
+        if command in _MSC_2PC_COMMANDS and isinstance(message.get("checksum"), str):
+            data = (*_msc_2pc_checksum(device_id, command_format, _COMMANDS["msc"][command],
+                                       data, message["checksum"]), *data[2:])
         return _sysex(
             0x7F, device_id, 0x02, command_format, _COMMANDS["msc"][command],
             *data, time=time,
@@ -3660,8 +3697,11 @@ _MSC_Q_DOCS = {
 }
 _MSC_TIME_DOCS = {**_TIME_CODE_DOCS, "fractional_frames": "0-99, required"}
 _MSC_2PC_DOCS = {
-    "checksum": ("0-16383, required; computed by the caller (MSC 6.5 sums 2-byte "
-                 "values without stating their byte order)"),
+    "checksum": ("required: 'lsb_first' or 'msb_first' computes it per MSC 6.5 "
+                 "with that pairing of message bytes into 2-byte values (6.5 "
+                 "doesn't say which is right), or give 0-16383 to send as is, "
+                 "LSB first. A received 2PC message reports 'checksum_matches': "
+                 "the pairings that reproduce its checksum"),
     "sequence_number": "0-16383, required",
 }
 
@@ -3725,7 +3765,7 @@ def _msc_docs() -> dict:
     }
     required_cue = {**optional_cue, "q_number": _MSC_Q_DOCS["q_number"] + "; required"}
     cue_data = {"cue_data": "4 values 0-127 (d1-d4, meaning per device), default all 0"}
-    two_pc = {"checksum": 0, "sequence_number": 1}
+    two_pc = {"checksum": "lsb_first", "sequence_number": 1}
     out.update({
         "standby": _msc_doc("standby", "Two-Phase Commit: controller asks a device to "
                             "prepare a cue", {**_MSC_2PC_DOCS, **cue_data, **required_cue},
@@ -5232,6 +5272,13 @@ def _decode_msc(data: tuple) -> dict:
         out.update(decoder(payload))
     elif payload:
         raise ValueError(f"MSC {command} carries no data")
+    if command in _MSC_2PC_COMMANDS:
+        # Which 6.5 byte pairings reproduce the checksum received.
+        out["checksum_matches"] = [
+            order for order in _MSC_CHECKSUM_ORDERS
+            if _msc_2pc_checksum(device_id, command_format, code, payload, order)
+            == tuple(payload[:2])
+        ]
     return out
 
 

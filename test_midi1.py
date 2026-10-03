@@ -399,6 +399,15 @@ CASES: list[tuple[str, dict]] = [
                                         "checksum": 0, "status": 0x8001, "sequence_number": 1}),
     ("err: msc cancelled abort-only status", {"type": "msc", "command_format": "sound", "command": "cancelled",
                                               "checksum": 0, "status": "checksum_error", "sequence_number": 1}),
+    ("msc 2pc computed checksum, cancelled", {"type": "msc", "command_format": "lighting",
+                                             "command": "cancelled", "checksum": "msb_first",
+                                             "status": "paused", "sequence_number": 7}),
+    ("msc 2pc computed checksum, standing_by", {"type": "msc", "command_format": "sound",
+                                               "command": "standing_by", "checksum": "lsb_first",
+                                               "sequence_number": 2, **TC, "frame_rate": "25",
+                                               "fractional_frames": 0, "q_number": "4.5"}),
+    ("err: msc 2pc checksum name", {"type": "msc", "command_format": "sound", "command": "complete",
+                                    "checksum": "both", "sequence_number": 1}),
     ("err: msc cue_data 3 values", {"type": "msc", "command_format": "sound", "command": "go_2pc", "checksum": 0,
                                     "sequence_number": 1, "cue_data": [0, 0, 0], "q_number": "1"}),
     # MMC LOCATE [I/F] and several commands per message (step 6f-1)
@@ -688,6 +697,19 @@ SPEC_EXAMPLES: list[tuple[str, dict, list[str]]] = [
                 {"command": "deferred_play"}]},
      ["F0 7F 7F 06 53 05 42 44 06 01 21 F7", "F0 7F 7F 06 53 05 01 25 34 10 00 F7",
       "F0 7F 7F 06 53 04 00 01 02 03 F7"]),
+    # Hand-computed from MSC 1.1.1 section 6.5 (the spec prints no checksum
+    # example): STANDBY, device 01, sound, seq 1, cue data 0, Q_number "1".
+    # Bytes 10 20 00 00 01 00 00 00 00 00 31 (+00) as pairs, plus the device
+    # ID, AND 7F7F: low-first 2042+1 = 2043 -> 43 20; high-first 4220+1 =
+    # 4221 -> 21 42.
+    ("MSC 6.5 checksum, pairs low byte first (hand-computed)",
+     {"type": "msc", "command_format": "sound", "command": "standby", "device_id": 1,
+      "checksum": "lsb_first", "sequence_number": 1, "q_number": "1"},
+     ["F0 7F 01 02 10 20 43 20 01 00 00 00 00 00 31 F7"]),
+    ("MSC 6.5 checksum, pairs high byte first (hand-computed)",
+     {"type": "msc", "command_format": "sound", "command": "standby", "device_id": 1,
+      "checksum": "msb_first", "sequence_number": 1, "q_number": "1"},
+     ["F0 7F 01 02 10 20 21 42 01 00 00 00 00 00 31 F7"]),
     # Captured from real hardware, not printed in a spec.
     ("Roland TR-8S Identity Reply (captured 2026-10-02)",
      {"type": "device_inquiry", "command": "reply", "device_id": 0x10,
@@ -778,6 +800,26 @@ DEVICE_REPLIES = [
       "manufacturer_id": [0x00, 0x20, 0x6B], "device_family_code": 2,
       "device_family_member_code": 8, "software_revision": [0, 6, 1, 1]}),
 ]
+
+
+def check_msc_checksum(midi1) -> None:
+    """A decoded 2PC message lists the 6.5 pairings its checksum matches."""
+    base = {"type": "msc", "command_format": "sound", "command": "go_2pc", "device_id": 5,
+            "sequence_number": 300, "q_number": "12.5", "q_list": "2"}
+    wrong = []
+    for order in ("lsb_first", "msb_first"):
+        decoded = midi1._decode_message(midi1._build_message(dict(base, checksum=order)))
+        if decoded.get("checksum_matches") != [order]:
+            wrong.append(f"{order}: {decoded.get('checksum_matches')}")
+    check("msc checksum: a computed checksum decodes as matching its own pairing only",
+          not wrong, f"{wrong}")
+    zero = midi1._decode_message(midi1._build_message(dict(base, checksum=0)))
+    check("msc checksum: a checksum matching neither pairing gives []",
+          zero.get("checksum_matches") == [], f"{zero}")
+    plain = midi1._decode_message(midi1._build_message(
+        {"type": "msc", "command_format": "sound", "command": "go", "q_number": "1"}))
+    check("msc checksum: non-2PC commands carry no checksum_matches",
+          "checksum_matches" not in plain, f"{plain}")
 
 
 def check_decode_edges(midi1) -> None:
@@ -1435,6 +1477,7 @@ def main() -> int:
     print("\ndecoding")
     check_round_trip(midi1)
     check_decode_edges(midi1)
+    check_msc_checksum(midi1)
     check_stream_decoder(midi1)
     check_track_bitmap(midi1)
     check_mmc_response_examples(midi1)
