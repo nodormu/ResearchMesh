@@ -1,29 +1,26 @@
-"""Fast sanity checks — no API key, no network, no per-tool packages needed.
+"""Fast sanity checks: no API key, no network, no per-tool packages.
 
     python smoke_test.py
 
-This is not a test suite and does not pretend to be one. There is no pytest, no
-fixtures, and nothing here exercises a tool's actual behaviour (that needs
-LibreOffice, a browser, an X11 display and real API credits). What it does check
-is the wiring that breaks silently and that nothing else catches:
+This is not a test suite. It checks the wiring that breaks silently and that
+nothing else catches:
 
-  1. every module imports at all
-  2. the tool registry is well-formed and free of duplicate names
-  3. the tool count the docs claim still matches reality
+  1. every module imports
+  2. the tool registry is well-formed and has no duplicate names
+  3. the tool count the docs claim matches reality
   4. mcp_server.py completes an MCP handshake and advertises `delegate`
   5. the per-model tool-compatibility handler, the computer toolset round trip
-     and `cursor_position`, and the web tools' `allowed_callers`, on a fake API
+and
+     `cursor_position`, and the web tools' `allowed_callers`, on a fake API
 
-(3) exists because this project states its tool count in enough places, phrased
-several different ways, that hand-checking them drifts silently — see
-check_docs_match_code()'s own docstring for the exact phrasings this guards
-against. (4) exists because the stdio server's one fatal failure mode — a
-stray byte on stdout desynchronising JSON-RPC — is invisible until a client
-connects.
+(3) exists because the tool count is stated in several places, phrased several
+ways, and hand-checking drifts; see check_docs_match_code(). (4) exists because
+a stray byte on stdout desynchronises the stdio server's JSON-RPC and is
+invisible until a client connects.
 
-Only module-level dependencies are required (anthropic, mcp, prompt_toolkit,
-pydantic, anyio); every per-tool backing is imported lazily inside the tool that
-needs it, so this runs on a bare CI box.
+Only module-level dependencies are needed (anthropic, mcp, prompt_toolkit,
+pydantic, anyio); each per-tool backing is imported inside its tool, so this
+runs on a bare CI box.
 """
 
 import asyncio
@@ -65,11 +62,10 @@ def check_tool_registry() -> None:
     from core import local_tools
 
     tools = local_tools.TOOLS
-    # A client TOOLSET entry (currently just computer.COMPUTER_TOOL) carries
-    # no "name" at all — the dated `type` fixes its member set server-side
-    # instead, so there is nothing of this module's own to name. Filtering to
-    # named entries first means every check below that means "a tool's name"
-    # can't crash on `t["name"]` for the one entry that has none.
+    # A client TOOLSET entry (currently just computer.COMPUTER_TOOL) has no
+    # "name": its dated `type` fixes the member set server-side. Filtering to
+    # named entries first keeps every check below that reads `t["name"]` from
+    # crashing on it.
     named = [t for t in tools if "name" in t]
     names = [t["name"] for t in named]
 
@@ -94,10 +90,10 @@ def check_tool_registry() -> None:
             schema.get("type") == "object" and "properties" in schema,
         )
 
-    # The one entry expected to have NO name at all: a client TOOLSET. Its
-    # own separate check, rather than silently skipped by the `named` filter
-    # above — a toolset entry that ever gained a stray "name" (or lost its
-    # "type") would otherwise pass through both loops unnoticed.
+    # The one entry expected to have no name is a client TOOLSET. It gets its
+    # own check instead of being skipped by the `named` filter above, because a
+    # toolset that gained a stray "name" or lost its "type" would otherwise
+    # pass both loops.
     unnamed = [t for t in tools if "name" not in t]
     check(
         "every unnamed entry is a real client toolset, not a mistake",
@@ -117,14 +113,11 @@ def check_tool_registry() -> None:
 def check_docs_match_code() -> None:
     """The count is stated in prose in several places and drifts silently.
 
-    Three phrasings are checked, all confirmed in actual use across this
-    project's own forks: "N local tools" (the canonical form), "N local +
-    whatever the connected MCP servers advertise" (the Key Conventions
-    tool-selection bullet), and "tool, not N" (the mcp_server.py Architecture
-    bullet explaining it exposes one tool, not the whole local set). A bare
-    "N tools" pattern was tried and rejected — it false-matched an unrelated
-    "30-50 tools" threshold and a "2006 tool" aside in an unrelated package
-    explanation, both real strings already in this file.
+    Three phrasings are checked: "N local tools" (the canonical form), "N local
+    + whatever the connected MCP servers advertise" (the Key Conventions
+    tool-selection bullet), and "tool, not N" (the mcp_server.py bullet in
+    Architecture). A bare "N tools" pattern false-matches an unrelated "30-50
+    tools" threshold and a "2006 tool" aside, so it is not used.
     """
     print("docs vs code")
     from core import local_tools
@@ -152,8 +145,8 @@ def check_mcp_server() -> None:
 
     Uses a placeholder key: `_require_api_key` only checks that the variable is
     set, and listing tools never reaches the Anthropic API. A downstream MCP
-    server that isn't present on this machine is reported and skipped by
-    `_connect_mcp_servers`, so a CI box with no Unreal/n8n still passes.
+    server not present on this machine is reported and skipped by
+    `_connect_mcp_servers`, so a CI box without one still passes.
     """
     print("mcp_server.py (stdio handshake)")
     from mcp_client import MCPClient
@@ -182,20 +175,15 @@ def check_mcp_server() -> None:
 
 
 def check_model_tool_over_mcp() -> None:
-    """The `model` tool's actual list/swap/reject behavior, over a real
-    stdio MCP round trip — not just that it's advertised (check_mcp_server()
-    above only checks the name is in the list).
+    """The `model` tool's list, swap and reject behavior over a real stdio MCP
+    round trip, beyond check_mcp_server()'s check that it is advertised.
 
-    Same placeholder-key posture as check_mcp_server(): `model` never calls
-    the Anthropic API at all (see mcp_server.py's `_model_tool_result` — it
-    only touches config.toml's claude_models array and the in-process
-    `_claude.model` attribute), so this needs no real key and no network,
-    same as every other check in this file. Exercises the exact same
-    reject-don't-crash paths core/cli.py's local `/model` command has —
-    covering the MCP-facing wrapper this worker adds specifically so a
-    caller like ResearchMesh-Router can swap this worker's model remotely,
-    per adding-model-command-to-swap-between-Anthropic-models.md in
-    /memories (Phase R2 of that plan).
+    Same placeholder-key posture as check_mcp_server(): `model` never calls the
+    Anthropic API (see mcp_server.py's `_model_tool_result`); it only touches
+    config.toml's claude_models array and the in-process `_claude.model`.
+    Exercises the same rejection paths as core/cli.py's `/model`, through the
+    MCP wrapper that lets a caller such as ResearchMesh-Router swap this
+    instance's model remotely.
     """
     print("model tool (over stdio MCP)")
     from mcp_client import MCPClient
@@ -219,11 +207,10 @@ def check_model_tool_over_mcp() -> None:
                 results[label] = (text, is_error)
 
             await call("list", {"action": "list"})
-            # index "2", deliberately NOT "1" — a fresh worker process starts
-            # on claude_models[0] (index 1), so swapping to that same index
-            # would be a no-op and the "current entry moved" check below
-            # would false-fail for a reason that has nothing to do with the
-            # tool actually working.
+            # Swap to index "2", not "1": a fresh process starts on
+            # claude_models[0] (index 1), so swapping to it would be a no-op
+            # and the "current entry moved" check below would fail for a reason
+            # unrelated to the tool.
             await call("swap valid", {"action": "swap", "arg": "2"})
             await call("list after swap", {"action": "list"})
             await call("swap bogus", {"action": "swap", "arg": "not-a-real-model"})
@@ -283,10 +270,9 @@ def check_clear_and_diagnostics() -> None:
     """`/clear`, and telling the two persistent 400s apart.
 
     An unanswered tool_use block and a conversation past the context window
-    both leave every later turn failing identically, with no way back short of
-    killing the app. The orphan detector is what separates them, so it is
-    checked against a history that is deliberately poisoned — the condition
-    `_resolve_pending_tool_uses` exists to prevent, constructed here on purpose
+    both leave every later turn failing the same way. The orphan detector
+    separates them, so it is checked against a history that is deliberately
+    poisoned (the state `_resolve_pending_tool_uses` exists to prevent),
     because a healthy session never produces one.
     """
     print("/clear and diagnostics")
@@ -353,13 +339,11 @@ def check_clear_and_diagnostics() -> None:
 
 
 def check_run_loop_tool_use_lifecycle() -> None:
-    """Drive the real, unmodified `Chat.run()` against a scripted fake API:
-    the cutoff-duplicate bug, self-healing an already-poisoned history
-    (reproduces the actual production error), pause_turn replace-not-append,
-    a mandatory mixed-call follow-up, grace-budget-exhausted surgical
-    excision (never a turn/conversation wipe), and a normal multi-round
-    regression guard. See researchmesh_client_dev_log.md for the full
-    incident history behind each scenario.
+    """Drive the real `Chat.run()` against a scripted fake API: the
+    cutoff-duplicate case, self-healing an already-poisoned history,
+    pause_turn replace-not-append, a mandatory mixed-call follow-up,
+    surgical excision when the grace budget is exhausted (never a turn or
+    conversation wipe), and a normal multi-round regression guard.
     """
     print("run() loop: tool_use lifecycle (cutoff, self-heal, pause_turn, mixed calls)")
     import core.chat as chat_mod
@@ -503,9 +487,9 @@ def check_run_loop_tool_use_lifecycle() -> None:
             c2.messages[:2] == earlier_turns_before,
         )
 
-        # --- 2b: self-heal a ZERO-result orphan (the second, distinct
-        # production error -- a tool_use with NO result at all, sitting as
-        # the very last message, vs. scenario 2's duplicate-result shape)
+        # --- 2b: self-heal a zero-result orphan: a tool_use with no result at
+        # all, as the very last message (scenario 2 covers the duplicate-result
+        # shape)
         chat_mod.MAX_TOOL_ITERATIONS = 75
         orphan_id = "toolu_01GegL1vVQgSDzMC2d6WfAsJ"
         fake2b = FakeClaudeService([
@@ -663,27 +647,20 @@ def check_run_loop_tool_use_lifecycle() -> None:
             result6 == "done for real", result6,
         )
 
-        # --- 7: cross-turn orphan repair must satisfy the API's REAL
-        # "immediately after" adjacency rule, not just "answered somewhere
-        # later" (which is all `_orphaned_tool_uses` itself checks). Hit in
-        # production: an orphan survived to the start of a brand new turn
-        # (nothing else after it yet), `run()` appended the new user query
-        # first as always, the repair then answered the orphan by appending
-        # to the tail -- one message too late, since the new query was
-        # already sitting between the tool_use and the synthetic result.
-        # The retry 400'd on the *same* id the repair had just "fixed".
-        # `FakeClaudeService` above never catches this class of bug because
-        # it only pops a canned script -- it never actually validates the
-        # message shape it's handed. This scenario uses a stricter fake
-        # that does, so a regression here fails loudly instead of shipping
-        # unnoticed again.
+        # --- 7: cross-turn orphan repair must satisfy the API's "immediately
+        # after" adjacency rule, not just "answered somewhere later", which is
+        # all `_orphaned_tool_uses` checks. If an orphan survives to the start
+        # of a new turn, `run()` appends the new user query first, so a repair
+        # that appends the synthetic result to the tail lands one message too
+        # late and the retry 400s on the same id. `FakeClaudeService` only pops
+        # a canned script and never validates message shape, so this scenario
+        # uses a stricter fake that does.
         class FakeClaudeServiceStrictAdjacency(FakeClaudeService):
             def chat(self, messages, system=None, stop_sequences=None,
                       tools=None, thinking=False):
-                # Count this as a real request attempt regardless of
-                # whether the adjacency check below rejects it -- matches
-                # how the real API counts a 400 as a call that happened,
-                # not a call that never occurred.
+                # Count this as a request attempt whether or not the adjacency
+                # check below rejects it, as the real API counts a 400 as a
+                # call that happened.
                 self.calls += 1
                 for idx, message in enumerate(messages):
                     content = message.get("content")
@@ -722,11 +699,10 @@ def check_run_loop_tool_use_lifecycle() -> None:
             FakeResponse("end_turn", [FakeBlock("text", text="all better now")]),
         ])
         c7 = Chat(claude_service=fake7, clients={})  # type: ignore[arg-type]
-        # The orphan sitting as the very last message -- e.g. the previous
-        # turn ended on a max_tokens cutoff mid tool_use (see scenario 8
-        # below for why that specific trigger no longer even reaches this
-        # state anymore -- this scenario proves the repair itself is
-        # correct independent of how the orphan got there).
+        # The orphan is the very last message, for example after a previous
+        # turn ended on a max_tokens cutoff mid tool_use (scenario 8 covers
+        # that trigger). This scenario shows the repair is correct however the
+        # orphan got there.
         c7.messages = [
             {"role": "user", "content": "write core/zsh_session.py"},
             {"role": "assistant", "content": "Let me write it."},
@@ -750,16 +726,13 @@ def check_run_loop_tool_use_lifecycle() -> None:
         )
 
         # --- 8: a max_tokens cutoff mid tool_use must finalize the turn
-        # immediately, not silently return as if it were an ordinary
-        # finished response. This is the actual root trigger behind
-        # scenario 7's bug class in production -- a single large `create`
-        # call (a whole new source file as one tool_use) ran past the
-        # output token budget, `stop_reason` came back "max_tokens" (not
-        # "tool_use"), and the old code only ever routed/answered tool_use
-        # blocks when `stop_reason == "tool_use"` -- so the dangling block
-        # was appended to history and then just ignored, left to poison
-        # every later turn. Confirmed nothing here is bash_session/zsh
-        # specific -- any oversized single tool_use call can trigger it.
+        # immediately, not return as if it were an ordinary finished response.
+        # This is the root trigger behind scenario 7: a single large `create`
+        # call ran past the output token budget, `stop_reason` was "max_tokens"
+        # instead of "tool_use", and the loop only answered tool_use blocks
+        # when `stop_reason == "tool_use"`, so the dangling block was appended
+        # to history, ignored, and poisoned every later turn. Any oversized
+        # single tool_use call can trigger it.
         chat_mod.MAX_TOOL_ITERATIONS = 75
         orphan_id8 = "toolu_FRESHCUTOFF"
         fake8 = FakeClaudeService([
@@ -794,15 +767,13 @@ def check_run_loop_tool_use_lifecycle() -> None:
 
 
 def check_model_command() -> None:
-    """`/model` / `/model swap` — config.toml wiring and index/name matching.
+    """`/model` and `/model swap`: config.toml wiring and index/name matching.
 
-    No API call and no CliApp/prompt_toolkit involved: `load_claude_models`
-    and `resolve_model_swap` (core/claude.py) are pure enough to check
-    directly, the same way check_clear_and_diagnostics() above checks
-    core/chat.py's diagnostics without a real conversation. core/cli.py's
-    `/model` branch is a thin print/continue wrapper around these two calls,
-    so covering the calls covers the actual matching logic that a bad
-    index/name could otherwise silently mismatch.
+    No API call and no CliApp or prompt_toolkit: `load_claude_models` and
+    `resolve_model_swap` (core/claude.py) are pure enough to check directly, as
+    check_clear_and_diagnostics() checks core/chat.py's diagnostics.
+    core/cli.py's `/model` branch is a thin print wrapper around those two
+    calls, so covering them covers the matching logic.
     """
     print("/model command")
     from core.claude import load_claude_models, resolve_model_swap
@@ -968,9 +939,9 @@ def check_model_refresh() -> None:
     finally:
         cfg.unlink(missing_ok=True)
 
-    # 2) TTL stale + scan succeeds -> array + timestamp updated (if tomlkit
-    #    is installed) or the fresh result is still returned but not
-    #    persisted (if it isn't) — either way is the documented contract.
+    # 2) TTL stale + scan succeeds -> array and timestamp updated (with tomlkit
+    # installed), or the fresh result returned but not persisted (without it);
+    # both are the documented contract.
     cfg = tmp_dir / "smoke_model_refresh_success.toml"
     write_config(cfg, models=["old-a"], checked_at=stale_iso)
     before = cfg.read_text(encoding="utf-8")
@@ -1001,8 +972,8 @@ def check_model_refresh() -> None:
     finally:
         cfg.unlink(missing_ok=True)
 
-    # 3) TTL stale (well past due) + scan fails -> config untouched, old
-    #    cache returned. This is the exact CI/placeholder-key scenario.
+    # 3) TTL stale + scan fails -> config untouched, old cache returned. This
+    # is the CI placeholder-key case.
     cfg = tmp_dir / "smoke_model_refresh_failure.toml"
     write_config(cfg, models=["old-cached"], checked_at=stale_iso)
     before = cfg.read_text(encoding="utf-8")
