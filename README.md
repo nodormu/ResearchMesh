@@ -18,7 +18,7 @@
                     └── ...
 
 A terminal chat client for the Anthropic API that hands Claude real tools on your own Linux
-machine: a shell, a file editor, a headless browser it can surf with, a persistent Python
+machine: a shell, a file editor, a browser it can surf with, a persistent Python
 session, desktop control, and document conversion. Ask it something and it can look it up,
 read the pages, run the commands, and hand you back a finished `.docx` — in one conversation.
 
@@ -39,7 +39,7 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 | `computer` | Screenshots plus mouse/keyboard control of your desktop, on X11 (`pyautogui`) or Wayland (xdg-desktop-portal remote control; needs `dbus-next` and `spectacle` or `grim`) — [see below](#setup-linux) |
 | `desktop_window` | List windows, and focus, move, resize, full-screen, minimize or restore one, on a KDE desktop (KWin scripting; needs `dbus-next`), so keystrokes reach the right window |
 | `screen_find` | Find on-screen text (`text`) or button-like blocks (`buttons: true`) by OCR, inside a `region` when one is given, and return click coordinates in `computer`'s space; reads text on coloured buttons that plain OCR misses (needs `tesseract`) |
-| `browser_navigate` · `_links` · `_click` · `_fill` · `_extract` · `_back` · `_tab` | [Playwright](https://playwright.dev/) DOM browsing: renders JavaScript, follows links and new tabs, fills forms, saves downloads to `~/Downloads`. `_navigate` takes `mode` (`headless` by default, `headed`, `virtual` on a hidden display, or `real` for your installed Chrome) and `profile` (keeps cookies and logins); `_tab` lists, switches and closes tabs; `_fill` takes a `pass` vault entry (`value_secret`) without the value appearing in the conversation, or `submit` to press Enter afterwards |
+| `browser_navigate` · `_links` · `_click` · `_fill` · `_extract` · `_back` · `_tab` | [Playwright](https://playwright.dev/) DOM browsing: renders JavaScript, follows links and new tabs, fills forms, saves downloads to `~/Downloads`. `_navigate` takes `mode` and `profile` ([see below](#browser-modes)); `_tab` lists, switches and closes tabs; `_fill` takes a `pass` vault entry (`value_secret`) without the value appearing in the conversation, or `submit` to press Enter afterwards |
 | `document_convert` | LibreOffice + pandoc. Markdown → `.docx`/`.odt`/`.pdf`, or any office format to any other |
 | `python` | Persistent IPython kernel — **variables survive between calls** |
 | `bash_session` | Persistent shell — **cd/env/venvs/background jobs survive between calls** |
@@ -53,6 +53,19 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 | `midi1` | MIDI 1.0 device discovery and I/O (`mido` for messages and files, ALSA sequencer ports) — list ports, open/close, send/poll channel and system messages, SysEx, and read/write `.mid`/`.syx` files |
 
 Claude chooses the tools and keeps working until it has an answer.
+
+### Browser modes
+
+`browser_navigate` takes `mode` and `profile`:
+
+- `headless` (default): no window. Uses installed Google Chrome if present, else the bundled Chromium.
+- `headed`: a visible window on your desktop. `headed: true` is an alias.
+- `virtual`: Chrome on a private hidden display (Xvfb); no window appears.
+- `real`: your installed Chrome, started as a normal program and attached over CDP. It is the least detectable mode and opens a window you can click in. The client closes it on exit.
+- `virtual` and `real` need Google Chrome (`google-chrome` or `google-chrome-stable` on `PATH`); `virtual` also needs `xvfb`. `headed` and `real` need `DISPLAY` or `WAYLAND_DISPLAY` and return an error without one.
+- `profile` names a persistent profile (1-40 letters, digits, `-`, `_`) so cookies and logins survive restarts. Profiles live under `~/.cache/researchmesh/browser-profiles`, mode 700. Without one, the session's profile is deleted when it closes. Changing mode or profile restarts the browser.
+- A report carries a `Human check:` line when a Cloudflare check appears. A first visit with no `mode` or `profile` that a check stops is reopened once in `virtual` mode; if the line still says pending, use `real` or click the check yourself.
+- Downloads are saved to `~/Downloads` (`RESEARCHMESH_DOWNLOAD_DIR` overrides) under a unique name, so an existing file is never overwritten, and are listed as `Downloaded:` lines in the result.
 
 ## Good to know
 
@@ -143,8 +156,12 @@ entry stops it (the next action starts a new session). It needs `dbus-next` (in
 `requirements.txt`) and `spectacle` or `grim` for screenshots. The screen is one monitor:
 the leftmost one shared in the dialog, or `CLAUDE_COMPUTER_MONITOR=<index>`. Share every
 monitor in the dialog. With only some shared, the screenshot scale is estimated (exact
-when they span the desktop's width or height) and a warning is printed. To use X11/XTEST
-on an XWayland-only setup or inside a nested X server instead:
+when they span the desktop's width or height) and a warning is printed. Typing goes
+through keysyms; on Plasma 6 capitals and symbols arrive as written. The pointer position is not
+readable from Wayland: `cursor_position` returns an error until the pointer has moved
+once. On KDE, `desktop_window` focuses the window that should receive keystrokes and
+`screen_find` returns click coordinates by OCR. To use X11/XTEST on an XWayland-only
+setup or inside a nested X server instead:
 
 ```bash
 sudo apt install xvfb
@@ -365,7 +382,8 @@ on this machine.
 - Only the first line of a `pass` entry is used.
 - A GPG passphrase prompt (`pinentry`) appears on your screen, not in the
   conversation. If the key is not cached and nobody answers, `pass show` times
-  out after 30 s; unlock the key once in your own terminal first.
+  out after 30 s and its whole process group (`pass` and the `gpg` it started) is
+  killed; unlock the key once in your own terminal first.
 - `computer` has no vault option: type a password into a native window yourself.
 - A one-time code (authenticator, SMS, email) is not a vault secret. Paste it in
   the chat and the agent enters it at once with `browser_fill` `submit: true`.
