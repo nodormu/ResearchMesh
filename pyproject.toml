@@ -31,28 +31,17 @@ dependencies = [
     "faster-whisper",          # `listen` — see requirements.txt for the full note
     "mido[ports-rtmidi]>=1.3", # `midi1` — see requirements.txt for the full note
     "cffi>=1.15",              # `midi1` ports — see requirements.txt for the full note
-    "ruff>=0.16",              # linter — added back by explicit user request, see
-                               # requirements.txt for the full note
-    "mypy>=2.0",               # type checker — used by this project (CI's third gate),
-                               # so it belongs here on the same reasoning as ruff above:
-                               # a real dependency of the project, not a CI-only extra.
-                               # See requirements.txt for the full note.
+    "ruff>=0.16",              # linter; see requirements.txt
+    "mypy>=2.0",               # type checker, a CI gate; see requirements.txt
 ]
 
-# Ruff IS a project dependency (added by explicit user request; it used to be
-# deliberately excluded, on the theory that someone just running the app
-# shouldn't be forced to install a linter — see requirements.txt). CI
-# (.github/workflows/ci.yml) already runs `ruff check .` on every push/PR,
-# independent of this dependency-list change. This section exists so that a
-# clean run is the actual baseline instead of ~39 findings that are all
-# deliberate. The alternative was a paragraph of prose telling each reader
-# which findings to ignore, which drifted every time the code was touched.
+# Ruff is a project dependency. CI (.github/workflows/ci.yml) runs `ruff check .` on
+# every push and PR. This section lists the deliberate exemptions, so a clean run is
+# the baseline and no prose has to tell readers which findings to ignore.
 #
-# `select` is intentionally left at ruff's defaults rather than pinned. Those
-# defaults do change between ruff versions (BLE001/S110/PLW1510 only started
-# appearing around 0.16), so a new release may surface new findings here — that
-# is the intended behaviour: you get told about the new rule, and the exemptions
-# below still hold.
+# `select` is left at ruff's defaults rather than pinned. The defaults change between
+# ruff versions, so a new release may surface new findings; that is intended, and the
+# exemptions below still hold.
 [tool.ruff]
 # scripts/ is gitignored (machine-local convenience tooling assuming sibling
 # repo clones that only exist on this dev box — see its own .gitignore entry)
@@ -63,11 +52,10 @@ exclude = ["scripts"]
 
 [tool.ruff.lint]
 ignore = [
-    # Blanket `except Exception`/`except BaseException` is the architecture, not
-    # an oversight: every local tool must catch anything and return an error
-    # string rather than crash the chat loop, and every shutdown/cleanup path
-    # must not be able to fail at all. Narrowing these has already caused one
-    # real bug — see "Shutdown is isolated per tool" in CLAUDE.md.
+    # Blanket `except Exception`/`except BaseException` is deliberate: every local tool
+    # must catch anything and return an error string rather than crash the chat loop,
+    # and every shutdown/cleanup path must not be able to fail at all. Narrowing them
+    # breaks that contract; see "Shutdown is isolated per tool" in CLAUDE.md.
     "BLE001",
 ]
 
@@ -79,26 +67,21 @@ ignore = [
 
 # `mypy .` should come back clean, the same bar as `ruff check .`.
 #
-# It earns its place on this project specifically: the one failure mode here is
-# a dependency changing underneath the code, and mypy type-checks against the
-# *installed* packages. Every mcp 1.x -> 2.x breakage was caught by it in one
-# run, naming each renamed attribute and suggesting the new spelling — including
-# `core/tools.py`, which smoke_test.py structurally cannot reach (it never calls
-# an MCP tool) and which would otherwise have failed as an AttributeError on the
-# first real delegation, long after the upgrade.
+# It guards a dependency changing underneath the code: mypy type-checks against the
+# *installed* packages, so a renamed attribute (such as the mcp 1.x -> 2.x field
+# renames) is named in one run, including in `core/tools.py`, which smoke_test.py
+# cannot reach because it never calls an MCP tool and which would otherwise fail as
+# an AttributeError on the first real delegation.
 #
 # Left at mypy's defaults: bodies of unannotated functions are not checked, so
-# this is a floor, not a straitjacket. Annotating a function opts it in, which
-# is the right direction of travel for new code.
+# this is a floor, not a straitjacket. Annotating a function opts it in.
 [tool.mypy]
-# Same reasoning as [tool.ruff]'s own exclude above -- scripts/ is real on
-# this dev box but gitignored/never present in a fresh clone, so real CI
-# never type-checks it either.
+# scripts/ is gitignored and absent from a fresh clone, as in [tool.ruff]'s exclude.
 exclude = "^scripts/"
 # The per-tool backings (duckdb, playwright, pyautogui, jupyter_client,
 # pexpect, ruamel, tomlkit, jsonpath_ng, send2trash) are imported lazily inside
-# the tool that needs them, so they are legitimately absent from a bare
-# environment — CI installs only the five module-level dependencies. Without
-# this, every one of those imports is an error about a package that is *meant*
-# to be missing. Genuinely wrong imports of installed packages still fail.
+# their tools, so they are legitimately absent from a bare environment: CI installs
+# only the five module-level dependencies. Without this, each of those imports would
+# be an error about a package meant to be missing. Wrong imports of installed
+# packages still fail.
 ignore_missing_imports = true

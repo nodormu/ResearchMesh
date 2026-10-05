@@ -31,9 +31,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.11 is the floor (tomllib, per pyproject.toml). Also test the
-        # newest, since the dev box runs 3.14 and the two have already
-        # differed in behaviour that matters here.
+        # 3.11 is the floor (tomllib, per pyproject.toml). 3.14 is the development
+        # version and the newest; mypy checks against the *installed* packages, so a
+        # dependency that changes shape surfaces there first.
         python-version: ["3.11", "3.14"]
 
     steps:
@@ -67,12 +67,11 @@ jobs:
           ruff check .
 
       - name: Type check
-        # Runs *here* rather than only by hand because mypy checks against the
-        # installed packages, and a runner installs them fresh: this is the step
-        # that catches a dependency changing shape underneath the code. It is
-        # what would have named every mcp 1.x -> 2.x breakage directly, instead
-        # of a bare AttributeError on the first MCP tool call. Config and
-        # reasoning live in pyproject.toml's [tool.mypy].
+        # Runs here, not only by hand, because mypy checks against the installed
+        # packages and a runner installs them fresh: this step catches a dependency
+        # changing shape underneath the code and names it directly, instead of a bare
+        # AttributeError on the first MCP tool call. Config and reasoning live in
+        # pyproject.toml's [tool.mypy].
         run: |
           pip install mypy
           mypy .
@@ -90,11 +89,8 @@ jobs:
           # Full history, not the default shallow clone -- the commit-message
           # scan below needs every commit, not just the tip, to be meaningful.
           fetch-depth: 0
-      # Complements the tracked-file check below: neither `git grep` on
-      # tracked files nor gitleaks' default mode scans commit MESSAGE text at
-      # all (confirmed live, 2026-09-25, after a real key ended up in a
-      # commit message rather than a file and sailed through both unnoticed).
-      # This closes that gap directly.
+      # Neither `git grep` on tracked files nor gitleaks' default mode scans
+      # commit message text. This step does.
       - name: No literal credentials in commit messages
         run: |
           set -euo pipefail
@@ -151,16 +147,12 @@ jobs:
           fi
           echo "no committed credentials found"
 
-  # General-purpose secret scanner, complementing (not replacing) the
-  # targeted regex checks above. Those check THIS app's own token_env/
-  # api_key_env/.mcp.json indirection pattern specifically; this instead
-  # catches WELL-KNOWN provider-key formats (AWS, GitHub, Slack, Stripe,
-  # etc.) anywhere in the tree, which the checks above were never designed
-  # to look for. Verified live before adding: does NOT reliably catch an
-  # arbitrary custom self-hosted-service token (e.g. an n8n bearer token)
-  # with no recognized provider signature -- no regex-based tool does, so
-  # the checks above remain the real defense for THIS app's own config
-  # surfaces specifically. No license needed (free for personal accounts).
+  # General-purpose scanner for well-known provider key formats (AWS, GitHub,
+  # Slack, Stripe, ...) anywhere in the tree, complementing the targeted checks
+  # above. It does not reliably catch a custom token with no provider signature
+  # (e.g. an n8n bearer token); no regex tool does, so the checks above remain
+  # the defense for this app's own config surfaces. Needs no license for personal
+  # accounts.
   gitleaks:
     runs-on: ubuntu-latest
     steps:
