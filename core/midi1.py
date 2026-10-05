@@ -646,13 +646,13 @@ def _alsa_port_address(port_name: str, direction: str = "input") -> tuple:
     return port_name, int(found.group(1)), int(found.group(2))
 
 
-# A device releases what it stored while its input was closed as one burst
-# when the port opens. Measured 2026-10-02 (TR-8S, KeyStep 37, Hydrasynth DR):
-# the first message 0.1-3.1 ms after the open, the rest about 0.01 ms apart,
-# 655 messages within 4.2 ms. A message belongs to that burst if it arrives
-# within _AT_OPEN_GAP of the open or of the burst's previous message. Timing
-# can't tell a stored message from a live one arriving that soon, so a live
-# message within the gap is marked too.
+# A device releases what it stored while its input was closed as one burst when
+# the port opens: the first message arrives 0.1-3.1 ms after the open and the
+# rest about 0.01 ms apart (655 messages within 4.2 ms on one device). A
+# message belongs to that burst if it arrives within _AT_OPEN_GAP of the open
+# or of the burst's previous message. Timing cannot tell a stored message from
+# a live one arriving that soon, so a live message within the gap is marked
+# too.
 _AT_OPEN_GAP = 0.020
 
 
@@ -2948,7 +2948,8 @@ def _msc_command_format(message: dict) -> int:
 
 
 def _msc_cue(message: dict, command: str) -> tuple:
-    # GO, STOP, RESUME, GO_OFF: optional cue data. LOAD: q_number required.
+    # GO, STOP, RESUME, GO_OFF: cue data may be omitted. LOAD: q_number is
+    # required.
     if command == "load":
         q_number = _required(message, "q_number", command)
     else:
@@ -3130,7 +3131,7 @@ _MSC_DATA_BUILDERS = {
     "timed_go": _msc_timed_go,
     "set": _msc_set,
     "fire": _msc_fire,
-    # Sound Commands: one optional Q_list...
+    # Sound Commands: one Q_list that may be omitted...
     **{name: _msc_single_cue_field("q_list", required=False) for name in (
         "standby_plus", "standby_minus", "sequence_plus", "sequence_minus",
         "start_clock", "stop_clock", "zero_clock", "mtc_chase_on",
