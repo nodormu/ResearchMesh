@@ -1,43 +1,31 @@
-"""`computer` — Anthropic's client-executed computer use TOOLSET
+"""`computer`: Anthropic's client-executed computer use toolset
 (`computer_toolset_20260801`).
 
 A learned schema: Claude already knows the 17-member action vocabulary
-(screenshot, clicks, type, key, scroll, drag, zoom, …), so there is no
-description to write. This module supplies the eyes and hands — screen capture
-via Pillow/pyautogui, input via pyautogui — and, more importantly, the
-coordinate contract.
+(screenshot, clicks, type, key, scroll, drag, zoom, ...), so there is no
+description. This module supplies screen capture and input, and the coordinate
+contract.
 
-**This is a client TOOLSET, not a single tool** — one `{"type":
-"computer_toolset_20260801"}` entry in `tools` (carrying no `name` of its own)
-expands into 17 separate member tools server-side. Claude's calls are
-`tool_use` blocks whose `name` IS the member (`"left_click"`, `"type"`, …) and
-which carry an extra `"toolset_name": "computer"` field; the paired
-`tool_result` must echo that same `toolset_name` back or the API rejects it —
-see core/chat.py's `_run_tool_uses` for where that round-trip happens. This
-replaces the older single-tool `computer_20251124` schema (still in Anthropic's
-"earlier tool versions" list, but not supported at all by every model this
-project targets — see researchmesh_client_dev_log.md in /memories for the
-live compatibility matrix and the reasoning behind this migration).
+A client TOOLSET, not a single tool: one `{"type":
+"computer_toolset_20260801"}` entry in `tools` (no `name`) expands into 17
+member tools server-side. Claude's `tool_use` blocks are named for the member
+(`"left_click"`, `"type"`, ...) and carry `"toolset_name": "computer"`; the
+paired `tool_result` must echo it or the API rejects it (see `_run_tool_uses`
+in core/chat.py). No beta header is needed, so core/claude.py's `BETAS` is
+empty.
 
-**Coordinates.** Claude returns coordinates in the space of whatever image it
-was last sent — there is no `display_width_px`/`display_height_px` field on
-this schema at all (the older single-tool version had one; the toolset does
-not, by design). Real screens are usually larger than the ~1.15MP that reads
-well, so this module still declares one fixed logical size
-(`CLAUDE_DISPLAY_SIZE`, default 1280x800), always downscales captures to
-exactly that, and scales Claude's coordinates back up to native screen space —
-purely this module's own choice now, not a schema requirement, but kept for
-the same accuracy/cost reasons Anthropic's own docs still recommend it.
+Coordinates: Claude returns coordinates in the space of the last image it was
+sent, and the toolset has no display-size field. This module declares one
+logical size (`CLAUDE_DISPLAY_SIZE`, default 1280x800), downscales captures to
+exactly that, and scales coordinates back to native pixels.
 
-**No beta header needed.** Unlike `computer_20251124`, this toolset ships as a
-stable (non-beta) feature — there is no `BETA_FLAG` here, and core/claude.py's
-`BETAS` list is empty as a direct result of this migration.
-
-**Wayland.** Input synthesis and screen capture here go through X11/XTEST. On a
-Wayland session that reaches XWayland clients at best and native Wayland windows
-not at all, so rather than silently clicking into the void the tool refuses and
-says why. Override with CLAUDE_COMPUTER_FORCE=1 (useful under XWayland-only
-setups); the real fix is an Xorg session or a nested X server such as Xvfb.
+Wayland: X11/XTEST input does not reach native Wayland windows, so on a Wayland
+session input and capture go through core/wayland_input.py: the
+xdg-desktop-portal remote-control session (the desktop may ask for approval; a
+tray icon with an "End" entry stops it) plus spectacle or grim for screenshots.
+CLAUDE_COMPUTER_FORCE=1 uses X11/XTEST anyway (XWayland-only setups, nested X
+servers such as Xvfb). Screenshots go to the model, as for every use of this
+toolset.
 """
 
 import asyncio
@@ -46,7 +34,9 @@ import io
 import os
 import subprocess
 import time
+from typing import Any
 
+from core import wayland_input
 from core.output import image_result
 
 # Anthropic's benchmarked baselines are 1280x800 for web apps and 1024x768 /
@@ -68,21 +58,16 @@ def _declared_size() -> tuple[int, int]:
 
 DISPLAY_WIDTH, DISPLAY_HEIGHT = _declared_size()
 
-# A toolset entry carries no `name` — the dated `type` fixes the member set,
-# and every member (including zoom) defaults to enabled, so there is nothing
-# to override via `configs` for how this module wants to run. Deliberately NOT
-# using `configs` at all rather than spelling out `{"zoom": {"enabled": True}}`
-# — that would be a no-op restating the default, and a landmine for future
-# drift if Anthropic ever changes a *different* member's default.
+# A toolset entry has no `name`: the dated `type` fixes the member set, and
+# every member (including zoom) is enabled by default. `configs` is
+# deliberately not used; spelling out `{"zoom": {"enabled": True}}` would only
+# restate a default and go stale if Anthropic changed another member's default.
 COMPUTER_TOOL = {"type": "computer_toolset_20260801"}
 TOOLS = [COMPUTER_TOOL]
 
-# The 17 member tool names this toolset expands into server-side — Claude's
-# tool_use blocks carry one of these as `name` (never "computer" itself, which
-# was the old single-tool schema's name and no longer means anything here).
-# Keep this in exact sync with Anthropic's own member table if they ever add
-# one; scripts/check_midi1_schema.py-style drift-checking would be the place
-# to automate that if it becomes a recurring problem.
+# The 17 member names this toolset expands into server-side; Claude's tool_use
+# blocks carry one as `name`. Keep in sync with Anthropic's member table if
+# they add one.
 _MEMBERS = frozenset(
     {
         "screenshot",
@@ -105,7 +90,7 @@ _MEMBERS = frozenset(
     }
 )
 
-# Let the UI repaint before we capture the result of an action.
+# Let the UI repaint before capturing the result of an action.
 _SETTLE = 0.4
 
 # Claude uses xdotool-style key names; pyautogui has its own spelling.
@@ -138,28 +123,41 @@ def handles(name: str) -> bool:
     return name in _MEMBERS
 
 
+def shutdown() -> None:
+    """End the Wayland remote control session, if one is open."""
+    wayland_input.shutdown()
+
+
 async def execute(name: str, tool_input: dict) -> str | dict:
     if name not in _MEMBERS:
         return f"Error: {name} is not a computer-toolset member"
     return await asyncio.to_thread(_run, name, tool_input)
 
 
+def _wayland_session() -> bool:
+    """True when input must go through the portal: a Wayland session, unless
+    CLAUDE_COMPUTER_FORCE=1 puts it back on X11."""
+    if os.getenv("CLAUDE_COMPUTER_FORCE") == "1":
+        return False
+    return os.getenv("XDG_SESSION_TYPE", "").lower() == "wayland" or bool(
+        os.getenv("WAYLAND_DISPLAY")
+    )
+
+
 def _guard() -> str | None:
-    """Refuse up front on a session where input synthesis silently no-ops."""
+    """Refuse up front when there is no way to reach the screen."""
     if os.getenv("CLAUDE_COMPUTER_FORCE") == "1":
         return None
-    if os.getenv("XDG_SESSION_TYPE", "").lower() == "wayland" or os.getenv(
-        "WAYLAND_DISPLAY"
-    ):
+    if _wayland_session():
+        reason = wayland_input.available()
+        if reason is None:
+            return None
         return (
-            "Error: this is a Wayland session. The computer tool drives the "
-            "screen through X11/XTEST, which Wayland compositors ignore for "
-            "security — clicks and keystrokes would not reach native Wayland "
-            "windows, and screenshots would come back blank or partial. Log in "
-            "to an Xorg session, or run this client under a nested X server "
-            "(e.g. `xvfb-run -s '-screen 0 1280x800x24' python main.py`). To "
-            "attempt it anyway on an XWayland-only setup, set "
-            "CLAUDE_COMPUTER_FORCE=1."
+            f"Error: this is a Wayland session and the portal route is unavailable: "
+            f"{reason}. Install it, log in to an Xorg session, or run this client "
+            "under a nested X server (e.g. `xvfb-run -s '-screen 0 1280x800x24' "
+            "python main.py`). To use X11/XTEST anyway on an XWayland-only setup, "
+            "set CLAUDE_COMPUTER_FORCE=1."
         )
     if not os.getenv("DISPLAY"):
         return (
@@ -169,39 +167,61 @@ def _guard() -> str | None:
     return None
 
 
-def _run(action: str, tool_input: dict) -> str | dict:
-    """`action` is now the member's own name (Claude's tool_use `name`) — the
-    old single-tool schema instead carried it as `tool_input["action"]`
-    alongside a fixed outer tool name of `"computer"`. Everything below this
-    point (`_dispatch` and everything it calls) already took `action` as its
-    own explicit parameter, decoupled from how it was obtained — so none of
-    that logic needed to change for this migration, only how `action` gets
-    here.
-    """
-    blocked = _guard()
-    if blocked:
-        return blocked
-
+def _backend() -> tuple[Any, str | None]:
+    """(input and capture backend, error): the portal on Wayland, else pyautogui."""
+    if _wayland_session():
+        try:
+            return wayland_input.backend(), None
+        except Exception as e:
+            return None, f"Error: remote control of the Wayland desktop failed: {e}"
     try:
         import pyautogui
     except Exception as e:  # ImportError, or X11 lookup failure at import
-        return (
+        return None, (
             f"Error: the computer tool needs pyautogui ({e}). "
             "Install it with: pip install pyautogui pillow"
         )
     # Its default is to abort on a corner-of-screen mouse position; that turns a
     # legitimate click at (0, 0) into a crash.
     pyautogui.FAILSAFE = False
+    return pyautogui, None
+
+
+def capture() -> tuple[Any, str | None]:
+    """(native-resolution PIL image, error) of the screen this tool controls."""
+    blocked = _guard()
+    if blocked:
+        return None, blocked
+    backend, error = _backend()
+    if error:
+        return None, error
+    try:
+        return _grab(backend), None
+    except Exception as e:
+        return None, f"Error: could not capture the screen: {e}"
+
+
+def _run(action: str, tool_input: dict) -> str | dict:
+    """`action` is the member's own name (Claude's tool_use `name`), passed
+    explicitly to `_dispatch` and everything below it.
+    """
+    blocked = _guard()
+    if blocked:
+        return blocked
+
+    backend, error = _backend()
+    if error:
+        return error
 
     try:
-        result = _dispatch(pyautogui, action, tool_input)
+        result = _dispatch(backend, action, tool_input)
     except Exception as e:
         return f"Error: {action} failed: {e}"
 
     if isinstance(result, dict) or action in _NO_SCREENSHOT:
         return result
     time.sleep(_SETTLE)
-    shot = _screenshot(pyautogui, caption=f"After {action}.")
+    shot = _screenshot(backend, caption=f"After {action}.")
     if isinstance(shot, dict):
         return shot
     return f"{result} (screenshot unavailable: {shot})"

@@ -23,6 +23,7 @@ dependencies = [
     "send2trash>=1.8",
     "pyautogui>=0.9.54",
     "pillow>=10.0",
+    "dbus-next>=0.2.3",
     "httpx2",                  # `text_embeddings`/`vision_query` — already pulled in
                                # transitively by both `anthropic` and `mcp`, listed
                                # explicitly since these modules import it directly

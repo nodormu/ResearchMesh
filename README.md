@@ -28,7 +28,7 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 
 ## What it can do
 
-**24 local tools**, plus whatever your MCP servers expose:
+**25 local tools**, plus whatever your MCP servers expose:
 
 | Tool | For |
 |---|---|
@@ -36,8 +36,8 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 | `str_replace_based_edit_tool` | View, create, and edit files |
 | `web_search` · `web_fetch` | Anthropic's server-side search and page fetch |
 | `memory` | A `/memories` store that **persists across sessions** — the only state that outlives the process |
-| `computer` | Screenshots plus mouse/keyboard control of your desktop. **Needs an X11 session** ([see below](#setup-linux)) |
-| `browser_navigate` · `_links` · `_click` · `_fill` · `_extract` · `_back` | Headless [Playwright](https://playwright.dev/) — real DOM surfing: renders JavaScript, follows links, fills forms |
+| `computer` | Screenshots plus mouse/keyboard control of your desktop, on X11 (`pyautogui`) or Wayland (xdg-desktop-portal remote control; needs `dbus-next` and `spectacle` or `grim`) — [see below](#setup-linux) |
+| `browser_navigate` · `_links` · `_click` · `_fill` · `_extract` · `_back` · `_tab` | [Playwright](https://playwright.dev/) DOM browsing: renders JavaScript, follows links and new tabs, fills forms, saves downloads to `~/Downloads`. `_navigate` takes `mode` (`headless` by default, `headed`, `virtual` on a hidden display, or `real` for your installed Chrome) and `profile` (keeps cookies and logins); `_tab` lists, switches and closes tabs; `_fill` takes a `pass` vault entry (`value_secret`) without the value appearing in the conversation, or `submit` to press Enter afterwards |
 | `document_convert` | LibreOffice + pandoc. Markdown → `.docx`/`.odt`/`.pdf`, or any office format to any other |
 | `python` | Persistent IPython kernel — **variables survive between calls** |
 | `bash_session` | Persistent shell — **cd/env/venvs/background jobs survive between calls** |
@@ -63,7 +63,7 @@ Claude chooses the tools and keeps working until it has an answer.
   systems everyone else's work goes through — a CRM/CMDB (ServiceNow, ConnectWise,
   whatever the organization already runs) as its system of record, change tickets
   opened for anything that touches production. Those are examples, not a fixed list.
-  None of that is built into this app's 24 tools directly; it's what
+  None of that is built into this app's 25 tools directly; it's what
   [MCP, in both directions](#mcp-in-both-directions) is *for* — connect it to an
   email MCP server, a Teams/Slack one, your CMDB's — and it participates the same way
   a new hire would, through the same front doors, not a side channel. That reframes
@@ -92,12 +92,9 @@ Claude chooses the tools and keeps working until it has an answer.
   need the file written to disk.
 - Nothing under `/tmp` can be trashed (tmpfs has no trash), so deletes there are permanent
   — the tool says so rather than pretending.
-- **`computer` does not work on Wayland.** It drives the screen through X11/XTEST, which
-  Wayland compositors ignore by design. Check with `echo $XDG_SESSION_TYPE`; if it prints
-  `wayland`, the tool refuses up front rather than clicking into the void. Fix with an Xorg
-  session, or `xvfb-run` — see [Setup](#setup-linux). One exception: if the actual app you
-  need to control is itself an XWayland client (common for Qt/GTK/Java desktop apps), Claude
-  can still drive *that one window* directly — see [Setup](#setup-linux) for the recipe.
+- **`computer` on Wayland goes through the desktop's remote-control portal.** The desktop may
+  ask for approval when a session starts, and a tray icon ("Remote Control" on KDE) shows while
+  it lasts. See [Setup](#setup-linux) step 3.
 - If Sonnet gets inconsistent on a complicated multi-tool request, set `model` to an Opus one.
 - Every per-tool package is installed unconditionally by `requirements.txt` — none of
   them are meant to be skipped. They're just *imported* lazily, only when that tool
@@ -144,7 +141,7 @@ client, so a Claude subscription won't work.
 
 ```bash
 sudo apt install python3 python3-venv python3-dev build-essential \
-                 libreoffice pandoc python3-tk scrot libasound2-dev pulseaudio-utils
+                 libreoffice pandoc python3-tk scrot libasound2-dev pulseaudio-utils xvfb
 
 python3 -m venv ~/claude-chat-plus-more-tools
 source ~/claude-chat-plus-more-tools/bin/activate
@@ -155,7 +152,7 @@ pip install -r requirements.txt
 html/rtf/txt/pdf, `pandoc` handles markdown (soffice has no dependable markdown import;
 `md → pdf` goes through odt on the way). `libreoffice-writer`/`-calc`/`-impress` alone are
 enough if you don't want the whole suite. `python3-tk` and `scrot` back `computer` — see
-step 3. `libasound2-dev` backs `midi1` — see the table below for why it's a hard
+step 3. `xvfb` backs the browser's `virtual` mode. `libasound2-dev` backs `midi1` — see the table below for why it's a hard
 requirement, unlike some of the packages near it that aren't. `pulseaudio-utils` backs
 `speak`/`listen` — both shell out to it directly (`paplay`/`parecord`) with no fallback,
 so unlike most per-tool packages below, a missing binary here isn't a clean "tool
@@ -176,7 +173,7 @@ its tool actually runs):
 | `config_edit` | `ruamel.yaml` (YAML), `tomlkit` (TOML), `jsonpath-ng` (`$…` queries); JSON needs nothing |
 | `sql_query` | `duckdb` |
 | `trash` | `send2trash` |
-| `computer` | `pyautogui`, `pillow` — plus `python3-tk`/`scrot` from apt and an X11 display (step 3) |
+| `computer` | `pyautogui`, `pillow` — plus `python3-tk`/`scrot` from apt on X11; `dbus-next` plus `spectacle` or `grim` on Wayland (step 3) |
 | `memory` | nothing — standard library only |
 | `text_embeddings` · `vision_query` | `httpx2` — already pulled in transitively by both `anthropic` and `mcp`, listed explicitly since these modules import it directly |
 | `speak` | `piper-tts` — **not** `sudo apt install piper` (an unrelated GTK app); playback shells out to `paplay` (`pulseaudio-utils`, installed above) |
@@ -186,7 +183,7 @@ its tool actually runs):
 To drop a tool entirely, remove its module from `MODULES` in `core/local_tools.py` (e.g.
 if you don't want MIDI, also drop `libasound2-dev` from the apt line above and
 `mido[ports-rtmidi]` from `requirements.txt`) — otherwise, install everything as
-written so all 24 tools actually work.
+written so all 25 tools actually work.
 Everything in `requirements.txt` is a `>=` floor, not a pin — if a tool ever reports a
 package missing that's already listed there, your venv just predates that line; re-run
 `pip install -r requirements.txt` (no restart needed).
@@ -211,24 +208,27 @@ misleading — `computer` reports `pyautogui` as missing when it's really one of
 - **`scrot`** — `pyscreeze` needs `gnome-screenshot` (via Pillow's `ImageGrab`) or `scrot`
   for a screenshot path on X11. Either works; `scrot` is the lighter one.
 
-`computer` also needs a real **X11** display — it synthesises input via X11/XTEST, which
-Wayland compositors ignore by design, so it refuses up front on a Wayland session (check
-`echo $XDG_SESSION_TYPE`) instead of clicking into the void. Options:
+`computer` works on **X11** (`pyautogui`) and on **Wayland** (`echo $XDG_SESSION_TYPE`).
+On Wayland it goes through xdg-desktop-portal: the desktop may ask for approval when a
+session starts, and while it lasts KDE shows a "Remote Control" tray icon whose **End**
+entry stops it (the next action starts a new session). It needs `dbus-next` (in
+`requirements.txt`) and `spectacle` or `grim` for screenshots. The screen is one monitor:
+the leftmost one shared in the dialog, or `CLAUDE_COMPUTER_MONITOR=<index>`. Share every
+monitor in the dialog. With only some shared, the screenshot scale is estimated (exact
+when they span the desktop's width or height) and a warning is printed. To use X11/XTEST
+on an XWayland-only setup or inside a nested X server instead:
 
 ```bash
-# 1. Log in to an "Xorg"/"X11" session at your display manager, or
-# 2. Run the whole client inside a nested X server:
 sudo apt install xvfb
-xvfb-run -s '-screen 0 1280x800x24' python main.py
-# 3. XWayland-only setup and you want to try regardless:
-export CLAUDE_COMPUTER_FORCE=1
+xvfb-run -s '-screen 0 1280x800x24' python main.py   # nested X server
+export CLAUDE_COMPUTER_FORCE=1                         # XWayland-only setup
 ```
 
-**Exception: an XWayland-backed target app.** A *whole-desktop* capture genuinely can't
-work on Wayland — no root window to grab. But if the specific app you want to control is
+**Alternative: an XWayland-backed target app.** If the specific app you want to control is
 itself an XWayland client (true for many GUI toolkits not yet ported to native Wayland —
-Qt, GTK, Java/Swing, Unity Editor, JetBrains IDEs, and more), it still has a real X11
-window, and Claude can drive *that one window* directly, bypassing `computer` entirely:
+Qt, GTK, Java/Swing, Unity Editor, JetBrains IDEs, and more), it has a real X11 window, and
+Claude can drive *that one window* directly through X11 tools, bypassing `computer` and the
+portal:
 
 ```bash
 # 1. Confirm it's XWayland-backed:
@@ -293,7 +293,7 @@ python main.py
 ```
 
 **MCP servers ship disabled** — the `[mcp]` block in `config.toml` ships with
-`enabled = false` and every server commented out, so a fresh clone runs on the 24 local
+`enabled = false` and every server commented out, so a fresh clone runs on the 25 local
 tools alone. The commented entries are worked examples of both entry shapes (Streamable
 HTTP and stdio) — replace the machine-specific addresses/paths with your own before
 uncommenting and setting `enabled = true`.
@@ -392,8 +392,8 @@ controlling your mouse and keyboard," save it to my Desktop, then export that sa
 file as a PDF, also saved to my Desktop.
 ```
 TIP: don't touch your own mouse and keyboard while it's doing this — fighting it for
-control just makes it harder for the AI. Needs an X11 session — see step 3 above if
-you're on Wayland.
+control just makes it harder for the AI. On Wayland the desktop may ask for approval —
+see step 3 above.
 
 f) **Headless, DOM-based web browsing.**
 ```
@@ -652,7 +652,10 @@ path. Absolute paths beyond that are machine-specific — edit those by hand.
 | `CLAUDE_SHOW_USAGE=1` | Print token and prompt-cache counts per request |
 | `CLAUDE_MEMORY_DIR` | Where `memory` stores `/memories` (default `./memories`) |
 | `CLAUDE_DISPLAY_SIZE` | Logical screen size `computer` reports, e.g. `1280x800` |
-| `CLAUDE_COMPUTER_FORCE=1` | Let `computer` try anyway on a Wayland session |
+| `CLAUDE_COMPUTER_FORCE=1` | Use X11/XTEST for `computer` on a Wayland session (XWayland-only setups, nested X servers) |
+| `CLAUDE_COMPUTER_MONITOR` | Monitor index, counted left to right, for `computer` on Wayland. Default: the leftmost shared one |
+| `RESEARCHMESH_DOWNLOAD_DIR` | Where browser downloads land. Default `~/Downloads` |
+| `PASSWORD_STORE_DIR` | The `pass` store whose entry names `interactive_run` and `browser_fill` offer. Default `~/.password-store` |
 | `CLAUDE_KERNEL_ENCRYPTION` | `auto` (default) encrypts the `python` kernel's sockets with CurveZMQ and falls back if it can't; `required` fails the tool instead of running unencrypted; `off` skips it |
 ## MCP, in both directions
 
@@ -663,7 +666,7 @@ either, both, or neither:
    Claude Code  ──delegate──▶  ResearchMesh  ──▶  n8n / Unreal / Unity / …
    (any MCP client)            (server AND client)     (its own MCP servers)
         │                            │                          │
-     mcp_server.py            24 local tools           [mcp] in config.toml
+     mcp_server.py            25 local tools           [mcp] in config.toml
 ```
 
 **As a client**, it connects out to MCP servers and merges their tools with its own —
@@ -877,8 +880,11 @@ core/
   tools.py                       MCP <-> Anthropic bridge
   claude_learned_schemas.py      bash, file editor, web_search, web_fetch
   memory.py                      /memories store, persists across sessions
-  computer.py                    screenshots + mouse/keyboard (X11 only)
+  computer.py                    screenshots + mouse/keyboard (X11 or Wayland portal)
+  wayland_input.py               xdg-desktop-portal remote control + screenshots on Wayland
+  dbus_loop.py                   asyncio loop thread for D-Bus connections
   browser.py                     Playwright DOM surfing
+  browser_session.py             browser launch modes, profiles, tabs, downloads
   documents.py                   LibreOffice / pandoc conversion
   kernel.py                      persistent IPython kernel
   bash_session.py                persistent shell — cd/env/venvs/bg jobs survive across calls

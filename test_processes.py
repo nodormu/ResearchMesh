@@ -2,30 +2,25 @@
 
     python test_processes.py
 
-Covers `interactive_run`'s `send_env`/`send_secret` step fields — added so a
-password/token prompt can be answered without the real value ever having to
-be written into the tool call itself (see the module's own docstring for the
-full rationale). Spawns real `bash -c 'read -s -p ... ; echo ...'` prompts
-via pexpect (through the real `_run()`, not a re-implementation) to confirm
-the actual value reaches the child process correctly AND never appears in
-the plain, unredacted transcript — not just that the code parses.
+Covers the `send_env` and `send_secret` step fields of `interactive_run`: the
+real value reaches the child (real `bash -c 'read -s ...'` prompts through the
+real `_run()`) and never appears in the unredacted transcript.
 
-`send_secret` shells out to a REAL `pass` binary, but this suite does not
-depend on a real GPG key/password-store being set up — a tiny fake `pass`
-script (plain shell, no gpg at all) is placed on `PATH` ahead of any real
-one for the duration of these specific checks, giving fully deterministic,
-fast, CI-safe coverage of `_resolve_reply`'s own logic (found entry, missing
-entry, `pass` altogether absent, a hung/unanswerable prompt) without ever
-touching real encryption or timing on an actual passphrase cache.
+`send_secret` normally shells out to `pass`; a small fake `pass` script (plain
+shell, no gpg) is put on `PATH` ahead of any real one, so the checks of
+`_resolve_reply` (found entry, missing entry, no `pass`, an unanswerable
+prompt) are deterministic and need no GPG key or password store.
 """
 
 import asyncio
 import json
 import os
 import shlex
+import signal
 import stat
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -49,16 +44,13 @@ PROMPT_CMD = 'read -s -p "Enter: " val; echo "GOT:[$val]"'
 
 
 def match_cmd(expected: str) -> str:
-    """A prompt whose own script compares the received value against
-    `expected` INSIDE the shell, printing only MATCH/MISMATCH — never the
-    real value itself. Used for "did the child receive the correct value"
-    checks now that redaction correctly scrubs every occurrence of a secret
-    (see `check_secret_redacted_even_when_echoed_back_later`): a test that
-    verified correctness by echoing the raw value back and inspecting the
-    transcript would be checking for something redaction is now supposed to
-    remove, which is backwards. `PROMPT_CMD`'s echo-back style is kept
-    on purpose for the one test that specifically needs a secret to leak
-    into unrelated output, to prove redaction now catches it anyway.
+    """A prompt whose script compares the received value to `expected` inside
+    the shell and prints only MATCH or MISMATCH, never the value. Used for
+    "did the child receive the right value" checks, since redaction now
+    scrubs every occurrence of a secret and echoing it back would test the
+    wrong thing. `PROMPT_CMD`'s echo-back style stays for the one test that
+    needs a secret to leak into unrelated output, to prove redaction catches
+    it.
     """
     return (
         f'read -s -p "Enter: " val; '
@@ -114,11 +106,10 @@ def check_send_env_missing_var(mod) -> None:
 
 
 class _FakePassOnPath:
-    """Puts a tiny fake `pass` script on `PATH`, ahead of any real one, for
-    the duration of a `with` block. Plain shell, zero gpg/pass dependency —
-    `show existing-entry` prints a known value, `show sleeps-forever` blocks
-    forever (simulating an unanswerable pinentry prompt), anything else
-    fails with the same shape of stderr message a real `pass` would give.
+    """Put a small fake `pass` on `PATH`, ahead of any real one, for the
+    duration of a `with` block. Plain shell, no gpg: `show existing-entry`
+    prints a known value, `show sleeps-forever` blocks (an unanswerable
+    pinentry), anything else fails with a real `pass`-style stderr message.
     """
 
     SCRIPT = """#!/bin/sh
@@ -126,7 +117,7 @@ if [ "$1" = "show" ]; then
     case "$2" in
         existing-entry) echo "fake-secret-value-9k2m"; exit 0 ;;
         fresh-unconfirmed-entry) echo "fake-secret-value-9k2m"; exit 0 ;;
-        sleeps-forever) sleep 999; exit 0 ;;
+        sleeps-forever) sleep 999 & echo $! > "$FAKE_PASS_CHILD_PIDFILE"; wait ;;
         *) echo "Error: $2 is not in the password store." >&2; exit 1 ;;
     esac
 fi
@@ -153,13 +144,9 @@ exit 1
 
 
 def confirm(mod, *names: str) -> None:
-    """Mark entry name(s) as already-confirmed, bypassing the real two-call
-    present-then-use flow for tests that are checking something OTHER than
-    that flow itself (exit-code fidelity, error surfacing, etc.) — see
-    `check_first_reference_always_forces_selection` for the dedicated test
-    of the confirmation gate itself. Without this, every other send_secret
-    test would need two throwaway calls just to get past a gate unrelated
-    to what it's actually testing.
+    """Mark entry names as typed by the user, so tests of other behaviour get
+    past the name gate. `check_entry_needs_user_typed_name`
+    tests the gate itself.
     """
     mod._confirmed_secret_entries.update(names)
 
@@ -228,6 +215,8 @@ def check_send_secret_timeout(mod) -> None:
     confirm(mod, "sleeps-forever")
     old_timeout = mod._SEND_SECRET_TIMEOUT
     mod._SEND_SECRET_TIMEOUT = 1
+    pidfile = os.path.join(tempfile.mkdtemp(), "child.pid")
+    os.environ["FAKE_PASS_CHILD_PIDFILE"] = pidfile
     try:
         with _FakePassOnPath():
             r = call(mod, {
@@ -236,15 +225,30 @@ def check_send_secret_timeout(mod) -> None:
             })
     finally:
         mod._SEND_SECRET_TIMEOUT = old_timeout
+        del os.environ["FAKE_PASS_CHILD_PIDFILE"]
+    # The fake `pass` started a child, as the real one starts gpg. Killing only
+    # `pass` would leave it running.
+    with open(pidfile) as f:
+        child = int(f.read())
+    alive = True
+    for _ in range(20):
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            alive = False
+            break
+        time.sleep(0.1)
+    if alive:
+        os.kill(child, signal.SIGKILL)
+    check("the timed-out `pass` leaves no child process behind", not alive, f"pid {child}")
     check("returns an error", "error" in r, str(r))
     check("error explains the likely cause (unanswerable passphrase prompt)", "passphrase" in r.get("error", ""), str(r))
     check("no transcript leaked through (never spawned)", "transcript" not in r, str(r))
 
 
 def check_secret_redacted_even_when_echoed_back_later(mod) -> None:
-    print("regression: a secret value is scrubbed EVERYWHERE in the "
-          "transcript, not just on the line where it was sent -- this is "
-          "a real bug that was caught live, not a hypothetical")
+    print("a secret value is scrubbed everywhere in the transcript, not just "
+          "on the line where it was sent")
     os.environ["_TEST_ECHO_BACK_SECRET"] = "Jum@nji23Suck$2#"
     try:
         r = call(mod, {
@@ -264,41 +268,49 @@ def check_secret_redacted_even_when_echoed_back_later(mod) -> None:
           transcript.count("***") == 2, transcript)
 
 
-def check_first_reference_always_forces_selection(mod) -> None:
-    print("send_secret: a DIRECT, CORRECT, real entry name is still refused "
-          "on its first-ever reference -- reproduces the actual live "
-          "incident (the model went straight to the only entry that "
-          "existed, on the first try, with no '?' involved at all)")
+def check_entry_needs_user_typed_name(mod) -> None:
+    print("send_secret: an entry decrypts only after the USER typed its name; "
+          "a real name chosen by the model is refused, however often it is "
+          "repeated")
     # _select_entry_prompt() reads $PASSWORD_STORE_DIR directly, independent
     # of the faked `pass` binary _FakePassOnPath sets up -- give it its own
     # controlled store so this test doesn't depend on whatever vault state
     # happens to exist on the machine actually running it.
     store = tempfile.mkdtemp()
     old_dir = os.environ.get("PASSWORD_STORE_DIR")
+    mod._confirmed_secret_entries.discard("fresh-unconfirmed-entry")
     try:
         open(os.path.join(store, "fresh-unconfirmed-entry.gpg"), "w").close()
         os.environ["PASSWORD_STORE_DIR"] = store
 
+        step = {"expect": "Enter: ", "send_secret": "fresh-unconfirmed-entry"}
         with _FakePassOnPath():
-            r1 = call(mod, {
-                "command": PROMPT_CMD,
-                "steps": [{"expect": "Enter: ", "send_secret": "fresh-unconfirmed-entry"}],
-            })
-        check("first reference is refused, not used, even though it's a real correct name",
+            r1 = call(mod, {"command": PROMPT_CMD, "steps": [step]})
+            r1b = call(mod, {"command": PROMPT_CMD, "steps": [step]})
+        check("an untyped name is refused, though it is a real correct name",
               "error" in r1, str(r1))
         check("refusal is the exact same selection prompt \"?\" produces",
               "please select the cred name I need to use:" in r1.get("error", ""), str(r1))
         check("refusal names the real entry, from the real store",
               "fresh-unconfirmed-entry" in r1.get("error", ""), str(r1))
-        check("no transcript leaked through on the refused first attempt",
+        check("no transcript leaked through on the refused attempt",
               "transcript" not in r1, str(r1))
+        check("repeating the same name is still refused",
+              "please select the cred name I need to use:" in r1b.get("error", ""), str(r1b))
 
+        mod.note_user_message("use fresh-unconfirmed-entry-2 for this")
+        with _FakePassOnPath():
+            r_near = call(mod, {"command": PROMPT_CMD, "steps": [step]})
+        check("a message containing only a longer name does not confirm it",
+              "error" in r_near, str(r_near))
+
+        mod.note_user_message("ok, fresh-unconfirmed-entry")
         with _FakePassOnPath():
             r2 = call(mod, {
                 "command": match_cmd("fake-secret-value-9k2m"),
-                "steps": [{"expect": "Enter: ", "send_secret": "fresh-unconfirmed-entry"}],
+                "steps": [step],
             })
-        check("SAME name, second reference, now proceeds for real",
+        check("after the user types the name it proceeds",
               "error" not in r2, str(r2))
         check("and actually works correctly once confirmed",
               "GOT:MATCH" in r2.get("transcript", ""), str(r2))
@@ -400,7 +412,7 @@ def main() -> int:
     print()
     check_send_env_missing_var(mod)
     print()
-    check_first_reference_always_forces_selection(mod)
+    check_entry_needs_user_typed_name(mod)
     print()
     check_send_secret_happy_path(mod)
     print()
