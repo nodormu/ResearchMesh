@@ -849,28 +849,14 @@ def check_model_command() -> None:
 
 
 def check_model_refresh() -> None:
-    """fetch_live_models()/refresh_claude_models() — the live-scan + TTL cache
-    behind config.toml's claude_models array.
+    """fetch_live_models() and refresh_claude_models(): the live scan and TTL
+    cache behind config.toml's claude_models array.
 
-    Neither function is exercised by check_model_command() above (that one
-    only covers the pre-existing load_claude_models()/resolve_model_swap()).
-    Both accept fake collaborators for exactly this reason — fetch_live_models
-    takes a `client`, refresh_claude_models takes `config_path`/`fetch_fn` —
-    the same dependency-injection shape check_clear_and_diagnostics() above
-    uses (a FakeBlock duck-typing a real content block). No network, no real
-    config.toml touched, no tempfile left behind.
-
-    refresh_claude_models's whole point is "never write on failure, only ever
-    write on a successful scan" — that is asserted directly here (byte-for-
-    byte file comparison before/after), not just exercised incidentally, so a
-    future edit that weakens that guarantee fails loudly instead of only
-    showing up as a mystery CI config.toml diff months later. tomlkit is
-    imported lazily inside refresh_claude_models() only on a successful
-    scan's write — if it isn't installed (true for CI's minimal dependency
-    set), the success-path write is skipped in favour of a documented
-    fallback (return the fresh result, persist nothing), and this check
-    verifies whichever behaviour is actually correct for the environment
-    it's running in, rather than assuming tomlkit is present.
+    Both take fake collaborators (`client`; `config_path` and `fetch_fn`), so
+    no network and no real config.toml is touched. A failed scan must never
+    write, asserted by comparing the file byte for byte. Without tomlkit the
+    success path returns the fresh result and persists nothing; the check
+    accepts whichever behaviour fits the environment.
     """
     print("model refresh (fetch_live_models / refresh_claude_models)")
     import importlib.util

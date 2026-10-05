@@ -9,56 +9,37 @@ from core.claude_learned_schemas import SH_TARGET, SHELL_EXECUTABLE
 from core.tools import ToolManager
 from mcp_client import MCPClient
 
-# Human-facing name of the interpreter the `bash` tool actually runs commands
-# through (e.g. "bash", "zsh", "dash") — resolved once at import time from
-# SHELL_EXECUTABLE, which is itself resolved once from config.toml's
-# [bash].shell (see core/claude_learned_schemas.py, including why that
-# constant is named SHELL_EXECUTABLE rather than BASH_SHELL). Interpolated
-# into SYSTEM_PROMPT below so Claude is told which shell dialect it's
-# actually writing for, rather than always assuming bash-only syntax is
-# safe — matters most if a user points [bash].shell at zsh, whose default
-# word-splitting on unquoted variables differs from bash/dash. Both this
-# name and the tool's actual subprocess executable are read from the exact
-# same SHELL_EXECUTABLE constant, so the two can never drift apart within a
-# running process.
+# Name of the interpreter the `bash` tool runs commands through (e.g. "bash",
+# "zsh", "dash"), taken from SHELL_EXECUTABLE and interpolated into
+# SYSTEM_PROMPT so Claude knows which shell dialect it writes for. zsh splits
+# unquoted variables differently from bash and dash.
 _SHELL_EXECUTABLE_NAME = Path(SHELL_EXECUTABLE).name
 
-# Human-facing name derived from SH_TARGET (core/claude_learned_schemas.py),
-# which checks /bin/sh live at every process start rather than hardcoding a
-# distro-specific claim — see that function's own docstring for why.
+# Name of what /bin/sh points to, taken from SH_TARGET
+# (core/claude_learned_schemas.py), which is checked at every process start.
+# Interpolated into SYSTEM_PROMPT.
 _SH_NAME = Path(SH_TARGET).name if SH_TARGET.startswith("/") else SH_TARGET
 
-# Raised 30 -> 75 -> 200 across this project's own history (see
-# researchmesh_client_dev_log.md for the 30->75 incident: a single turn
-# doing iterative debugging against a buggy third-party MCP server
-# chewed through 20+ iterations just fixing/working around that
-# server's own bugs). 200 is a safety-valve headroom increase, not a
-# response to a specific new incident — it exists so a long, genuinely
-# productive turn doesn't get cut off mid-task purely on iteration
-# count. Counts rounds of the chat loop (each of which can batch
-# several tool_use calls in one response), not a literal per-tool-call
-# counter, and resets every new user message, never across a whole
-# conversation.
+# Cap on chat-loop rounds per user message. A round can batch several tool_use
+# calls, and the count resets with every user message. 200 leaves room for a
+# long turn without cutting it off on round count alone.
 MAX_TOOL_ITERATIONS = 200
 
-# Separate, small grace budget for continuations the API contract makes
-# mandatory (an open pause_turn; a server_tool_use left dangling by a mixed
-# tool_use response) — MAX_TOOL_ITERATIONS alone must never block these.
-# 5 matches Anthropic's own reference example's `max_continuations` default.
-# See Chat._finalize_turn for what happens if even this runs out.
+# Extra rounds for continuations the API requires: an open pause_turn, or a
+# server_tool_use left dangling by a mixed tool_use response.
+# MAX_TOOL_ITERATIONS alone must not block these. 5 is the default
+# `max_continuations` in Anthropic's reference example. See Chat._finalize_turn
+# for what happens when this runs out.
 EXTRA_CONTINUATION_LIMIT = 5
 
-# Set CLAUDE_SHOW_USAGE=1 to print token and cache counters per request. Prompt
-# caching fails *silently* (a too-short prefix or a changed byte early in the
-# prefix just means no hit, with no error), so this is the only way to confirm
-# the cache_control breakpoint in core/claude.py is actually paying off.
+# Set CLAUDE_SHOW_USAGE=1 to print token and cache counters per request. A
+# cache miss raises no error, so this is how to check that the cache_control
+# breakpoint in core/claude.py pays off.
 SHOW_USAGE = os.getenv("CLAUDE_SHOW_USAGE") == "1"
 
-# Sent as the `system` parameter on every request. Without it, Claude has nothing
-# but the tool schemas to reason from and will describe capabilities it doesn't
-# have (e.g. inventing a sandboxed code-execution container, which this app has
-# no such thing as). Everything here is either a fact about this environment that
-# Claude cannot infer, or a choice between genuinely overlapping tools.
+# Sent as the `system` parameter on every request. States what the tool schemas
+# cannot: facts about this environment (for example, there is no sandboxed
+# code-execution container) and how to choose between overlapping tools.
 SYSTEM_PROMPT = f"""\
 You are the assistant in a command-line research client running on the user's own Linux
 machine. What follows describes your actual environment.
@@ -195,11 +176,10 @@ name looks — the user names the exact entry for every real task, every time.
 
 
 def _block_field(block, name: str):
-    """Read a field off a content block that may be an SDK object or a dict.
+    """Read a field from a content block that may be an SDK object or a dict.
 
-    Assistant turns hold the SDK's own block objects (straight off
-    `response.content`); the tool_result turns we build ourselves are plain
-    dicts. Anything walking the whole conversation has to cope with both.
+    Assistant turns hold SDK objects; tool_result turns built here are plain
+    dicts.
     """
     if isinstance(block, dict):
         return block.get(name)
@@ -207,37 +187,14 @@ def _block_field(block, name: str):
 
 
 def _orphaned_tool_uses(messages) -> list[str]:
-    """tool_use ids that never got a result block — the poisoned-session check.
+    """tool_use ids that never got a result block.
 
-    The API requires every tool_use block to be answered in the *immediately
-    following* message. One that isn't doesn't just break the turn it happened
-    in: the block stays in the history for the life of the process, so every
-    later request fails the same way, however many turns later. That failure
-    reads as "it started 400ing and won't stop", which is very hard to tell
-    from a context overflow without looking.
-
-    Covers both flavors the API can leave dangling, not just the client-tool
-    one:
-      - a plain client `tool_use` block, answered by a `tool_result` block.
-      - a `server_tool_use` (or an MCP-connector `mcp_tool_use`) block,
-        answered by a tool-specific result block instead — e.g.
-        `web_search_tool_result`, `web_fetch_tool_result`. This app doesn't
-        execute these itself (Anthropic runs them server-side), but a
-        dangling one is just as poisonous: the assistant turn never closed,
-        so the next request 400s the same way a missing client tool_result
-        does. Matched generically by suffix (`_tool_use` / `_tool_result`)
-        rather than a hardcoded list of current tool names, so a future
-        server tool is covered without editing this function again.
-
-    Both flavors pair up by the same id field regardless of which specific
-    block type is involved — confirmed against Anthropic's own docs: "A
-    server_tool_use block and its result block pair up by tool_use_id, not
-    by position."
-
-    `Chat._finalize_turn` exists to make this list empty by the time any
-    turn ends; this is how you find out it didn't. This function's live
-    output — not any guarantee elsewhere — is what every repair/diagnostic
-    path in this file actually trusts.
+    The API requires each tool_use to be answered in the next message; an
+    unanswered one fails every later request. Covers client `tool_use`
+    (answered by `tool_result`) and server-flavored
+    `server_tool_use`/`mcp_tool_use` (answered by a type-specific result
+    block). Pairs by id and matches by the `_tool_use`/`_tool_result` suffix,
+    so new server tools need no edit here.
     """
     answered: set[str] = set()
     issued: list[str] = []
@@ -261,15 +218,10 @@ def _orphaned_tool_uses(messages) -> list[str]:
 
 
 def _classify_orphans(messages) -> tuple[list[str], list[str]]:
-    """Split `_orphaned_tool_uses`'s output by whether each id is mechanically
-    fixable or not.
+    """Split `_orphaned_tool_uses` into (client_ids, server_ids).
 
-    A plain client `tool_use` block can always be closed out with a synthetic
-    error `tool_result` — that's what makes it "client-flavored" here. A
-    `server_tool_use`/`mcp_tool_use` block (web_search, web_fetch, an MCP
-    connector tool) cannot: the API expects a type-specific result block
-    (`web_search_tool_result`, etc.) that this app never had the real data
-    for, since the server ran it, not us. Returns (client_ids, server_ids).
+    A client `tool_use` can be closed with a synthetic error `tool_result`. A
+    server-flavored block cannot: its result block was never ours to build.
     """
     ids = _orphaned_tool_uses(messages)
     if not ids:
@@ -294,11 +246,10 @@ def _classify_orphans(messages) -> tuple[list[str], list[str]]:
 
 
 def _duplicate_tool_result_ids(messages) -> dict[str, int]:
-    """tool_use_ids answered by MORE than one tool_result-family block.
+    """tool_use ids answered by more than one tool_result-family block, as {id:
+    count}.
 
-    The literal API error is `invalid_request_error: ... each tool_use must
-    have a single result. Found multiple tool_result blocks with id: <id>`
-    — confirmed hit for real in production. Returns {id: count}.
+    The API rejects these: `each tool_use must have a single result`.
     """
     counts: dict[str, int] = {}
     for message in messages:
@@ -317,15 +268,10 @@ def _duplicate_tool_result_ids(messages) -> dict[str, int]:
 
 
 def _dedupe_duplicate_tool_results(messages) -> int:
-    """Mutates `messages` in place: for any tool_use_id with more than one
-    tool_result-family block answering it, keep only the FIRST one seen (in
-    message order — the real one from genuine tool execution) and drop the
-    rest (synthetic duplicates from the now-fixed iteration-cutoff bug, or
-    any other stray duplicate).
+    """Remove duplicate tool_result blocks in place, keeping the first per id.
+    Returns the count removed.
 
-    Removes just the offending blocks from whichever message's content list
-    holds them, not whole messages — never a bulk deletion. Returns how many
-    blocks were removed.
+    Drops blocks, never messages.
     """
     dup_counts = _duplicate_tool_result_ids(messages)
     if not dup_counts:
@@ -352,15 +298,11 @@ def _dedupe_duplicate_tool_results(messages) -> int:
 
 
 def _excise_dangling_blocks(messages, ids: set[str]) -> int:
-    """Mutates `messages` in place: removes any block whose `id` is in `ids`
-    — used only for a `server_tool_use`/`mcp_tool_use` orphan, where no
-    synthetic result block satisfies the API's schema for that tool type.
+    """Remove blocks whose `id` is in `ids`, in place. Returns the count
+    removed.
 
-    Removes only the specific dangling block(s), never the message that
-    holds them (any other content in that message — text, other blocks — is
-    kept) and never any other message. This is the minimal possible repair:
-    contrast with wiping a turn or a conversation, neither of which this file
-    does anywhere. Returns how many blocks were removed.
+    Used for server-flavored orphans, which no synthetic result can satisfy.
+    The message holding a block is kept.
     """
     if not ids:
         return 0
@@ -383,38 +325,14 @@ def _excise_dangling_blocks(messages, ids: set[str]) -> int:
 def _answer_orphaned_client_tool_uses(
     messages, client_ids: list[str], content: str
 ) -> None:
-    """Mutates `messages` in place: answers each id in `client_ids` with a
-    synthetic error `tool_result`, placed so it is genuinely part of the
-    message immediately following the specific message that holds that
-    tool_use — never simply appended to the tail of `messages`.
+    """Answer each id in `client_ids` with a synthetic error `tool_result`, in
+    place.
 
-    Appending to the tail (the previous behavior here, via
-    `claude_service.add_user_message`) is only correct if the orphan happens
-    to already be the very last thing in the conversation. It silently stops
-    being correct the moment anything else has already been appended after
-    the orphaning message — most commonly a plain new user query, added by
-    `run()`'s own next call before this repair ever runs. Confirmed live in
-    production: the repair ran, reported success ("answered 1 orphaned
-    tool_use block"), and the retried request 400'd on the exact same id
-    it had supposedly just answered — because the synthetic result landed
-    one message too late, still leaving the tool_use followed by a plain
-    user-text message instead of its own answer. Reproduced exactly outside
-    production too (`_orphaned_tool_uses` came back empty after that
-    "successful" repair — it only checks "answered somewhere later," not
-    the API's actual stricter "immediately after" rule, which is why the
-    old code believed it had fixed something it hadn't).
-
-    If the message right after the orphaning one is already a `user`
-    message, the synthetic result(s) are merged into the FRONT of its
-    existing content (mixing tool_result blocks with other content in one
-    user turn is a normal, documented shape) — this also avoids ever
-    creating two consecutive `user`-role messages. Only if there is no
-    following message at all is a new one inserted, matching the original
-    behavior for the case it was actually correct for.
-
-    Groups ids by which message actually holds them (usually one, but not
-    guaranteed) and processes messages back-to-front so an earlier
-    insertion never shifts the index of a later one out from under it.
+    The result goes in the message immediately after the one holding the
+    tool_use, which is what the API checks; appending to the end is wrong once
+    anything follows. A following `user` message gets the results merged at the
+    front of its content; otherwise a new message is inserted. Messages are
+    processed back to front so insertions do not shift later indexes.
     """
     if not client_ids:
         return
@@ -456,11 +374,8 @@ def _answer_orphaned_client_tool_uses(
 def _approx_size(messages) -> tuple[int, int]:
     """(message count, character count) for the conversation.
 
-    Deliberately a character count rather than a real token count:
-    `count_tokens` cannot measure this conversation at all, because
-    `web_search`/`web_fetch` are server tools and that endpoint rejects them
-    outright. Roughly 3-4 characters per token is close enough to tell "nowhere
-    near the window" from "at it", which is the only question being asked here.
+    Characters, not tokens: `count_tokens` rejects the server tools
+    (`web_search`, `web_fetch`) this conversation contains.
     """
     chars = 0
     for message in messages:
@@ -492,12 +407,13 @@ def _report_usage(response) -> None:
 
 
 def _local_result_to_content(local):
-    """Local tool executors normally return a plain string. They can also return
-    the image marker built by core.output.image_result ({"__kind__": "image",
-    ...}) — the file editor's and memory's `view` on an image file, and every
-    computer-use screenshot — which we translate into a real tool_result content
-    list carrying an `image` block, so the model actually receives pixels
-    instead of a UTF-8 decode error."""
+    """Local tool executors return a string, or the image marker from
+    core.output.image_result (file `view` on an image, every computer
+    screenshot), which becomes a tool_result content list with an `image`
+    block.
+
+    Worker results are built the same way in core/tools.py `_call_one`.
+    """
     if isinstance(local, dict) and local.get("__kind__") == "image":
         return [
             {
@@ -520,19 +436,14 @@ class Chat:
         self.messages: list[MessageParam] = []
 
     def clear(self) -> str:
-        """`/clear` — drop the conversation, keep the process and its servers.
+        """`/clear`: drop the conversation, keep the process and its MCP
+        connections.
 
-        The only recovery path from a poisoned history. `self.messages` lives
-        for the life of the process, so both of the failures that persist —
-        an unanswered tool_use block, and a conversation that has outgrown the
-        context window — leave every subsequent turn failing identically.
-        Before this existed the only way out was killing the app, which also
-        drops the browser page, the IPython kernel and every MCP connection.
-
-        Deliberately does not touch `self.clients`, the kernel or the browser:
-        none of them is the reason the history is unusable, and re-establishing
-        them would be the expensive half of a restart for none of the benefit.
-        `/memories` is untouched too — it is meant to outlive the session.
+        `self.messages` lives for the life of the process, so an unanswered
+        tool_use block, or a conversation that has outgrown the context window,
+        makes every later turn fail the same way. `/clear` is the recovery
+        path. It leaves `self.clients`, the kernel, the browser and `/memories`
+        alone, since none of them is why the history is unusable.
         """
         count, chars = _approx_size(self.messages)
         orphans = _orphaned_tool_uses(self.messages)
@@ -549,20 +460,12 @@ class Chat:
     def _report_api_failure(
         self, error: Exception, repair_attempted: str | None = None
     ) -> None:
-        """Say which failure this is, rather than leaving it to guesswork.
+        """Say which failure this is.
 
-        By the time this runs, `_call_chat_with_auto_repair` has already
-        tried the one fully-mechanical repair this app knows how to do
-        (dedupe/answer/excise dangling tool blocks — see
-        `_auto_repair_poisoned_history`) and retried once.
-        `repair_attempted` carries what it found and fixed, if anything.
-
-        This never recommends `/clear`, or any other action that discards
-        conversation content, anywhere — deliberately. If nothing here
-        could be mechanically repaired, the honest thing to do is report the
-        facts (the error, the size, any orphans still present after the
-        repair attempt) and leave the decision to the user, not prescribe a
-        destructive default.
+        `_call_chat_with_auto_repair` has already tried the mechanical repair
+        and retried once; `repair_attempted` is what it found. This reports
+        facts (error, size, remaining orphans) and never recommends `/clear` or
+        any step that discards conversation.
         """
         text = str(error)
         count, chars = _approx_size(self.messages)
@@ -591,24 +494,21 @@ class Chat:
             )
 
     async def _run_tool_uses(self, message) -> list:
-        """Route each tool_use block: local executor, or the MCP ToolManager.
+        """Route each tool_use block to a local executor or the MCP
+        ToolManager.
 
-        Every tool_use block here owes the API a matching tool_result in the
-        very next message, no exceptions — so a local executor that raises
-        must not abort the batch and orphan its block (or the blocks after
-        it). Turn the raise into an error tool_result instead, the same way
-        ToolManager.execute_blocks already does for MCP-side tools below.
+        Every tool_use block owes the API a tool_result in the next message, so
+        a local executor that raises becomes an error tool_result and does not
+        abort the batch, as ToolManager.execute_blocks does for MCP tools.
         """
         blocks = [b for b in message.content if b.type == "tool_use"]
         results: list = []
         mcp_blocks: list = []
 
         for block in blocks:
-            # For a computer-toolset member call, `block.toolset_name` is
-            # "computer" (None for every ordinary, non-toolset tool_use). The
-            # paired tool_result must echo the exact same value back or the
-            # API rejects the whole batch — computed once per block so both
-            # the success and error paths below stay in sync automatically.
+            # For a computer-toolset member, `block.toolset_name` is "computer"
+            # (None for any other tool_use). The paired tool_result must echo
+            # it or the API rejects the batch.
             toolset_name = getattr(block, "toolset_name", None)
 
             try:
@@ -645,18 +545,12 @@ class Chat:
         return results
 
     def _finalize_turn(self, reason: str) -> str:
-        """Close out a turn that's ending abnormally. Always re-scans the
-        live `self.messages` for what's actually still dangling — never
-        trusts a cached `response` object (that was the source of a real
-        duplicate-tool_result bug: see dev log).
+        """Close out a turn that ends abnormally.
 
-        Never deletes a turn, a message, or the conversation — only the
-        specific dangling block(s), each in the minimal way its flavor
-        allows: client `tool_use` gets a synthetic error `tool_result`;
-        server-flavored (`server_tool_use`/`mcp_tool_use`) has no valid
-        synthetic result, so the block itself is excised in place.
-
-        Returns the text to show the user.
+        Re-scans `self.messages` for what is still dangling. Never deletes a
+        turn or message: a client `tool_use` gets a synthetic error
+        `tool_result`, a server-flavored block is removed. Returns the text to
+        show the user.
         """
         client_ids, server_ids = _classify_orphans(self.messages)
         if client_ids:
@@ -675,15 +569,12 @@ class Chat:
         return base
 
     def _auto_repair_poisoned_history(self) -> str | None:
-        """Mechanical, unconditionally-safe repair of `self.messages`,
-        tried whenever a real `chat()` call raises: dedupe any duplicate
-        tool_result, answer any orphaned client tool_use, excise any
-        orphaned server-flavored block. Touches only the offending blocks,
-        never a whole message or the conversation.
+        """Repair `self.messages` after a failed `chat()`: dedupe tool_results,
+        answer orphaned client tool_uses, remove orphaned server-flavored
+        blocks.
 
-        Returns a short description of what was repaired, or None if there
-        was nothing here to fix (a real network/auth error, a genuine
-        context-window overflow, or some other cause).
+        Touches only the offending blocks. Returns a short description, or None
+        if there was nothing to fix.
         """
         repairs: list[str] = []
 
@@ -756,18 +647,17 @@ class Chat:
         tool_defs = local_tools.TOOLS + mcp_tools
 
         # Index of this turn's own assistant message while a pause_turn
-        # continuation is open. Anthropic's own reference implementation
-        # REPLACES this slot on each continuation rather than appending a
-        # sibling message -- see dev log for why that matters.
+        # continuation is open. Each continuation replaces this slot instead of
+        # appending a sibling message, as Anthropic's reference implementation
+        # does.
         pending_pause_turn_idx: int | None = None
 
         iterations = 0
         extra_continuations = 0
-        # Set only for the two cases where the next chat() call is
-        # unconditionally required by the API: an open pause_turn, or a
-        # server_tool_use left dangling by a mixed tool_use response.
-        # Reset every pass so the grace budget below is never spent on an
-        # ordinary continuation once the main budget runs out.
+        # Set only when the next chat() call is required by the API: an open
+        # pause_turn, or a server_tool_use left dangling by a mixed tool_use
+        # response. Reset every pass so the grace budget is not spent on an
+        # ordinary continuation.
         mandatory_continuation = False
         while True:
             if iterations >= MAX_TOOL_ITERATIONS:
@@ -834,19 +724,13 @@ class Chat:
                     break
                 continue
 
-            # Anything else (end_turn, stop_sequence, and critically
-            # max_tokens) falls through here. A max_tokens cutoff that hit
-            # mid-tool_use — e.g. a single large `create` call whose file
-            # content ran past the token budget — still gets its content
-            # appended above like any other assistant turn, tool_use block
-            # included, but stop_reason is "max_tokens", not "tool_use", so
-            # nothing above ever routed/answered it. Left alone, that
-            # tool_use sits unresolved past the end of this run() call and
-            # poisons every later turn (confirmed live in production, and
-            # reproduced in isolation — see researchmesh_client_dev_log.md).
-            # Re-check the live message list rather than trusting
-            # stop_reason alone, and finalize instead of returning as if
-            # this were an ordinary finished turn.
+            # Anything else (end_turn, stop_sequence, max_tokens) falls through
+            # here. A max_tokens cutoff in the middle of a tool_use (for
+            # example a large `create` call) is appended above like any
+            # assistant turn, but stop_reason is "max_tokens", so nothing above
+            # answered it; left unresolved, that tool_use poisons every later
+            # turn. Re-check the live message list instead of trusting
+            # stop_reason alone, and finalize.
             if _orphaned_tool_uses(self.messages):
                 final_text_response = self._finalize_turn(
                     f"stopped: response ended early (stop_reason="

@@ -12,11 +12,9 @@ class ToolManager:
     async def get_all_tools(
         cls, clients: dict[str, MCPClient]
     ) -> list[dict[str, Any]]:
-        """Gets all tools from the provided clients.
-
-        Returns Anthropic tool-schema dicts, not the MCP `Tool` models they are
-        built from — this is the bridge between the two, and `Chat` concatenates
-        the result straight onto `local_tools.TOOLS`.
+        """List every client's tools as Anthropic tool-schema dicts, not the
+        MCP `Tool` models they come from. `Chat` appends the result to
+        `local_tools.TOOLS`.
         """
         tools = []
         for client in clients.values():
@@ -25,13 +23,11 @@ class ToolManager:
                 {
                     "name": t.name,
                     "description": t.description,
-                    # mcp 2.0 renamed the model fields to snake_case
-                    # (`inputSchema` -> `input_schema`, `isError` ->
-                    # `is_error`, `mimeType` -> `mime_type` below). The
-                    # camelCase spellings survive as serialization aliases, so
-                    # constructing still works either way — but attribute
-                    # *reads* like these do not, and fail at runtime rather
-                    # than at import.
+                    # mcp 2.0 uses snake_case model fields (`input_schema`,
+                    # `is_error`, `mime_type` below). The camelCase spellings
+                    # survive as serialization aliases, so constructing a model
+                    # works either way, but attribute reads fail at runtime,
+                    # not at import.
                     "input_schema": t.input_schema,
                 }
                 for t in tool_models
@@ -42,8 +38,9 @@ class ToolManager:
     async def _tool_owners(
         cls, clients: dict[str, MCPClient]
     ) -> dict[str, MCPClient]:
-        """Maps tool name -> the first client offering it (one list_tools per
-        client, rather than one per client per tool being executed)."""
+        """Maps tool name -> the first client offering it, with one list_tools
+        per client rather than one per tool executed.
+        """
         owners: dict[str, MCPClient] = {}
         for client in clients.values():
             for tool in await client.list_tools():
@@ -123,9 +120,9 @@ class ToolManager:
                 )
 
                 if image_items:
-                    # Forward images as real image content blocks (base64,
-                    # e.g. from manage_camera's include_image=true) instead
-                    # of silently dropping them and keeping only the text.
+                    # Forward images as image content blocks (base64, as an MCP
+                    # tool returns them) instead of dropping them and keeping
+                    # only the text.
                     content = [{"type": "text", "text": content_json}] + [
                         {
                             "type": "image",

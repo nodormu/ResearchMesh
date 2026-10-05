@@ -16,14 +16,14 @@ Transport = Literal["stdio", "sse", "http"]
 
 
 class MCPClient:
-    """MCP client supporting stdio, SSE, and Streamable HTTP transports.
+    """MCP client for stdio, SSE and Streamable HTTP transports.
 
     - stdio: spawns a local server process (`command` + `args`).
     - sse:   connects to a remote server's SSE endpoint (`url`).
     - http:  connects to a remote server's Streamable HTTP endpoint (`url`).
 
-    For the remote transports (sse / http) `headers` may be given for auth,
-    e.g. {"Authorization": "Bearer <token>"} for a server using Bearer auth.
+    The remote transports take `headers` for auth, e.g. {"Authorization":
+    "Bearer <token>"}.
     """
 
     def __init__(
@@ -84,15 +84,13 @@ class MCPClient:
     async def _connect_http(self):
         if not self._url:
             raise ValueError("http transport requires a `url`")
-        # Streamable HTTP is what most remote MCP servers expose today (n8n's
-        # MCP Server Trigger, and anything built on the high-level server). It
-        # was `streamablehttp_client` in mcp 1.x, and it also dropped this
-        # transport's `headers=` argument in 2.0: HTTP settings now come from an
-        # httpx2 client you build yourself. `create_mcp_http_client`
-        # is the SDK's own factory, so the recommended MCP timeouts still apply —
-        # a bare `httpx2.AsyncClient(headers=...)` would silently drop them.
-        # Passing a client also transfers its lifecycle to us (the transport only
-        # closes one it created itself), hence entering it on the exit stack.
+        # Streamable HTTP is what most remote MCP servers expose. mcp 2.0
+        # dropped this transport's `headers=` argument: HTTP settings now come
+        # from an httpx2 client built here. `create_mcp_http_client` is the
+        # SDK's factory, so the recommended MCP timeouts still apply; a bare
+        # `httpx2.AsyncClient(headers=...)` would drop them. A passed-in
+        # client's lifecycle is ours (the transport closes only a client it
+        # created), hence it is entered on the exit stack.
         http_client = None
         if self._headers:
             http_client = await self._exit_stack.enter_async_context(
@@ -157,14 +155,11 @@ class MCPClient:
 async def main():
     import os
 
-    # Imported inside the function, not at module scope, because main.py imports
-    # *this* module — at module scope that is a circular import. Reusing its
-    # `build_client` / `_expand_paths` is the entire point: a standalone check is
-    # only worth running if it builds each client exactly the way the app does.
-    # Doing it by hand here is what made this command claim `unreal` was
-    # unreachable while `python main.py` connected to it perfectly well — it
-    # forced `transport="http"` on every entry, so a stdio entry (`command`, no
-    # `url`) failed on a missing URL, and `~`/`$USER` were never expanded either.
+    # Imported inside the function because main.py imports this module, so a
+    # module-level import would be circular. Reusing `build_client` and
+    # `_expand_paths` makes the check build each client exactly as the app
+    # does: forcing `transport="http"` on every entry fails a stdio entry
+    # (`command`, no `url`) and never expands `~` or `$USER`.
     import main as app
 
     override_headers = None
@@ -182,9 +177,9 @@ async def main():
         return
 
     if not app.MCP_ENABLED:
-        # Checking them anyway: this command exists to tell you whether a server
-        # *would* work, and `enabled = false` is usually why the app isn't
-        # using one you expected it to.
+        # Disabled servers are checked too: this command reports whether a
+        # server would work, and `enabled = false` is usually why the app is
+        # not using one you expected.
         print("[mcp] enabled = false in config.toml — the app skips all of these.")
 
     for index, server in enumerate(servers):

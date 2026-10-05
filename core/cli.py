@@ -14,12 +14,9 @@ class CliApp:
     def __init__(self, agent: Chat):
         self.agent = agent
 
-        # Phase 1 of the REPL-level voice work (see speak_listen_tool_
-        # integration_plan.md in /memories). Off by default: this only
-        # controls whether MY reply also gets spoken via the `speak` tool's
-        # own local `_run` helper; it has no bearing on whether `speak`/
-        # `listen` are reachable as Claude-invoked tools at all (that's
-        # config.toml's own `[speak].enabled`).
+        # Off by default. Controls only whether replies are also spoken through
+        # the `speak` tool's `_run`; it does not affect whether `speak` and
+        # `listen` are reachable as tools (`[speak].enabled` does that).
         self.auto_speak = False
 
         self.history = InMemoryHistory()
@@ -29,16 +26,11 @@ class CliApp:
         )
 
     async def _submit(self, text: str):
-        """Send `text` to the agent as one turn, print the reply, and
-        speak it if `/voice` (auto_speak) is on. Shared by both a normal
-        typed Enter-submit and a completed `/listen` dictation — this is
-        what makes dictation auto-submit independent of the auto_speak
-        flag: auto_speak only ever gates whether MY reply gets spoken,
-        never whether YOUR input gets sent, regardless of which path
-        (typed or dictated) produced that input. See speak_listen_tool_
-        integration_plan.md in /memories for the auto-submit-on-dictation
-        design decision (a deliberate pivot away from the earlier
-        stage-and-review design)."""
+        """Send `text` to the agent as one turn, print the reply, and speak it
+        if `/voice` (auto_speak) is on. Shared by typed input and a finished
+        `/listen` dictation: auto_speak only gates speaking the reply, never
+        sending the input.
+        """
         thinking = False
         if text.startswith("/think "):
             text = text[len("/think "):]
@@ -72,22 +64,18 @@ class CliApp:
 
                 text = user_input.strip()
 
-                # `/clear` is the recovery path from a history the API will no
-                # longer accept — an unanswered tool_use block, or a
-                # conversation past the context window. Both persist for the
-                # life of the process, so without this the only way out is
-                # killing the app, taking the browser page, the kernel and
-                # every MCP connection with it.
+                # `/clear` is the recovery path from a history the API will not
+                # accept: an unanswered tool_use block, or a conversation past
+                # the context window. Both last for the life of the process, so
+                # without it the only way out is killing the app, which takes
+                # the browser, the kernel and every MCP connection with it.
                 if text in ("/clear", "/reset"):
                     print(self.agent.clear())
                     continue
 
-                # Toggle for whether my reply also gets spoken aloud, on top
-                # of always being printed as text (never a replacement for
-                # it — see the "dual input-output modality without losing
-                # context" reasoning in speak_listen_tool_integration_plan.md
-                # in /memories). Reuses speak.py's own `_run` rather than
-                # re-implementing synthesis/playback here.
+                # Toggle whether replies are also spoken, in addition to being
+                # printed. Reuses speak.py's `_run` instead of re-implementing
+                # synthesis and playback.
                 if text.startswith("/voice"):
                     arg = text[len("/voice"):].strip().lower()
                     if arg in ("on", "true", "1"):
@@ -100,19 +88,11 @@ class CliApp:
                     print(f"[voice: {'on' if self.auto_speak else 'off'}]")
                     continue
 
-                # Dictation: record+transcribe via listen.py's own `_run`
-                # (same shared-helper reuse as `/voice` above), then AUTO-
-                # SUBMIT the transcript as a turn the instant STT completes
-                # — via the same `_submit` path a normal typed Enter uses,
-                # so this happens regardless of whether `/voice` (auto_speak)
-                # is on or off; that flag only affects whether the REPLY
-                # gets spoken, never whether dictated input gets sent. NOTE:
-                # this is a deliberate pivot away from this command's
-                # earlier "stage as next prompt's pre-fill for manual
-                # review/edit" behavior — see speak_listen_tool_integration_
-                # plan.md in /memories for that history. `/listen <N>`, if
-                # `<N>` is given, overrides [listen]'s configured duration
-                # for just this one call.
+                # Dictation: record and transcribe with listen.py's `_run`
+                # (shared with `/voice`), then auto-submit the transcript as a
+                # turn through `_submit`, whether `/voice` is on or off. There
+                # is no stage-and-edit step. `/listen <N>` overrides [listen]'s
+                # configured duration for that call.
                 if text.startswith("/listen"):
                     arg = text[len("/listen"):].strip()
                     tool_input = {}
@@ -140,14 +120,12 @@ class CliApp:
                         )
                     continue
 
-                # /model lists config.toml's claude_models (re-read fresh
-                # each call, see core/claude.py's load_claude_models — an
-                # edit to config.toml shows up without a restart). /model
-                # swap <name/index> actually changes it: session-only, it
-                # never writes config.toml, so a new session always starts
-                # back on claude_models[0]. An invalid name/index rejects
-                # with an error and the valid list, same reject-don't-crash
-                # pattern as /voice and /listen above.
+                # /model lists config.toml's claude_models (re-read on each
+                # call by core/claude.py's load_claude_models, so an edit shows
+                # without a restart). /model swap <name/index> changes the
+                # model for the session only and never writes config.toml, so a
+                # new session starts on claude_models[0]. An invalid name or
+                # index is rejected with the valid list.
                 if text == "/model" or text.startswith("/model "):
                     rest = text[len("/model"):].strip()
                     parts = rest.split(None, 1)
@@ -195,9 +173,8 @@ class CliApp:
             except KeyboardInterrupt:
                 break
             except Exception as e:
-                # Chat.run() now resolves any pending tool_use blocks before
-                # returning or raising (see core/chat.py), so self.messages
-                # stays valid even after a bad turn — safe to report the
-                # error and keep prompting instead of taking the whole
-                # session down for what may be a single tool's failure.
+                # Chat.run() resolves any pending tool_use blocks before it
+                # returns or raises (core/chat.py), so self.messages stays
+                # valid after a bad turn. Report the error and keep prompting
+                # instead of ending the session over one tool's failure.
                 print(f"\n[error: {e}]")

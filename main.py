@@ -29,22 +29,19 @@ def _load_config() -> dict:
 
 _config = _load_config()
 
-# Claude model: config.toml [claude] claude_models — the first entry is what
-# every new session starts on. refresh_claude_models() is the TTL-gated live
-# scan (see core/claude.py): most process starts just read the cached array
-# below with no network call at all; roughly once a day it re-scans
-# Anthropic's real /v1/models and updates config.toml's cache in place. No
-# env var override — config.toml is the single source of truth (swapping
-# mid-session is /model swap's job, not an env var's; see core/cli.py).
-# mcp_server.py does `import main as app` and reads `app.claude_model`
-# straight off this module, so a Router-spawned worker gets this same
-# live-verified default with no separate code path.
+# Claude model: the first entry of config.toml [claude] claude_models is what
+# every new session starts on. refresh_claude_models() (core/claude.py) is
+# TTL-gated: most starts read the cached array with no network call, and about
+# once a day it re-scans /v1/models and updates the cache in place. No env var
+# overrides it; /model swap changes the model mid-session (core/cli.py).
+# mcp_server.py does `import main as app` and reads `app.claude_model` from
+# here, so an instance served over MCP gets the same default.
 _claude_models = refresh_claude_models()
 claude_model = _claude_models[0] if _claude_models else "claude-sonnet-5"
 
-# MCP servers (Streamable HTTP), declared as a list in config.toml so adding one
-# is a config edit rather than a code change. Bearer tokens stay in the
-# environment: each entry's `token_env` names the variable holding its token.
+# MCP servers (Streamable HTTP), declared as a list in config.toml so adding
+# one is a config edit. Bearer tokens stay in the environment: each entry's
+# `token_env` names the variable that holds its token.
 _mcp_config = _config.get("mcp", {})
 MCP_ENABLED = _mcp_config.get("enabled", True)  # default on
 MCP_SERVERS = _mcp_config.get("servers", [])
@@ -54,12 +51,9 @@ def _expand(value):
     """Expand `~` and `$VAR`/`${VAR}` in a config value, recursing into lists
     and dicts.
 
-    config.toml is plain TOML and `tomllib` does no substitution of its own, so
-    without this a path like `/home/$USER/...` would be handed to the
-    subprocess literally. An undefined variable is left as-is (that is
-    `expandvars`' behaviour, not an accident) so a typo shows up verbatim in
-    the "could not reach/launch" message instead of silently collapsing to a
-    path that starts with `/home//`.
+    TOML does no substitution, so `/home/$USER/...` would reach the subprocess
+    literally. An undefined variable is left as is (`expandvars` behaviour), so
+    a typo shows up in the error instead of collapsing to `/home//`.
     """
     if isinstance(value, str):
         return os.path.expanduser(os.path.expandvars(value))
@@ -71,13 +65,12 @@ def _expand(value):
 
 
 def _expand_paths(server: dict) -> dict:
-    """A copy of a [mcp].servers entry with `~`/`$VAR` expanded in the fields
-    that hold paths or URLs, so config.toml can be checked in without anyone's
-    home directory or mount point baked into it.
+    """A copy of a [mcp].servers entry with `~`/`$VAR` expanded in `command`,
+    `url` and `env` values, so config.toml can be checked in without
+    anyone's home directory baked in.
 
-    Only `command`, `url` and `env` are touched. `env`'s keys are variable
-    *names* and are left alone; only its values are expanded. `token_env` is
-    likewise a name, and the token itself never appears in this file.
+    `env` keys and `token_env` are names and are left alone; `description` is
+    prose for the model and is not expanded.
     """
     expanded = dict(server)
     for key in ("command", "url", "env"):
@@ -89,21 +82,20 @@ def _expand_paths(server: dict) -> dict:
 def build_client(server: dict, name: str) -> MCPClient:
     """One MCPClient from a [mcp].servers entry.
 
-    Two kinds of entry are recognized:
+    Two kinds of entry:
 
     - Streamable HTTP (remote server):
         { name = "...", url = "http://host:port/...", token_env = "..." }
 
-    - stdio (local subprocess the client launches itself):
+    - stdio (local subprocess):
         { name = "...", command = ["node", "/path/to/bin.js"], env = { ... } }
-      `command` is the full argv — command[0] is the executable, the rest are
-      its arguments. `env` may be omitted; when given, it's extra environment
-      variables to hand the subprocess (merged with a safe default set — PATH,
-      HOME, etc. — by the MCP SDK itself, so you don't need to repeat those).
+      `command` is the full argv. `env` is extra environment for the
+    subprocess; the MCP SDK merges it with a safe default set (PATH, HOME,
+    ...).
 
-    Paths are expected to arrive already expanded (`_connect_mcp_servers` runs
-    `_expand_paths` first); calling this directly with a raw config entry will
-    pass `$USER` through to the subprocess unsubstituted.
+    Paths must arrive already expanded (`_connect_mcp_servers` runs
+    `_expand_paths` first); a raw config entry passes `$USER` to the subprocess
+    unsubstituted.
     """
     if "command" in server:
         command_list = server.get("command")
@@ -156,16 +148,16 @@ async def _connect_mcp_servers(stack: AsyncExitStack, clients: dict) -> None:
         except (KeyboardInterrupt, SystemExit):
             raise
         except BaseException:
-            # A failed connect raises CancelledError from connect() and surfaces
-            # the real cause (e.g. ConnectError) from cleanup(); swallow both and
-            # report the endpoint instead of dumping a traceback.
+            # A failed connect raises CancelledError from connect() and the
+            # real cause (e.g. ConnectError) from cleanup(); swallow both and
+            # report the endpoint instead of a traceback.
             try:
                 await client.cleanup()
             except BaseException as cleanup_error:
-                # Same rule as core/local_tools.shutdown(): cleanup must not be
-                # able to fail, but it must not fail *silently* either — this is
-                # already an error path, so a swallowed second failure here is
-                # the least visible place in the app.
+                # Same rule as core/local_tools.shutdown(): cleanup must not
+                # fail, and must not fail silently. This is already an error
+                # path, so a swallowed second failure would be the least
+                # visible place in the app.
                 print(
                     f"[mcp] {name}: cleanup after failed connect also failed "
                     f"(ignored): {cleanup_error}",
@@ -184,14 +176,11 @@ async def _connect_mcp_servers(stack: AsyncExitStack, clients: dict) -> None:
 
 
 def _reap_orphans_on_exit() -> None:
-    """Last-line safety net, registered FIRST so AsyncExitStack's LIFO
-    unwind order runs it LAST — after local_tools.shutdown() and every MCP
-    client's own cleanup have already had their chance. Doesn't replace
-    any of that; checks the one thing none of those can see on their own
-    (see core/process_reaper.py) — the real OS child-process tree, not any
-    tool's own bookkeeping about what it thinks it already closed.
-    Wrapped defensively, same rule as every other exit-path step here:
-    cleanup must not be able to turn an ordinary exit into a traceback.
+    """Last-line safety net, registered first so AsyncExitStack's LIFO unwind
+    runs it last, after local_tools.shutdown() and each MCP client's
+    cleanup. It checks the real OS child-process tree
+    (core/process_reaper.py), which no tool's own bookkeeping can see.
+    Wrapped so cleanup cannot turn an ordinary exit into a traceback.
     """
     try:
         reaped = process_reaper.reap_orphans()
