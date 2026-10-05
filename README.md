@@ -38,7 +38,7 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 | `memory` | A `/memories` store that **persists across sessions** — the only state that outlives the process |
 | `computer` | Screenshots plus mouse/keyboard control of your desktop, on X11 (`pyautogui`) or Wayland (xdg-desktop-portal remote control; needs `dbus-next` and `spectacle` or `grim`) — [see below](#setup-linux) |
 | `desktop_window` | List windows, and focus, move, resize, full-screen, minimize or restore one, on a KDE desktop (KWin scripting; needs `dbus-next`), so keystrokes reach the right window |
-| `screen_find` | Find on-screen text (`text`) or button-like blocks (`buttons: true`), optionally inside a `region`, by OCR, and return click coordinates in `computer`'s space; reads text on coloured buttons that plain OCR misses (needs `tesseract`) |
+| `screen_find` | Find on-screen text (`text`) or button-like blocks (`buttons: true`) by OCR, inside a `region` when one is given, and return click coordinates in `computer`'s space; reads text on coloured buttons that plain OCR misses (needs `tesseract`) |
 | `browser_navigate` · `_links` · `_click` · `_fill` · `_extract` · `_back` · `_tab` | [Playwright](https://playwright.dev/) DOM browsing: renders JavaScript, follows links and new tabs, fills forms, saves downloads to `~/Downloads`. `_navigate` takes `mode` (`headless` by default, `headed`, `virtual` on a hidden display, or `real` for your installed Chrome) and `profile` (keeps cookies and logins); `_tab` lists, switches and closes tabs; `_fill` takes a `pass` vault entry (`value_secret`) without the value appearing in the conversation, or `submit` to press Enter afterwards |
 | `document_convert` | LibreOffice + pandoc. Markdown → `.docx`/`.odt`/`.pdf`, or any office format to any other |
 | `python` | Persistent IPython kernel — **variables survive between calls** |
@@ -49,148 +49,73 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 | `trash` | Recoverable deletes instead of `rm` |
 | `text_embeddings` | Vector embeddings from an HTTP embedding server you configure — self-hosted or a paid API both work. See `[embeddings]` in config.toml for worked examples |
 | `vision_query` | Ask a question about an image via a vision-capable chat server you configure — self-hosted or a paid API both work. See `[vision]` in config.toml for worked examples |
-| `speak` · `listen` | Local text-to-speech (Piper) and speech-to-text (faster-whisper) through your own speaker/mic — no cloud audio API. Disabled by default; see `[speak]`/`[listen]` in config.toml, including first-time device setup |
-| `midi1` | MIDI 1.0 device discovery and I/O via `mido`/`python-rtmidi` — list ports, open/close, send/poll channel and system messages, SysEx, and read/write `.mid`/`.syx` files |
+| `speak` · `listen` | Local text-to-speech (Piper) and speech-to-text (faster-whisper) through your own speaker and mic; no cloud audio API. Both return `not_configured` until `[speak]` and `[listen]` are set in config.toml, which also covers first-time device setup |
+| `midi1` | MIDI 1.0 device discovery and I/O (`mido` for messages and files, ALSA sequencer ports) — list ports, open/close, send/poll channel and system messages, SysEx, and read/write `.mid`/`.syx` files |
 
 Claude chooses the tools and keeps working until it has an answer.
 
 ## Good to know
 
-- **There is no approval prompt.** Claude runs commands and file edits as your user, no
-  y/n in between. Built for local development. `trash` exists so deletes are recoverable.
-- **This is meant to be an AI *employee*, not just an unsupervised agent.** The
-  OS-level restrictions below are the last line of defense, but the fuller model goes
-  further: give it its own email address, let it talk to humans and other AIs in
-  Teams or Slack like any other coworker, and route its actual work through the same
-  systems everyone else's work goes through — a CRM/CMDB (ServiceNow, ConnectWise,
-  whatever the organization already runs) as its system of record, change tickets
-  opened for anything that touches production. Those are examples, not a fixed list.
-  None of that is built into this app's 27 tools directly; it's what
-  [MCP, in both directions](#mcp-in-both-directions) is *for* — connect it to an
-  email MCP server, a Teams/Slack one, your CMDB's — and it participates the same way
-  a new hire would, through the same front doors, not a side channel. That reframes
-  what "no approval prompt" actually means: no y/n dialog *in this software*, not that
-  nothing ever gates a risky change — a maintenance request can be drafted and
-  submitted instantly, but whether it actually *runs* still depends on the same
-  Change Advisory Board approval a human's request would need, because that gate
-  lives in the change-management process, not in this client.
-- **Constrain what this account can actually do, at the OS level.** No approval
-  prompt means Claude can do anything your user account can — so scope that account
-  the way you'd scope a laptop issued to a new employee: enough access to do the job,
-  not more. This is enforced by the OS itself, independent of anything Claude decides
-  to do, so it holds even against a fully compromised or badly hallucinating agent.
-  - Run as a **dedicated, non-admin user account** — not your daily-driver login, never root.
-  - **File/directory permissions** (`chmod`/`chown`, group membership) scope what
-    that account can read, write, or execute — put anything sensitive outside its
-    reach entirely, rather than trusting it won't be touched.
-  - **No passwordless `sudo`** for that account; if a specific privileged command is
-    genuinely needed, grant it narrowly via `sudoers`, not blanket admin rights.
-  - For stricter control, **AppArmor**/**SELinux** profiles and systemd sandboxing
-    directives enforce restrictions the account can't opt itself out of.
+- **There is no approval prompt.** Claude runs commands and file edits as your user with no y/n in between. This is built for local development; `trash` exists so deletes are recoverable.
+- **Treat it as an employee, not just an unsupervised agent.** Beyond the OS-level limits below, give it its own email address, let it work with people and other AIs in Teams or Slack, and route its work through the systems everyone else uses: a CRM/CMDB such as ServiceNow or ConnectWise as the system of record, and change tickets for anything that touches production. None of that is built into the 27 local tools; [MCP, in both directions](#mcp-in-both-directions) is how to connect it to an email, Teams/Slack or CMDB MCP server, so it participates through the same front doors a new hire would. "No approval prompt" means no y/n dialog in this software, not that nothing gates a risky change: a maintenance request can be submitted instantly, but whether it runs depends on the same Change Advisory Board approval a human's request needs, because that gate lives in the change-management process, not in this client.
+- **Constrain what this account can do, at the OS level.** With no approval prompt, Claude can do anything your user account can, so scope that account the way you would a laptop issued to a new employee: enough access for the job, no more. The OS enforces this independent of anything Claude decides, so it holds against a compromised or hallucinating agent.
+  - Run as a dedicated, non-admin user, not your daily login and never root.
+  - Use file and directory permissions (`chmod`, `chown`, group membership) to put anything sensitive outside its reach entirely.
+  - No passwordless `sudo`; if one privileged command is needed, grant it narrowly in `sudoers`.
+  - For stricter control, AppArmor or SELinux profiles and systemd sandboxing directives enforce restrictions the account cannot opt out of.
 - It's your API key: one request can fan out into many tool calls (capped at 200 per turn).
-- `bash` forgets everything between calls — `cd`, exports, activated venvs. Chain with `&&`,
-  or use `python`, which keeps state.
-- Ask for files by absolute path. If Claude offers a download link instead, tell it you
-  need the file written to disk.
-- Nothing under `/tmp` can be trashed (tmpfs has no trash), so deletes there are permanent
-  — the tool says so rather than pretending.
-- **`computer` on Wayland goes through the desktop's remote-control portal.** The desktop may
-  ask for approval when a session starts, and a tray icon ("Remote Control" on KDE) shows while
-  it lasts. See [Setup](#setup-linux) step 3.
-- If Sonnet gets inconsistent on a complicated multi-tool request, set `model` to an Opus one.
-- Every per-tool package is installed unconditionally by `requirements.txt` — none of
-  them are meant to be skipped. They're just *imported* lazily, only when that tool
-  runs, so if one's ever missing anyway (a stale venv), it breaks just that tool and
-  tells you what to install rather than crashing the whole client. If a tool reports one
-  missing that `requirements.txt` already lists, your venv just predates that line (no
-  lockfile, floors only) — re-run `pip install -r requirements.txt`, no restart needed.
-- **`ruff check .` and `mypy .` should both pass.** Ruff adds no rules, only turns two
-  off (reasons inline in `pyproject.toml`). Mypy sets one option
-  (`ignore_missing_imports`, since per-tool backing packages are lazily imported).
-  Neither is a dependency — install them yourself if you want them.
-- **`python smoke_test.py` before you commit.** Seconds, no API key, no network. Checks
-  imports, tool-registry shape, that the doc tool-count matches the code, and an MCP
-  handshake. GitHub Actions runs it plus `ruff`/`mypy` on every push/PR to `main`, on
-  Python 3.11 and 3.14.
-- **`python test_model_compat_live.py` is separate, outside CI** (real API, ~9 requests): checks the
-  per-model tool-compatibility handler against Anthropic's actual error wording.
-- **`python test_midi1.py` tests the `midi1` tool**, outside CI. It covers message bytes against a
-  recorded snapshot, the specs' worked examples, decoding and the `describe` docs. Its live part
-  sends through ALSA's built-in `Midi Through` port and reads it back, including bursts and SysEx
-  up to 100,000 bytes. `Midi Through` comes with the `snd-seq-dummy` kernel module, normally
-  loaded; without it, the test prints `skip  live loopback` and runs the rest.
-- **`test_midi1.py` is the one tool test suite, and CI doesn't exercise the tools themselves** —
-  that needs LibreOffice, a browser, an X11 display, and real API credits.
-- **Two things a linter will flag that are deliberate.** Broad `except Exception`/
-  `BaseException` is the design — every local tool must catch anything and return an error
-  string instead of crashing the chat loop (`BLE001` is off project-wide for this reason).
-  And cleanup paths (`shutdown`, `close`) use a blanket catch plus `print()` on purpose —
-  narrowing one already caused a real bug (`zmq.ZMQError` isn't an `OSError`, so a
-  narrower catch turned an ordinary Ctrl-C into a traceback).
-- **Memory** writes to `./memories` by default (`CLAUDE_MEMORY_DIR` to relocate). Claude
-  sees it as `/memories`; a traversal path like `/memories/../../.ssh/id_rsa` is rejected.
-  Private scratchpad for Claude, not a place for your project files — persists until you
-  delete it.
+- `bash` forgets everything between calls (`cd`, exports, activated venvs). Chain with `&&`, or use `bash_session` or `python`, which keep state.
+- Ask for files by absolute path. If Claude offers a download link instead, tell it you need the file written to disk.
+- Nothing under `/tmp` can be trashed (tmpfs has no trash), so deletes there are permanent; the tool says so.
+- **`computer` on Wayland goes through the desktop's remote-control portal.** The desktop may ask for approval when a session starts, and a tray icon ("Remote Control" on KDE) shows while it lasts. See [Setup](#setup-linux) step 3.
+- If Sonnet is inconsistent on a complicated multi-tool request, `/model swap` to an Opus model.
+- `requirements.txt` installs every per-tool package, and each is imported lazily when its tool first runs. A missing one breaks only that tool and says what to install. If a tool reports a package that `requirements.txt` already lists, your venv predates that line (floors only, no lockfile); re-run `pip install -r requirements.txt`, with no restart.
+- **`ruff check .` and `mypy .` should both pass.** Ruff adds no rules; `pyproject.toml` lists its exemptions, each with a reason. Mypy sets `exclude` and `ignore_missing_imports` (the per-tool packages are imported lazily). Both are in `requirements.txt`.
+- **Run `python smoke_test.py` before you commit.** It takes seconds and needs no API key and no network. It checks imports, the tool-registry shape, that the documented tool count matches the code, and an MCP handshake. GitHub Actions runs it plus `ruff` and `mypy` on every push and PR to `main`, on Python 3.11 and 3.14.
+- **`python test_model_compat_live.py` is separate and outside CI** (real API, about 9 requests): it checks the per-model tool-compatibility handler against Anthropic's actual error wording.
+- **The other `test_*.py` scripts exercise individual tools** and run locally, not in CI, because the tools need LibreOffice, a browser, a display, MIDI ports or API credits. `test_midi1.py` checks message bytes against a recorded snapshot, the specs' worked examples, decoding and the `describe` docs; its live part sends through ALSA's built-in `Midi Through` port and reads it back, including bursts and SysEx up to 100,000 bytes. `Midi Through` comes from the `snd-seq-dummy` kernel module, normally loaded; without it the test prints `skip  live loopback` and runs the rest.
+- **Two things a linter will flag are deliberate.** Broad `except Exception` and `BaseException` are the design: every local tool must catch anything and return an error string instead of crashing the chat loop (`BLE001` is off project-wide). Cleanup paths (`shutdown`, `close`) use a blanket catch plus `print()` on purpose: `zmq.ZMQError` is not an `OSError`, so a narrower catch turns an ordinary Ctrl-C into a traceback.
+- **Memory** writes to `./memories` by default (`CLAUDE_MEMORY_DIR` to relocate). Claude sees it as `/memories`; a traversal path like `/memories/../../.ssh/id_rsa` is rejected.
 
 <a id="setup-linux"></a>
 
 ## Setup (Linux)
 
-You need **Linux**, **Python 3.11+**, and an Anthropic **API key** — this is an API
-client, so a Claude subscription won't work.
+You need **Linux**, **Python 3.11+** and an Anthropic **API key**. This is an API client, so a Claude subscription won't work.
 
 ### 1) Install system packages and create a venv
 
 ```bash
 sudo apt install python3 python3-venv python3-dev build-essential \
-                 libreoffice pandoc python3-tk scrot libasound2-dev pulseaudio-utils xvfb tesseract-ocr
+                 libreoffice pandoc python3-tk scrot libasound2-dev pulseaudio-utils \
+                 xvfb tesseract-ocr
 
 python3 -m venv ~/claude-chat-plus-more-tools
 source ~/claude-chat-plus-more-tools/bin/activate
 pip install -r requirements.txt
 ```
 
-`libreoffice` + `pandoc` back `document_convert` — `soffice` handles docx/odt/xlsx/pptx/
-html/rtf/txt/pdf, `pandoc` handles markdown (soffice has no dependable markdown import;
-`md → pdf` goes through odt on the way). `libreoffice-writer`/`-calc`/`-impress` alone are
-enough if you don't want the whole suite. `python3-tk` and `scrot` back `computer` — see
-step 3. `xvfb` backs the browser's `virtual` mode. `tesseract-ocr` backs `screen_find`. `libasound2-dev` backs `midi1` — see the table below for why it's a hard
-requirement, unlike some of the packages near it that aren't. `pulseaudio-utils` backs
-`speak`/`listen` — both shell out to it directly (`paplay`/`parecord`) with no fallback,
-so unlike most per-tool packages below, a missing binary here isn't a clean "tool
-declares itself unavailable" story, just a raw subprocess failure. It's genuinely already
-present on most real desktop installs (pulled in by PipeWire's `pipewire-pulse`), which is
-why it's easy to assume it's a given — but that assumption doesn't hold on a headless
-server, WSL, or a minimal container, all realistic ways to run a CLI tool like this one,
-so it's listed here explicitly rather than left to chance.
+`libreoffice` and `pandoc` back `document_convert`: `soffice` handles docx, odt, xlsx, pptx, html, rtf, txt and pdf, and `pandoc` handles markdown (soffice has no dependable markdown import; `md → pdf` goes through odt on the way). `libreoffice-writer`, `-calc` and `-impress` alone are enough if you don't want the whole suite. `python3-tk` and `scrot` back `computer` (step 3). `xvfb` backs the browser's `virtual` mode. `tesseract-ocr` backs `screen_find`. `libasound2-dev` backs `midi1` (see the table below). `pulseaudio-utils` backs `speak` and `listen`, which call `paplay` and `parecord` directly with no fallback, so a missing binary is a raw subprocess failure, not a tool that declares itself unavailable. Most desktops already have it (PipeWire's `pipewire-pulse` pulls it in); a headless server, WSL or a minimal container does not, so it is listed explicitly.
 
-**Per-tool Python packages** (all installed unconditionally via `requirements.txt` —
-none of these are meant to be skipped; each is only *imported* lazily, at the moment
-its tool actually runs):
+**Per-tool Python packages** (all installed by `requirements.txt`; each is imported lazily, when its tool first runs):
 
 | Tool | Needs |
 |---|---|
-| `python` | `jupyter_client>=8.9.1`, `ipykernel>=7` — older works too, just unencrypted (see step 6) |
+| `python` | `jupyter_client>=8.9.1`, `ipykernel>=7`; older versions work but the kernel traffic is unencrypted (step 6) |
 | `interactive_run` | `pexpect` |
 | `config_edit` | `ruamel.yaml` (YAML), `tomlkit` (TOML), `jsonpath-ng` (`$…` queries); JSON needs nothing |
 | `sql_query` | `duckdb` |
 | `trash` | `send2trash` |
-| `computer` | `pyautogui`, `pillow` — plus `python3-tk`/`scrot` from apt on X11; `dbus-next` plus `spectacle` or `grim` on Wayland (step 3) |
-| `desktop_window` | `dbus-next` — plus KDE Plasma (KWin scripting over D-Bus) |
-| `screen_find` | `pillow` — plus `tesseract-ocr` from apt |
-| `memory` | nothing — standard library only |
-| `text_embeddings` · `vision_query` | `httpx2` — already pulled in transitively by both `anthropic` and `mcp`, listed explicitly since these modules import it directly |
-| `speak` | `piper-tts` — **not** `sudo apt install piper` (an unrelated GTK app); playback shells out to `paplay` (`pulseaudio-utils`, installed above) |
-| `listen` | `faster-whisper`; capture shells out to `parecord` (same `pulseaudio-utils` package as above) |
-| `midi1` | `mido[ports-rtmidi]` — pulls in `python-rtmidi`, a C extension. No prebuilt Linux wheel exists for every Python version, so `pip` frequently compiles it from source — and its own build script makes ALSA dev headers a **hard requirement** on Linux unless JACK's are present instead. Without `libasound2-dev` (installed above) the build fails with a `meson`/ALSA-related compiler error, not an obvious "MIDI" one |
+| `computer` | `pyautogui`, `pillow`; plus `python3-tk` and `scrot` from apt on X11, or `dbus-next` and `spectacle` or `grim` on Wayland (step 3) |
+| `desktop_window` | `dbus-next`; plus KDE Plasma (KWin scripting over D-Bus) |
+| `screen_find` | `pillow`; plus `tesseract-ocr` from apt |
+| `memory` | nothing, standard library only |
+| `text_embeddings` · `vision_query` | `httpx2`, already pulled in by `anthropic` and `mcp`; listed because these modules import it directly |
+| `speak` | `piper-tts`, **not** `sudo apt install piper` (an unrelated GTK app); playback calls `paplay` (`pulseaudio-utils`, installed above) |
+| `listen` | `faster-whisper`; capture calls `parecord` (the same `pulseaudio-utils` package) |
+| `midi1` | `mido[ports-rtmidi]` and `cffi`. `mido` builds messages, reads and writes `.mid`/`.syx` files, and lists ports through `python-rtmidi`, a C extension with no prebuilt Linux wheel for every Python version, so `pip` often compiles it; its build script requires ALSA dev headers on Linux unless JACK's are present, and without `libasound2-dev` the build fails with a `meson`/ALSA compiler error, not an obvious MIDI one. `cffi` opens the ports as ALSA sequencer clients through the system `libasound.so.2`; without it, opening a port returns an error while messages and files still work |
 
-To drop a tool entirely, remove its module from `MODULES` in `core/local_tools.py` (e.g.
-if you don't want MIDI, also drop `libasound2-dev` from the apt line above and
-`mido[ports-rtmidi]` from `requirements.txt`) — otherwise, install everything as
-written so all 27 tools actually work.
-Everything in `requirements.txt` is a `>=` floor, not a pin — if a tool ever reports a
-package missing that's already listed there, your venv just predates that line; re-run
-`pip install -r requirements.txt` (no restart needed).
+To drop a tool entirely, remove its module from `MODULES` in `core/local_tools.py` (for MIDI, also drop `libasound2-dev` from the apt line, and `mido[ports-rtmidi]` and `cffi` from `requirements.txt`); otherwise install everything as written so all 27 tools work. Everything in `requirements.txt` is a `>=` floor, not a pin: if a tool reports a package missing that is already listed, your venv predates that line; re-run `pip install -r requirements.txt` (no restart).
 
 ### 2) Playwright
 
@@ -199,8 +124,7 @@ playwright install chromium            # the browser binary — pip installs the
 sudo playwright install-deps chromium  # OS libraries (e.g. libmanette)
 ```
 
-`playwright install` with no browser name fetches all three engines; this app only
-launches Chromium, so the argument is worth keeping.
+`playwright install` with no browser name fetches all three engines; this app only launches Chromium, so the argument is worth keeping.
 
 ### 3) `computer` — extra apt packages, and X11 vs Wayland
 
@@ -229,7 +153,7 @@ export CLAUDE_COMPUTER_FORCE=1                         # XWayland-only setup
 ```
 
 **Alternative: an XWayland-backed target app.** If the specific app you want to control is
-itself an XWayland client (true for many GUI toolkits not yet ported to native Wayland —
+itself an XWayland client (true for many GUI toolkits without a native Wayland port:
 Qt, GTK, Java/Swing, Unity Editor, JetBrains IDEs, and more), it has a real X11 window, and
 Claude can drive *that one window* directly through X11 tools, bypassing `computer` and the
 portal:
@@ -314,34 +238,17 @@ a silent fallback.
 
 ### 7) Using it
 
-Just type. **`/think <message>`** gives Claude longer to reason on hard problems;
-**`/clear`** (alias **`/reset`**) drops the conversation without restarting the app;
-**Ctrl-C** exits and
-shuts everything down cleanly. **`/voice [on|off]`** toggles whether Claude's replies are
-also spoken aloud (via `speak`, local Piper TTS); **`/listen [N]`** records `N` seconds
-from your mic (default from `[listen].default_duration_seconds`), transcribes it locally
-(faster-whisper), and auto-submits the transcript as your next turn — no extra Enter
-needed, regardless of whether `/voice` is on. Both need `[speak]`/`[listen]` configured in
-`config.toml` first (see the tools table above); without that, `/voice` toggles but has
-nothing to speak, and `/listen` reports a clear `not_configured`/`disabled` message.
-**`/model`** lists the models in `config.toml`'s `[claude] claude_models`, each with an
-index; **`/model swap <name or index>`** swaps the model for the rest of this session
-only — it never edits `config.toml`, so the next new session always starts back on the
-first entry in the list. That list itself is a live-refreshed cache, not hand-typed:
-roughly once a day (`model_scan_ttl_hours`, default 24) it re-scans Anthropic's actual
-`/v1/models` and rewrites `claude_models` to one entry per model family, newest release
-first — sonnet is always placed first when present, matching Anthropic's own documented
-default recommendation. A failed scan (offline, bad key) changes nothing on disk; the
-existing cached list is used as-is.
+Just type. **`/think <message>`** gives Claude longer to reason on hard problems; **`/clear`** (alias **`/reset`**) drops the conversation without restarting the app; **Ctrl-C** exits and shuts everything down cleanly.
 
-**Haiku 4.5 has no `computer` tool.** It rejects it, so the client drops the tool for Haiku after one rejected
-request (a `[model compat]` line is printed) and every other tool keeps working. Sonnet, Opus and Fable use
-`computer` normally. If `computer` was used in a conversation on one of those, `/model swap` to Haiku fails
-every turn with a 400 (`toolset_name 'computer' ... no toolset entry is declared`): swap back, or `/clear`.
+**`/voice [on|off]`** toggles whether Claude's replies are also spoken aloud (through `speak`, local Piper TTS). **`/listen [N]`** records `N` seconds from your mic (default `[listen].default_duration_seconds`), transcribes it locally (faster-whisper), and auto-submits the transcript as your next turn, with no extra Enter and whether or not `/voice` is on. Both need `[speak]` and `[listen]` set in `config.toml` first (see the tools table above); without that, `/voice` toggles but has nothing to speak, and `/listen` reports `not_configured` or `disabled`.
+
+**`/model`** lists the models in `config.toml`'s `[claude] claude_models`, each with an index. **`/model swap <name or index>`** swaps the model for this session only; it never edits `config.toml`, so a new session starts on the first entry. The list is a live-refreshed cache, not hand-typed: about once a day (`model_scan_ttl_hours`, default 24) it re-scans Anthropic's `/v1/models` and rewrites `claude_models` to one entry per model family, newest first, sonnet first when present. A failed scan (offline, bad key) changes nothing on disk.
+
+**Haiku 4.5 has no `computer` tool.** It rejects it, so the client drops the tool for Haiku after one rejected request (a `[model compat]` line is printed) and every other tool keeps working. If `computer` was used earlier in the conversation on another model, `/model swap` to Haiku fails every turn with a 400 (`toolset_name 'computer' on a tool_use block is not the family of a declared toolset entry (no toolset entry is declared)`): swap back, or `/clear`.
 
 ### 8) Test it
 
-Each of these is meant to be copy/pasted as-is directly into the CLI assistant.
+Each prompt below is meant to be pasted into the CLI as is.
 
 a) **Build your own persistent memory of this machine — do this one first, always.**
 ```
@@ -365,8 +272,8 @@ self to re-scan and refresh the file's contents the next time you're asked to re
 rather than trusting old data blindly — so this stays accurate as things change on this
 machine over time.
 ```
-NOTE: this is the single most useful prompt on this list. Do it once, and every future
-session starts already knowing your machine instead of re-discovering it from scratch.
+NOTE: this is the most useful prompt on the list. Do it once and every later session
+starts already knowing your machine.
 
 b) **List its own slash commands.**
 ```
@@ -395,17 +302,16 @@ Open a text editor (gedit, kate, or whatever opens by default), type "Hello, I a
 controlling your mouse and keyboard," save it to my Desktop, then export that same
 file as a PDF, also saved to my Desktop.
 ```
-TIP: don't touch your own mouse and keyboard while it's doing this — fighting it for
-control just makes it harder for the AI. On Wayland the desktop may ask for approval —
-see step 3 above.
+TIP: don't touch your mouse or keyboard while it runs; fighting it for control makes
+the task harder. On Wayland the desktop may ask for approval (step 3).
 
 f) **Headless, DOM-based web browsing.**
 ```
 Go to news.ycombinator.com using DOM-based browsing — not a visible browser window —
 open the #1 story on the front page, and give me a short summary of it.
 ```
-NOTE: this is an example of it reading and surfing the web without ever opening a
-visible browser window or touching your mouse/keyboard.
+NOTE: this reads and surfs the web without opening a window or touching your mouse
+and keyboard.
 
 g) **Write a document, then convert it.**
 ```
@@ -417,31 +323,52 @@ h) What is the airspeed velocity of an unladen swallow?
 
 ### 9) Important
 
-Always make prompt (a) above your literal first message in a new session — reading
-`01_environment_notes.md` and `01_system_tool_inventory.md` first is what lets it
-actually know your machine instead of guessing, and (per that prompt's own instructions)
-triggers it to re-verify and refresh whatever's changed since the last time it looked.
+Make prompt (a) above your first message in a new session. Reading `01_environment_notes.md` and `01_system_tool_inventory.md` first is what lets it know your machine instead of guessing, and it re-verifies whatever has changed since it last looked.
 
-**If it starts returning 400s and won't stop, run `/clear`.** Two failures persist for
-the life of the process — an unanswered `tool_use` block, and a conversation past the
-context window — and both make every later turn fail the same way. The error names which
-one you hit. `/clear` recovers from either while keeping the browser page, the kernel,
-your MCP connections, and `/memories`. You may still need to Ctrl-C and restart, so keep
-requests from running the model for long unsupervised stretches — pre-building memory
-files and having Claude pause for status updates while logging progress to a task memory
-file helps a lot if a 400 does hit.
+**If it starts returning 400s and won't stop, run `/clear`.** Two failures last for the life of the process, an unanswered `tool_use` block and a conversation past the context window, and both make every later turn fail the same way. The error names which one you hit. `/clear` recovers from either while keeping the browser session, the kernel, your MCP connections and `/memories`. You may still need to Ctrl-C and restart, so avoid long unsupervised stretches: pre-building memory files and having Claude pause for status updates while logging progress to a task memory file helps a lot if a 400 does hit.
 
-**Built and tested on** Ubuntu 26.04 LTS (kernel 7.0.0), Python 3.14.4, Playwright
-1.61.0. `pyproject.toml` requires 3.11+ (the floor is `tomllib`, used by `main.py`); 3.14
-is just what it was run on. The apt commands above assume a Debian/Ubuntu system.
+**Developed on** Ubuntu 26.04 LTS (kernel 7.0.0), Python 3.14.4, Playwright 1.61.0. `pyproject.toml` requires 3.11+ (the floor is `tomllib`, used by `main.py`). The apt commands above assume a Debian/Ubuntu system.
 
 ### 10) interactive_run — log in without Claude ever seeing your passwords
 
-`interactive_run` can log you into things — sudo, ssh, whatever asks for a password —
-without your password, or your GPG vault passphrase, ever being seen by Claude. You
-need to set this up once (below). After that, whenever a command needs a credential,
-you get a list of the names you saved to pick from, so you never have to remember
-which one it is yourself either.
+`interactive_run` answers a command's prompts (sudo, ssh, git, anything that asks
+for a password) from a vault on your machine. The model supplies only the name of
+an entry; the value is decrypted locally and never appears in the conversation.
+`browser_fill` takes the same vault entries for web logins (`value_secret`). Set
+up the vault once (below). After that, whenever a command needs a credential, the
+agent asks you to pick from the names you saved.
+
+**Name check.** An entry is decrypted only if you typed its name in one of your
+own messages this session, so the model cannot pick one on its own. When it needs
+a credential it lists the real entry names and waits for you to name one. A typed
+name stays confirmed for the rest of the session and for any use. The match is on
+the whole name anywhere in your message, so a passing mention ("push it to github"
+with an entry named `github`) also confirms it. A task delegated to this instance
+over MCP never counts as your message, so a delegating client cannot unlock an entry
+on this machine.
+
+**What is and is not protected:**
+
+- The value goes from `pass show` to the child process over a pty and is never in
+  a tool call. The transcript returned to the model has the value scrubbed, along
+  with its percent, form, HTML, JSON, hex and base64 encodings. A reversed or
+  otherwise transformed copy that the child prints is not caught and would reach
+  Anthropic.
+- sudo's password feedback (asterisks) shows the password's length in the
+  transcript, not its text.
+- `send_env` takes the NAME of an environment variable and is scrubbed the same
+  way, without `pass`.
+- `browser_fill` types a confirmed entry into whatever page is open. A malicious
+  page that talks the model into filling its login form receives the real value,
+  and scrubbing does not help, because the value never returns through the model.
+  Name an entry only when you want it used, and watch which site the browser is on.
+- Only the first line of a `pass` entry is used.
+- A GPG passphrase prompt (`pinentry`) appears on your screen, not in the
+  conversation. If the key is not cached and nobody answers, `pass show` times
+  out after 30 s; unlock the key once in your own terminal first.
+- `computer` has no vault option: type a password into a native window yourself.
+- A one-time code (authenticator, SMS, email) is not a vault secret. Paste it in
+  the chat and the agent enters it at once with `browser_fill` `submit: true`.
 
 <details>
 <summary><strong>Full <code>pass</code> vault setup, walkthrough + reference charts (click to expand)</strong></summary>
@@ -542,11 +469,10 @@ Once set up, a tool call looks like:
 ```json
 {"expect": "Password for", "send_secret": "github"}
 ```
-Note: git's own prompt text literally says "Password for ..." even though what
-actually belongs there is your PAT, not a password — that's git's wording, not
-this project's; the `expect` regex just has to match what git really prints.
+Note: git's prompt says "Password for ..." although the PAT belongs there; the
+`expect` regex has to match what git actually prints.
 
-The model only ever sees the word `"github"` — never your real PAT, at any point.
+The model only ever sees the word `"github"`, never your real PAT.
 
 ```
 BELOW IS HOW YOU BLOW THE WHOLE VAULT AWAY IF YOU WANT START OVER
@@ -555,12 +481,12 @@ gpgconf --kill gpg-agent
 rm -rf ~/.password-store
 ```
 
-Example interactive run so you will know exactly how this works
-═══════════════════════════════════════════════════════════════
+Example run
+═══════════
 
 ```
 $ python main.py 
-[mcp] disabled in config.toml — no workers
+[mcp] disabled in config.toml — running with local tools only
 > please run sudo whoami
 Response:
 please select the cred name I need to use:
@@ -568,39 +494,26 @@ super_secret_admin_password
 > super_secret_admin_password
 Response:
 `sudo whoami` returned **`root`** — the `super_secret_admin_password` credential authenticated successfully.
-> could you see my password and/or did my password get sent to the LLM?
-Response:
-No — based on how this system is designed, your actual password was **not** visible to me and was **not sent to the LLM (me/Anthropic's API)**.
-
-Here's the mechanism, as documented for the `send_secret` field I used:
-
-- I only ever specified the **name** of the credential (`super_secret_admin_password`) in my tool call — never the value.
-- That name is resolved **locally**, on your machine, via `pass show super_secret_admin_password` (the `pass` password manager, which decrypts a GPG-encrypted entry on disk).
-- The decrypted value is piped directly into the `sudo` prompt by the local tool plumbing — it is substituted in *before* the interaction ever gets turned into something I read.
-- The transcript that came back to me had it redacted: you can see in the raw output I received it shows as `Password***` and then a string of backspace-masked characters (`**************\b \b...`), not the actual password text.
-
-So the flow is: **pass vault → local process → sudo's stdin**, bypassing me entirely for the secret itself. I only ever see the *name* `super_secret_admin_password` (which isn't sensitive) and a masked transcript afterward.
-
-A caveat on precision: I can tell you how the tool is documented and designed to behave, and what I observed (a redacted transcript), but I can't personally audit the underlying implementation from here to give you a cryptographic guarantee — if you want that level of assurance, that'd come from inspecting the client's source/config yourself rather than taking my word for it.
 ```
+
+The transcript the model receives shows the password as `***`.
 
 </details>
 
 ## Configuration
 
-Non-secret settings live in `config.toml`. Secrets stay in the environment — the app does
+Non-secret settings live in `config.toml`. Secrets stay in the environment; the app does
 **not** read a `.env` file.
 
-Below is a filled-in example with MCP turned on and three servers configured — a fresh
-clone instead ships with `enabled = false` and every server commented out (see Setup
-step 5):
+Below is a filled-in example with MCP turned on and three servers configured. A fresh
+clone ships with `enabled = false` and every server commented out (Setup step 5):
 
 ```toml
 [claude]
 # First entry is what a new session starts on; swap mid-session with
 # /model swap <name/index> (session-only, does not edit this file).
-# This array is a live-refreshed cache (see core/claude.py
-# refresh_claude_models), not hand-typed — shown here already populated.
+# This array is a cache refreshed by core/claude.py's refresh_claude_models,
+# not hand-typed.
 claude_models = ["claude-sonnet-5", "claude-fable-5-1", "claude-opus-5", "claude-haiku-4-5-20251001"]
 model_scan_ttl_hours = 24
 claude_models_checked_at = "2026-01-01T00:00:00+00:00"
@@ -608,16 +521,16 @@ claude_models_checked_at = "2026-01-01T00:00:00+00:00"
 [mcp]
 enabled = true              # false skips every server; local tools still work
 
-# One line per server. Add as many as you like — every reachable/launchable one
-# connects and its tools join the same list Claude sees. Two entry shapes:
+# One line per server. Every reachable one connects and its tools join the same
+# list Claude sees. Two entry shapes:
 #
 #   Streamable HTTP (a server already running elsewhere):
 #     url        the server's endpoint
 #     token_env  names the environment variable holding that server's bearer
 #                token; omit it if the server needs none
 #
-#   stdio (a local server main.py launches itself, no separate process to start
-#   by hand — it talks JSON-RPC over the subprocess's stdin/stdout):
+#   stdio (a local server main.py launches as a subprocess, JSON-RPC over
+#   stdin/stdout, no separate process to start):
 #     command    full argv as a list, e.g. ["node", "/path/to/bin.js"]
 #     env        table of extra environment variables for it, if needed
 servers = [
@@ -626,25 +539,22 @@ servers = [
   { name = "unreal", command = ["node", "$HOME/unreal-mcp/dist/bin.js"] },
 ]
 
-# Commented out by default — text_embeddings errors with a clear message
-# telling you to set this until you do. See config.toml's own [embeddings]
-# comments for the full write-up and two worked examples (a self-hosted
-# server and a paid API) — not duplicated here so this stays in sync with
-# the one copy that matters.
+# Commented out by default; text_embeddings returns an error naming `url` until it
+# is set. config.toml's own [embeddings] comments have the full write-up and two
+# worked examples (a self-hosted server and a paid API).
 # [embeddings]
 # url = "..."
 # timeout = 30
 ```
 
-A server that's unreachable (http) or fails to launch (stdio) prints a warning and is
-skipped — one being down doesn't stop the app. Tokens are never written in this file,
+A server that is unreachable (http) or fails to launch (stdio) prints a warning and is
+skipped, so one being down doesn't stop the app. Tokens are never written in this file,
 only the *name* of the variable that holds them.
 
-`~`, `$USER`, `$HOME` and `${ANY_VAR}` expand in `command`, `url`, and the *values* of
+`~`, `$USER`, `$HOME` and `${ANY_VAR}` expand in `command`, `url` and the *values* of
 `env` (`env`'s own keys are left alone), so the checked-in config doesn't have to name
-your home directory or mount point. An undefined variable is left as written rather than
-expanding to nothing, so a typo shows up as a startup warning instead of a silently wrong
-path. Absolute paths beyond that are machine-specific — edit those by hand.
+your home directory or mount point. An undefined variable is left as written, so a typo
+shows up as a startup warning. Other absolute paths are machine-specific; edit them by hand.
 
 | Variable | Purpose |
 |---|---|
@@ -660,7 +570,8 @@ path. Absolute paths beyond that are machine-specific — edit those by hand.
 | `CLAUDE_COMPUTER_MONITOR` | Monitor index, counted left to right, for `computer` on Wayland. Default: the leftmost shared one |
 | `RESEARCHMESH_DOWNLOAD_DIR` | Where browser downloads land. Default `~/Downloads` |
 | `PASSWORD_STORE_DIR` | The `pass` store whose entry names `interactive_run` and `browser_fill` offer. Default `~/.password-store` |
-| `CLAUDE_KERNEL_ENCRYPTION` | `auto` (default) encrypts the `python` kernel's sockets with CurveZMQ and falls back if it can't; `required` fails the tool instead of running unencrypted; `off` skips it |
+| `CLAUDE_KERNEL_ENCRYPTION` | `auto` (default) tries CurveZMQ-encrypted TCP, then IPC, then plaintext TCP, printing why each tier fell through; `required` fails the tool instead of running unencrypted; `off` skips encryption. Covers this machine's `python` kernel only |
+
 ## MCP, in both directions
 
 ResearchMesh is a client and a server at the same time — the two are independent, use
@@ -784,9 +695,8 @@ Generate one with the interpreter this project already requires — no `openssl`
 python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-256 bits from the OS CSPRNG. There's deliberately no `generate_token.py` here — wrapping
-one stdlib line in a file would be the same mistake as a tool wrapping a command `bash`
-could already run.
+That is 256 bits from the OS CSPRNG. There is no `generate_token.py`: a file wrapping one
+stdlib line adds nothing over running it.
 
 The value lives in an environment variable; only its *name* goes in a file. Which file
 depends on how the process starts — this is the part that catches people:
@@ -819,19 +729,16 @@ write the literal token into anything in the repo.
 <details>
 <summary><b>HTTPS and TLS</b> — for an MCP server with a self-signed or private-CA certificate</summary>
 
-A server URL may be `http://` or `https://`. TLS is verified by the `httpx2` client
-inside `mcp_client.py` (via the `mcp` package's own dependency — confirmed live,
-`mcp` requires `httpx2`, independent of whatever `anthropic` itself uses), offline —
-the CA is not contacted at connect time.
+A server URL may be `http://` or `https://`. TLS is verified by the `httpx2` client in
+`mcp_client.py` (a dependency of the `mcp` package), offline: the CA is not contacted at
+connect time.
 
-**Verification goes through OpenSSL's own default trust configuration, not a bundled
-`certifi` list.** `httpx2` builds its default SSL context with `truststore.SSLContext`
-(confirmed live: a plain `httpx2.Client()`'s transport uses `truststore._api.SSLContext`,
-not `ssl.SSLContext` directly), which on Linux defers to `ssl.get_default_verify_paths()`
-— the same mechanism `SSL_CERT_FILE`/`SSL_CERT_DIR` have always fed on this platform —
-and only falls back to a short list of common per-distro CA file locations
-(`/etc/ssl/certs/ca-certificates.crt` on Debian/Ubuntu, etc.) if OpenSSL's own compiled-in
-defaults come up empty.
+**Verification goes through OpenSSL's default trust configuration, not a bundled `certifi`
+list.** `httpx2` builds its default SSL context with `truststore.SSLContext`, which on
+Linux uses `ssl.get_default_verify_paths()`, the mechanism `SSL_CERT_FILE` and
+`SSL_CERT_DIR` feed, and falls back to a short list of common per-distro CA file
+locations (`/etc/ssl/certs/ca-certificates.crt` on Debian and Ubuntu, etc.) if OpenSSL's
+compiled-in defaults are empty. The OS trust store therefore affects this app.
 
 A publicly-signed certificate (Let's Encrypt, DigiCert, …) works with no configuration —
 the system's own CA bundle already covers it. A self-signed or internal-CA certificate
@@ -853,10 +760,6 @@ Two things that catch people out:
   intermediate is the most common "the cert is valid but it still won't connect" cause,
   and the fix is on the server side; the client only needs the root.
 
-**The OS trust store genuinely does affect this app now** — this is a real behavior
-change from the SDK's pre-1.0 `httpx`-based transport, which used a bundled `certifi`
-list regardless of the OS. Don't assume the old "OS trust store is irrelevant" framing
-still holds if you're used to it from an earlier version of this doc.
 
 </details>
 
@@ -871,6 +774,7 @@ mcp_server.py                    the other direction — serve this agent to an 
 smoke_test.py                    fast wiring checks — no API key, no network
 test_model_compat_live.py        live check of the model-compat handler (spends tokens, not in CI)
 test_midi1.py                    midi1 tests; the live part uses ALSA's Midi Through (not in CI)
+test_*.py                        behavioural tests for individual tools (local, not in CI)
 test_midi1_snapshot.json         recorded message bytes test_midi1.py compares against
 .github/workflows/ci.yml         runs ruff, mypy, smoke_test.py on push and PR
 config.toml                      model + MCP server list (no secrets; committed)
@@ -902,7 +806,7 @@ core/
   vision.py                      vision-capable image queries against your own private endpoint
   speak.py                       local text-to-speech via Piper
   listen.py                      local speech-to-text via faster-whisper
-  midi1.py                       MIDI 1.0 device I/O via mido/python-rtmidi
+  midi1.py                       MIDI 1.0 device I/O (mido messages and files, ALSA sequencer ports)
   output.py                      shared output trimming + image results
   process_reaper.py              exit-time safety net: kills real leftover child processes
   cli.py                         prompt_toolkit REPL
@@ -927,36 +831,22 @@ each in turn, lists its tools, and reports failures without starting the chat.
 </details>
 
 <details>
-<summary><b>Not required: MCP Inspector</b> — for debugging an MCP server</summary>
+<summary><b>MCP Inspector</b> — for debugging an MCP server (not needed to run the project)</summary>
 
-This project is **Python-first**, but the full-feature setup needs Node.js — the repo
-supports Node-based MCP servers in `config.toml` (e.g. `command = ["node", ...]`), and
-the browser tooling's Playwright is Node-backed in practice. So: for the full MCP +
-browser workflow, install Node.js and keep it on PATH.
-
-The [MCP Inspector](https://github.com/modelcontextprotocol/inspector) isn't required,
-and is also Node-based:
+Node.js is needed only for Node-based MCP servers declared in `config.toml` (e.g.
+`command = ["node", ...]`) and for the Inspector; Playwright for Python bundles its own
+Node driver. The [MCP Inspector](https://github.com/modelcontextprotocol/inspector) is
+Node-based:
 
 ```bash
 npx @modelcontextprotocol/inspector@latest
 ```
 
-A separate debugging aid, not the core of the project runtime.
-
 </details>
 
 ## Recommended local tools (not required — saves tokens)
 
-None of these are dependencies — nothing here breaks without them. They're suggested
-purely so Claude reaches for a fast, purpose-built local binary via `bash` instead of
-burning tokens re-implementing the same job in `python`, or reading whole files through
-the file editor just to search them. Install whichever are useful to you; skip the rest.
-Everything below is `apt`/`snap`/`flatpak`, or (for Rust) the official `rustup`
-installer — commands as written are Debian/Ubuntu-specific. On another distro, the
-tool names are the same; swap in your own package manager (`dnf`, `pacman`, `zypper`,
-etc.) yourself. `apt`/`flatpak` lines include `-y` since Claude may run these itself via
-`bash`, which has no terminal for either to prompt against; drop it if running by hand
-and you'd rather review each one first.
+None of these are dependencies; nothing here breaks without them. Claude works faster and cheaper with them: it reaches for a purpose-built local binary through `bash` instead of spending tokens re-implementing the job in `python`, or reading whole files through the editor to search them. Install whichever are useful and skip the rest. Everything below is `apt`, `snap` or `flatpak` (Rust uses the official `rustup` installer), and the commands are Debian/Ubuntu-specific; on another distro the tool names are the same, so use your own package manager. The `apt` and `flatpak` lines include `-y` because Claude may run them itself through `bash`, which has no terminal to prompt on; drop it if you want to review each one by hand.
 
 ```bash
 # --- Search, text & structured data -----------------------------------------------
@@ -981,18 +871,11 @@ sudo snap install dust           # fast, visual `du` — not in the default apt 
 sudo apt install -y duf             # nicer `df`, disk-space-by-volume at a glance
 
 # --- Archives & binary inspection ---------------------------------------------------
-# tar/gzip already exist on every Debian/Ubuntu system (Essential: yes — no install
-# possible even if you wanted to skip them), and zip/unzip/xz-utils ship as part of the
-# standard Ubuntu task. Between those four, "basically every format" is already covered
-# before you install anything — unlike Windows, which has no built-in CLI archiver at
-# all. The one real gap:
-sudo apt install -y unrar            # RAR extraction — the one common format Linux has
-                                   # nothing built in for (RAR itself is proprietary)
-# 7-Zip's own .7z format is the other thing genuinely missing — worth adding only if you
-# actually receive .7z files, not as a general-purpose necessity:
-sudo apt install -y 7zip             # NOTE: this used to be `p7zip-full` — that package no
-                                   # longer exists on current Ubuntu, replaced by the
-                                   # upstream-maintained `7zip` package (still gives `7z`)
+# tar, gzip, zip, unzip and xz-utils are already on a standard Ubuntu install, which
+# covers nearly every format. The gaps:
+sudo apt install -y unrar            # RAR extraction (RAR is proprietary; nothing built in)
+# 7-Zip's .7z format; add it only if you receive .7z files:
+sudo apt install -y 7zip             # provides `7z`; current Ubuntu has `7zip`, not `p7zip-full`
 sudo apt install -y hexyl            # colorized hex+ASCII dump, e.g. for raw SysEx/firmware bytes
 sudo apt install -y binwalk          # scans a binary for embedded file signatures/firmware images —
                                    # the closest apt-packaged equivalent to a deep file-type identifier
@@ -1010,20 +893,18 @@ sudo apt install -y httpie          # much more readable than raw curl for pokin
                                   # `httpie` command is a separate plugin-manager subcommand
 
 # --- C / C++ / Rust toolchains --------------------------------------------------------
-# gcc/g++/make (build-essential) are already installed if you followed Setup step 1 —
-# nothing missing there. clang is a genuine alternative compiler worth having on top:
+# gcc/g++/make (build-essential) come from Setup step 1. clang is an alternative compiler:
 sudo apt install -y clang            # self-contained C/C++ compiler, alternative to gcc
 sudo apt install -y cmake            # build system generator
 sudo apt install -y ninja-build      # fast build backend, pairs with cmake
-# Rust: use the official rustup installer, not a distro package — apt's rustc/cargo lag well
-# behind upstream and can't be updated independently of the whole system:
+# Rust: use the official rustup installer; apt's rustc/cargo lag well behind upstream
+# and cannot be updated separately from the system:
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # --- System diagnostics ---------------------------------------------------------------
-# strace and lsof are already on any standard Ubuntu install (both are part of the
-# `ubuntu-standard` task) — nothing to add there, they're just worth knowing about:
-# `strace <cmd>` traces a process's syscalls (first move for "why is this hanging"),
-# `lsof` shows what has a given file/port open.
+# strace and lsof ship with a standard Ubuntu install (`ubuntu-standard`); nothing to add.
+# `strace <cmd>` traces syscalls (first move for "why is this hanging"); `lsof` shows
+# what has a file or port open.
 sudo apt install -y htop            # interactive process viewer, nicer than plain `top`
 sudo apt install -y procs           # modern `ps` replacement, colorized/tree-aware output
 sudo apt install -y hyperfine       # benchmarking — compare two commands' real run time
@@ -1045,8 +926,8 @@ sudo apt install -y webp            # cwebp/dwebp — encode/decode the WebP ima
 sudo apt install -y handbrake-cli   # video transcoding with sane presets, complements ffmpeg
 sudo flatpak install -y flathub org.shotcut.Shotcut   # free timeline-based video editor, not
                                                      # reliably in the default apt repos
-# DaVinci Resolve (the other obvious free NLE) has no apt/snap/flatpak package — Blackmagic
-# only distributes it via a manual download + free account signup from their own site.
+# DaVinci Resolve (another free NLE) has no apt/snap/flatpak package; Blackmagic
+# distributes it by manual download after a free signup.
 
 # --- Documents & writing -----------------------------------------------------------------
 sudo apt install -y poppler-utils   # pdftotext/pdftoppm/pdfinfo/pdfimages — pull just the pages you
