@@ -28,7 +28,7 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 
 ## What it can do
 
-**25 local tools**, plus whatever your MCP servers expose:
+**27 local tools**, plus whatever your MCP servers expose:
 
 | Tool | For |
 |---|---|
@@ -37,6 +37,8 @@ added to **Claude Code** as one, so Claude Code can hand it the jobs it can't do
 | `web_search` · `web_fetch` | Anthropic's server-side search and page fetch |
 | `memory` | A `/memories` store that **persists across sessions** — the only state that outlives the process |
 | `computer` | Screenshots plus mouse/keyboard control of your desktop, on X11 (`pyautogui`) or Wayland (xdg-desktop-portal remote control; needs `dbus-next` and `spectacle` or `grim`) — [see below](#setup-linux) |
+| `desktop_window` | List windows, and focus, move, resize, full-screen, minimize or restore one, on a KDE desktop (KWin scripting; needs `dbus-next`), so keystrokes reach the right window |
+| `screen_find` | Find on-screen text (`text`) or button-like blocks (`buttons: true`), optionally inside a `region`, by OCR, and return click coordinates in `computer`'s space; reads text on coloured buttons that plain OCR misses (needs `tesseract`) |
 | `browser_navigate` · `_links` · `_click` · `_fill` · `_extract` · `_back` · `_tab` | [Playwright](https://playwright.dev/) DOM browsing: renders JavaScript, follows links and new tabs, fills forms, saves downloads to `~/Downloads`. `_navigate` takes `mode` (`headless` by default, `headed`, `virtual` on a hidden display, or `real` for your installed Chrome) and `profile` (keeps cookies and logins); `_tab` lists, switches and closes tabs; `_fill` takes a `pass` vault entry (`value_secret`) without the value appearing in the conversation, or `submit` to press Enter afterwards |
 | `document_convert` | LibreOffice + pandoc. Markdown → `.docx`/`.odt`/`.pdf`, or any office format to any other |
 | `python` | Persistent IPython kernel — **variables survive between calls** |
@@ -63,7 +65,7 @@ Claude chooses the tools and keeps working until it has an answer.
   systems everyone else's work goes through — a CRM/CMDB (ServiceNow, ConnectWise,
   whatever the organization already runs) as its system of record, change tickets
   opened for anything that touches production. Those are examples, not a fixed list.
-  None of that is built into this app's 25 tools directly; it's what
+  None of that is built into this app's 27 tools directly; it's what
   [MCP, in both directions](#mcp-in-both-directions) is *for* — connect it to an
   email MCP server, a Teams/Slack one, your CMDB's — and it participates the same way
   a new hire would, through the same front doors, not a side channel. That reframes
@@ -141,7 +143,7 @@ client, so a Claude subscription won't work.
 
 ```bash
 sudo apt install python3 python3-venv python3-dev build-essential \
-                 libreoffice pandoc python3-tk scrot libasound2-dev pulseaudio-utils xvfb
+                 libreoffice pandoc python3-tk scrot libasound2-dev pulseaudio-utils xvfb tesseract-ocr
 
 python3 -m venv ~/claude-chat-plus-more-tools
 source ~/claude-chat-plus-more-tools/bin/activate
@@ -152,7 +154,7 @@ pip install -r requirements.txt
 html/rtf/txt/pdf, `pandoc` handles markdown (soffice has no dependable markdown import;
 `md → pdf` goes through odt on the way). `libreoffice-writer`/`-calc`/`-impress` alone are
 enough if you don't want the whole suite. `python3-tk` and `scrot` back `computer` — see
-step 3. `xvfb` backs the browser's `virtual` mode. `libasound2-dev` backs `midi1` — see the table below for why it's a hard
+step 3. `xvfb` backs the browser's `virtual` mode. `tesseract-ocr` backs `screen_find`. `libasound2-dev` backs `midi1` — see the table below for why it's a hard
 requirement, unlike some of the packages near it that aren't. `pulseaudio-utils` backs
 `speak`/`listen` — both shell out to it directly (`paplay`/`parecord`) with no fallback,
 so unlike most per-tool packages below, a missing binary here isn't a clean "tool
@@ -174,6 +176,8 @@ its tool actually runs):
 | `sql_query` | `duckdb` |
 | `trash` | `send2trash` |
 | `computer` | `pyautogui`, `pillow` — plus `python3-tk`/`scrot` from apt on X11; `dbus-next` plus `spectacle` or `grim` on Wayland (step 3) |
+| `desktop_window` | `dbus-next` — plus KDE Plasma (KWin scripting over D-Bus) |
+| `screen_find` | `pillow` — plus `tesseract-ocr` from apt |
 | `memory` | nothing — standard library only |
 | `text_embeddings` · `vision_query` | `httpx2` — already pulled in transitively by both `anthropic` and `mcp`, listed explicitly since these modules import it directly |
 | `speak` | `piper-tts` — **not** `sudo apt install piper` (an unrelated GTK app); playback shells out to `paplay` (`pulseaudio-utils`, installed above) |
@@ -183,7 +187,7 @@ its tool actually runs):
 To drop a tool entirely, remove its module from `MODULES` in `core/local_tools.py` (e.g.
 if you don't want MIDI, also drop `libasound2-dev` from the apt line above and
 `mido[ports-rtmidi]` from `requirements.txt`) — otherwise, install everything as
-written so all 25 tools actually work.
+written so all 27 tools actually work.
 Everything in `requirements.txt` is a `>=` floor, not a pin — if a tool ever reports a
 package missing that's already listed there, your venv just predates that line; re-run
 `pip install -r requirements.txt` (no restart needed).
@@ -293,7 +297,7 @@ python main.py
 ```
 
 **MCP servers ship disabled** — the `[mcp]` block in `config.toml` ships with
-`enabled = false` and every server commented out, so a fresh clone runs on the 25 local
+`enabled = false` and every server commented out, so a fresh clone runs on the 27 local
 tools alone. The commented entries are worked examples of both entry shapes (Streamable
 HTTP and stdio) — replace the machine-specific addresses/paths with your own before
 uncommenting and setting `enabled = true`.
@@ -666,7 +670,7 @@ either, both, or neither:
    Claude Code  ──delegate──▶  ResearchMesh  ──▶  n8n / Unreal / Unity / …
    (any MCP client)            (server AND client)     (its own MCP servers)
         │                            │                          │
-     mcp_server.py            25 local tools           [mcp] in config.toml
+     mcp_server.py            27 local tools           [mcp] in config.toml
 ```
 
 **As a client**, it connects out to MCP servers and merges their tools with its own —
@@ -883,6 +887,8 @@ core/
   computer.py                    screenshots + mouse/keyboard (X11 or Wayland portal)
   wayland_input.py               xdg-desktop-portal remote control + screenshots on Wayland
   dbus_loop.py                   asyncio loop thread for D-Bus connections
+  desktop_window.py              list/focus/move windows on KDE (KWin scripting over D-Bus)
+  screen_find.py                 OCR: find on-screen text and buttons in computer coordinates
   browser.py                     Playwright DOM surfing
   browser_session.py             browser launch modes, profiles, tabs, downloads
   documents.py                   LibreOffice / pandoc conversion

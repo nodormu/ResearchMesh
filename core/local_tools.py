@@ -18,6 +18,7 @@ from core import (
     computer,
     config_edit,
     data,
+    desktop_window,
     documents,
     files,
     kernel,
@@ -25,6 +26,7 @@ from core import (
     memory,
     midi1,
     processes,
+    screen_find,
     speak,
     text_embeddings,
     vision,
@@ -35,6 +37,8 @@ MODULES = [
     learned,     # bash, text editor, web_search, web_fetch
     memory,      # cross-session memory (learned schema)
     computer,    # screen/mouse/keyboard control (client toolset, no beta header)
+    desktop_window,  # list/focus/move windows (KDE, KWin scripting)
+    screen_find,  # locate on-screen text and buttons by OCR, in computer coordinates
     browser,     # Playwright DOM surfing
     documents,   # LibreOffice / pandoc conversion
     kernel,      # stateful IPython
@@ -99,6 +103,7 @@ async def shutdown():
     for label, close in (
         ("browser", browser.shutdown),
         ("computer", computer.shutdown),
+        ("desktop_window", desktop_window.shutdown),
         ("kernel", kernel.shutdown),
         ("bash_session", bash_session.shutdown),
         ("sql_query", data.close),
