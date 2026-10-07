@@ -3,7 +3,7 @@ name = "ResearchMesh"
 version = "0.2.0"
 description = "ResearchMesh, a Linux CLI Research Client for Claude is a command-line chat client for the Anthropic API."
 readme = "README.md"
-license = "MIT"
+license = "AGPL-3.0-or-later"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"   # tomllib (used by main.py) is stdlib only from 3.11
 dependencies = [
